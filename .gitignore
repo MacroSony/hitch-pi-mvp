@@ -1,0 +1,12 @@
+node_modules/
+dist/
+coverage/
+.env
+*.local.yaml
+*.local.yml
+data/
+tmp/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.log
