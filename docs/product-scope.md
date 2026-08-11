@@ -2,127 +2,142 @@
 
 ## Outcome
 
-One Linux service lets a small set of statically configured people operate Pi
+One Linux service lets a small statically configured user set operate Pi
 coding-agent sessions through private Telegram and WeChat conversations.
 
-For each enrolled person, Hitch must provide:
+For each enrolled person, Hitch provides:
 
-- a stable Hitch identity derived from trusted channel metadata;
-- one configured, canonical workspace that no other user can mount;
-- named Pi sessions with durable conversation continuity;
-- text, image, and ordinary-file input;
-- text, image, and ordinary-file output;
-- bounded queueing, status, cancellation, and session selection;
-- a fresh Bubblewrap process for every Turn;
-- shell and file tools constrained by the sandbox rather than by prompt rules;
-- provider access through a host broker without exposing provider credentials;
+- identity derived from exact authenticated channel metadata;
+- one canonical private workspace;
+- named Pi sessions with durable context and per-session model selection;
+- every provider/model currently registered and authenticated in the
+  operator-managed Pi profile, subject to an optional static allowlist;
+- pinned operator extensions, extension commands, and IM-compatible extension
+  interactions;
+- text, image, and ordinary-file input/output;
+- bounded queueing, status, cancellation, recovery, and session selection;
+- model-facing shell/file tools routed through an OS sandbox extension; and
 - useful failure reporting and restart behavior.
 
-The target is an attended private MVP, not a public service.
+This is an attended private MVP, not a public service.
 
 ## Supported user experience
 
 Private messages are accepted from configured identities only. Group chats,
 channels, shared sessions, and forwarded identity claims are rejected.
 
-Commands:
-
 | Command | Behavior |
 | --- | --- |
-| `!new [name]` | Create and select a Pi session in the user's fixed workspace |
+| `!new [name]` | Create and select a Pi session in the user's workspace |
 | `!sessions` | List the user's sessions with stable short selectors |
-| `!switch <id-or-name>` | Select one owned session for this private endpoint |
-| `!status` | Show selected session, queue position, and active Turn state |
-| `!abort` | Cancel the active Turn and kill its complete sandbox process tree |
-| `!stop` | Atomically stop the selected session and cancel its active and queued Turns |
-| `!recover` | Replace a quarantined session with a fresh selected Pi session; never replay its unknown Turn or reuse its ambiguous transcript |
-| `!send <relative-path>` | Snapshot and send a workspace file explicitly |
+| `!switch <id-or-name>` | Select one owned session for this endpoint |
+| `!status` | Show session, model, queue, Turn, and sandbox state |
+| `!abort` | Cancel the user's active Turn and complete sandbox process tree |
+| `!stop` | Stop the session and atomically cancel its active/queued Turns |
+| `!recover` | Replace a quarantined session without replaying unknown work |
+| `!models [filter]` | List allowed models reported by the current Pi profile |
+| `!model <provider>/<model>` | Select an available model for this session |
+| `!thinking <level>` | Select a thinking level supported by the model |
+| `!commands` | List enabled extension commands |
+| `!send <relative-path>` | Snapshot and send a workspace file |
 
-All other non-command text submits a Turn to the selected session. If no
-session exists, Hitch creates one automatically. Unknown `!` commands are
-rejected rather than forwarded to Pi.
+Enabled `/extension-command` messages are passed to Pi. Extension dialogs are
+represented as bounded, expiring reply interactions. Text notifications and
+status are delivered or coalesced; unsupported terminal-only UI is rejected
+clearly.
 
-At most one Turn runs per user. Up to three additional Turns may wait in a
-per-user FIFO. A duplicated channel message resolves to the original Turn and
-never starts a second agent execution. `!abort` operates on the authenticated
-user's active Turn even when it was submitted from another configured endpoint.
-Submitting the same platform idempotency key with different normalized content
-is rejected as a conflict and audited without the content.
+All other non-command text submits a Turn. If no session exists, Hitch creates
+one. Unknown `!` commands are rejected rather than passed to Pi.
+
+At most one Turn runs per user and three wait in a FIFO. Duplicate platform
+messages resolve to the original Turn. `!abort` acts on that user's active Turn
+even from another configured endpoint. Reusing an idempotency key with
+different normalized content is rejected and audited without content.
+
+## Provider and extension definition
+
+Hitch does not implement provider protocols. Pi runs as a trusted controller
+using a host-private operator profile and its native provider/auth machinery.
+Changes to authentication, provider extensions, or model catalogs are made by
+the operator outside chat and published after restart.
+
+Extension support means:
+
+- one mandatory pinned Hitch sandbox/media extension;
+- optional pinned operator extensions, globally or per configured user;
+- provider registration, tools, commands, events, system-prompt hooks, and RPC
+  extension UI supported through Pi's normal extension API; and
+- package/version/integrity or source digest recorded at startup.
+
+Operator extensions run with Pi controller authority and can access provider
+credentials. They are trusted installed code, not a user sandbox. Workspace
+`.pi/extensions`, chat installation, arbitrary Git/npm sources, and unreviewed
+user code are excluded from this MVP.
 
 ## Media definition
 
-"Full media" for this MVP means transport and preservation, not media
-understanding:
+“Full media” means transport and preservation, not semantic processing:
 
-- inbound JPEG, PNG, GIF, and WebP images are passed to Pi as native images;
-- inbound ordinary documents are mounted read-only under `/inbox` and
-  referenced in the prompt;
-- outbound images are sent with the channel's native image operation;
-- outbound ordinary files are sent with the channel's native document/file
-  operation;
-- the user can publish a workspace-relative file with `!send`;
-- Pi receives a reviewed `hitch_publish` tool for explicit artifact delivery;
-- every inbound and outbound object has byte, count, filename, and MIME bounds.
+- JPEG, PNG, GIF, and WebP input is passed to Pi as native images;
+- ordinary documents are mounted read-only under `/inbox` and named in the
+  prompt;
+- images and ordinary files use native channel delivery;
+- users can publish with `!send` and Pi with `hitch_publish`; and
+- all objects have compiled byte, count, name, MIME, image, and quota bounds.
 
-Compiled ceilings and retention are fixed in `docs/architecture.md`; operators
-may lower them but cannot silently raise them through configuration.
-
-Audio and video may travel as ordinary files when the channel permits it.
-Transcription, OCR, image conversion, video processing, and semantic audio or
-video input are not MVP features.
+Audio/video may travel as opaque ordinary files where a channel allows it.
+Transcription, OCR, conversion, and semantic audio/video input are not MVP
+features.
 
 ## Fixed product choices
 
-- Linux only.
-- Node.js 24 and TypeScript.
-- SQLite in one configured private data directory.
+- Linux, Node.js 24, TypeScript, and SQLite.
 - Telegram long polling and the existing WeChat iLink client.
-- One Pi version compatibility range selected and tested by the repository.
-- Exact runtime and provider inputs pinned by `docs/phase-0-inputs.md`.
-- One operator-selected provider, model, and reasoning setting at a time.
-- Static YAML user/channel/workspace configuration; changes require restart.
-- Private conversations only.
-- One workspace per user.
-- Fresh sandbox process per Turn with private resumable Pi session storage.
-- Agent networking denied except for the local broker adapter.
-- No automatic retry after a provider request may have started.
+- One pinned Pi compatibility version and operator-managed Pi profile.
+- All authenticated/registered Pi providers, optionally statically filtered.
+- Model and reasoning choice persisted per session.
+- Static users, endpoints, workspaces, and extension profiles; restart to
+  publish changes.
+- Private conversations and one workspace per user.
+- Fresh Pi controller and sandbox backend per Turn, with resumable private Pi
+  session storage.
+- Pi/controller extensions are trusted; model tools and generated code are
+  sandboxed.
+- No automatic replay of an uncertain agent Turn.
 
 ## Explicit non-goals
 
-- Public Internet API, browser UI, mTLS client CLI, OIDC, signup, invitations,
-  or remote administration.
-- Groups, teams, session sharing, delegated roles, or cross-user context.
-- Generic agent drivers, multiple providers, model discovery, model switching,
-  provider fallback, or arbitrary user provider configuration.
-- Dynamic workspaces, arbitrary host mounts, user extensions, packages, MCP
-  servers, schedules, triggers, or unattended work.
-- Interactive approvals. The reviewed sandbox policy is the approval boundary.
-- Exactly-once chat delivery. Delivery is retryable and may duplicate after an
-  ambiguous platform response; agent execution must not duplicate.
-- High availability, horizontal scaling, billing, or configurable quota UI.
-- Migration of the original Hitch database.
+- Public API/UI, signup, invitations, OIDC, or remote administration.
+- Groups, teams, shared sessions, delegated roles, or cross-user context.
+- Hitch-authored provider protocols, provider fallback policy, billing, or
+  per-user provider credentials.
+- Provider login/logout or extension/package installation through IM.
+- Untrusted or workspace-local Pi extensions.
+- Dynamic workspaces, arbitrary host mounts, schedules, triggers, or unattended
+  automation.
+- Exactly-once chat delivery, high availability, horizontal scaling, or old
+  database migration.
 
 ## MVP completion gate
 
-The MVP is complete when two users can independently use Telegram and WeChat
-against one service and the acceptance suite proves:
+Two users must independently use Telegram and WeChat while acceptance proves:
 
-1. channel identity cannot select a different Hitch user;
-2. neither user can list, select, prompt, cancel, mount, read, mutate, publish,
-   or receive the other user's sessions, workspace, inbox, artifacts, or Pi
-   state;
-3. Pi retains conversation context across fresh sandbox processes for the same
-   session;
-4. shell and file tools work inside the workspace while host paths, other user
-   paths, Hitch state, and external networking remain inaccessible;
-5. no provider credential appears in the worker environment, filesystem,
-   arguments, RPC frames, tool results, or logs;
-6. one scoped broker token authorizes only its Turn and fixed provider/model,
-   and an uncertain request is not replayed automatically;
-7. cancellation and timeout remove the complete worker process tree;
-8. text, image, and ordinary-file input and output work on both channels;
-9. service restart preserves sessions and queued Turns, marks interrupted work
-   `unknown`, quarantines its session until explicit replacement, and does not
-   rerun it; and
-10. configuration, dependency, and operator documentation matches the tested
-    deployment.
+1. channel identity cannot select another Hitch user;
+2. neither user can access another user's sessions, workspace, inbox,
+   artifacts, Pi state, cancellation, or delivery;
+3. Pi context and model choice survive fresh controller processes;
+4. Pi enumerates and selects allowed registered/authenticated providers and at
+   least an API-key and OAuth auth family pass live smoke when available;
+5. pinned operator extension commands and IM-compatible UI work;
+6. no workspace extension loads and every standard Pi filesystem/shell tool or
+   direct shell path enters the sandbox with no fail-open host path; any
+   operator-extension host tool is explicitly declared and trusted;
+7. provider/channel credentials never appear in the sandbox guest, workspace,
+   inbox, tool arguments/results, channel output, Hitch database, or logs;
+8. cancellation/timeout removes the sandbox process tree and ambiguous Pi
+   close quarantines the session;
+9. text, image, and ordinary-file input/output work on both channels;
+10. restart preserves queued work, never replays an unknown Turn, and keeps
+    delivery ownership; and
+11. configuration, dependency, extension, auth-profile, and deployment
+    documentation match the tested commit.

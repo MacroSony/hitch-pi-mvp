@@ -2,28 +2,31 @@
 
 Date: 2026-08-11
 
-An independent Sol review first returned `REVISE`. The plan was updated to pin
-runtime inputs; separate deterministic and live gates; disable Pi discovery;
-quarantine ambiguous transcripts; define bounded multi-request broker
-semantics; harden identity, HTTP, media, configuration, quotas, and retention;
-and replace the optimistic schedule.
+Sol reviewed the original whole-Pi-sandbox plus single-provider-broker plan. It
+first returned `REVISE`; after its security, recovery, bounds, testing, and
+schedule findings were incorporated, it returned `GO-WITH-CONDITION`.
 
-The second review returned `GO-WITH-CONDITION` for deterministic Phase 0 work.
-Its remaining concrete wording issues were then incorporated: the adapter now
-accepts only an origin-form local path, absent output ceilings are injected,
-forced cancellation quarantines ambiguous Pi state, generated Pi config is
-ephemeral/read-only, and the missing media limits are compiled maxima.
+The retained findings remain requirements in the revised plan:
 
-## Open condition
+- exact Pi/runtime/dependency pinning;
+- exact Telegram/WeChat identity tuples;
+- fail-closed tool/sandbox startup and forced-close quarantine;
+- streaming media intake and descriptor-based publication;
+- immutable configuration, quotas, retention, and sanitized failures;
+- deterministic CI separated from live acceptance; and
+- a committed planning baseline before implementation.
 
-The operator must resolve every provider field in `phase-0-inputs.md`. Until
-then, Luna may build only provider-neutral deterministic Phase 0 evidence and
-must not:
+## Superseding architecture change
 
-- finalize the provider model/configuration or request inspector;
-- choose the raw gateway over the native-sidecar fallback;
-- claim live-provider compatibility or Phase 0 completion; or
-- begin Phase 1 production scaffolding.
+The operator subsequently prioritized all Pi-authenticated providers and
+first-class extension support. `docs/runtime-extension-architecture.md`
+therefore supersedes the reviewed provider broker:
 
-After the provider values are committed, the deterministic provider suite and
-the opt-in live-provider acceptance must both pass before Phase 0 is complete.
+- Pi is now the trusted native provider/controller process;
+- approved operator extensions share that trusted credential boundary; and
+- one mandatory extension routes model tools to Bubblewrap or Gondolin.
+
+The earlier Sol verdict does not constitute independent approval of this new
+trust boundary. Phase 0 is intentionally a proof gate. A fresh independent
+review is recommended before promoting Phase 0 code into the production
+foundation.

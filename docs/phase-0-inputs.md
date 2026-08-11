@@ -1,117 +1,122 @@
 # Phase 0 execution contract
 
-This file pins the inputs that Phase 0 must use. Evidence produced with a
-different input is not evidence for the MVP until this file is deliberately
-updated and the affected checks are rerun.
+Evidence produced with different inputs is not MVP evidence until this file is
+updated and affected checks rerun.
 
-## Pinned host and runtime baseline
+## Pinned baseline
 
 | Input | Phase 0 value |
 | --- | --- |
-| Host architecture | Linux x86_64 |
-| Observed kernel | `7.0.0-28-generic` |
-| Node.js | `24.14.0` |
-| npm | `11.9.0` |
+| Host | Linux x86_64, kernel `7.0.0-28-generic` |
+| Node.js / npm | `24.14.0` / `11.9.0` |
 | Bubblewrap | `0.9.0` |
 | systemd | `255` (`255.4-1ubuntu8.17`) |
-| Pi package | `@earendil-works/pi-coding-agent@0.84.1` |
-| Pi tarball integrity | `sha512-ncAqFrG+iybuPGOhMiZoEHkEzTpJgz3guYD32pD+M7ucc0WeHmauP6wa7qwP8V/KWvsZDVNa5XGsdZ7fkC7w7A==` |
+| Pi | `@earendil-works/pi-coding-agent@0.84.1` |
+| Pi integrity | `sha512-ncAqFrG+iybuPGOhMiZoEHkEzTpJgz3guYD32pD+M7ucc0WeHmauP6wa7qwP8V/KWvsZDVNa5XGsdZ7fkC7w7A==` |
+| Gondolin candidate | `@earendil-works/gondolin@0.12.0` |
+| Gondolin integrity | `sha512-BXbvzQKb5QmxY5NtthRDONJTu7+IDKbzqWGrJyyNXMP7N681Tx0Q9TK8pK1ba8nUvYQTipNJyGZOsJfYiZll1A==` |
+| QEMU | not currently installed; required only for Gondolin evaluation |
 
-Production dependencies must be installed from a committed npm lockfile. The
-acceptance evidence records the exact kernel, distribution, Bubblewrap,
-systemd, Node, npm, Pi package, and lockfile hash actually used. A different
-minor or patch version is an explicit compatibility test, not an implicit
+Production installs from a committed lockfile. Evidence records exact kernel,
+distribution, runtime, package, extension, sandbox asset, QEMU (if used), and
+lockfile hashes. A version change is a compatibility test, not an implicit
 upgrade.
 
-The deployment host must support user, PID, mount, and network namespaces;
-cgroup-v2 systemd scopes; `openat2`; Unix sockets; and enforceable filesystem
-project quotas for every workspace and the service data root. Startup fails
-closed when a required facility or configured quota cannot be verified.
+The Bubblewrap path requires namespaces, cgroup-v2 systemd scopes, `openat2`,
+Unix sockets, and project quotas. A Gondolin path additionally pins QEMU,
+kernel/initramfs/rootfs assets, image checksums, VFS/network policy, and external
+resource governance.
 
-## Pi process contract
+## Pi controller contract
 
-Hitch launches Pi with an allowlisted environment built from an empty base.
-The exact executable path is resolved and attested at service startup. The
-worker receives only locale/runtime variables, its private paths, and the
-Turn-scoped broker token. In particular, all upper- and lower-case HTTP proxy
-variables and all known provider credential variables are absent.
+The controller is trusted and uses a dedicated operator-managed Pi profile,
+not a user's home profile. Provider login happens out of band with normal Pi
+auth and the profile is never visible to the sandbox.
 
-The launch includes the equivalent of:
+The initial CLI proof is equivalent to:
 
 ```text
-PI_CODING_AGENT_DIR=/runtime/pi-config
-PI_CODING_AGENT_SESSION_DIR=/session/pi-sessions
+PI_CODING_AGENT_DIR=/srv/hitch/pi-profile
+PI_CODING_AGENT_SESSION_DIR=/srv/hitch/users/<user>/pi-sessions
 PI_OFFLINE=1
 PI_TELEMETRY=0
 
 pi --mode rpc
-   --provider hitch-broker
-   --model hitch-broker/<fixed-model-id>
-   --thinking <fixed-reasoning>
-   --api-key <turn-scoped-token>
    --session-id <stable-random-session-id>
-   --session-dir /session/pi-sessions
+   --session-dir /srv/hitch/users/<user>/pi-sessions
    --offline
    --no-extensions
+   --extension /opt/hitch/extensions/hitch-sandbox.mjs
+   --extension /opt/hitch/extensions/<approved-operator-extension>.mjs
+   --no-builtin-tools
+   --tools read,write,edit,ls,grep,find,bash,hitch_publish
    --no-skills
    --no-prompt-templates
    --no-themes
    --no-context-files
    --no-approve
-   --tools read,write,edit,ls,grep,find,bash,hitch_publish
-   --extension /runtime/hitch-tools.mjs
 ```
 
-`/runtime/pi-config` is generated into a fresh host-private Turn runtime,
-attested, then mounted read-only. It contains only the fixed custom-provider
-definition and required Pi settings and is discarded after the Turn. It must
-not be copied from a user's home or a global Pi directory. Only
-`/session/pi-sessions` is persistent and writable. The explicit extension is
-Hitch-owned, versioned with the repository, mounted read-only, and is the only
-extension Pi may load. Workspace files cannot affect Pi configuration, tools,
-context, prompts, themes, or extensions. Phase 0 tests malicious workspace
-copies of all known Pi discovery filenames. If Pi 0.84.1 cannot operate with
-read-only generated config, stop and document the exact write before changing
-the boundary; never make persistent configuration model-writable.
+Explicit extensions still load with `--no-extensions`; all paths are
+operator-owned, read-only, and digest-attested. The mandatory extension must
+successfully register every listed tool and direct user/RPC bash routing before
+Hitch submits a prompt. Phase 0 must prove the exact 0.84.1 behavior rather
+than assume registration order or tool replacement semantics.
 
-If Pi needs an additional environment variable or generated file, Phase 0 must
-record its exact name, contents classification, permissions, and justification
-before it is allowed.
+The environment is allowlisted from an empty base. Provider credentials and
+provider-scoped environment values should be stored in the dedicated Pi
+profile rather than inherited from Hitch. If a provider cannot operate that
+way, its exact required environment names are added to the trusted controller
+only and documented; they never enter sandbox operations.
 
-## Provider decision — required before live Phase 0 acceptance
+The CLI proof may be replaced with Pi's SDK only if it materially improves
+explicit ResourceLoader control and retains the tested RPC/event contract.
 
-The existing project does not pin a real provider/model; selecting one based on
-whatever local Pi credential happens to be available would make the proof
-non-reproducible. The operator must set all fields below before the live gate:
+## Provider/model proof
 
-| Input | Required value |
-| --- | --- |
-| Provider/API variant | **UNRESOLVED** |
-| Exact upstream origin and path | **UNRESOLVED** |
-| Exact model ID | **UNRESOLVED** |
-| Reasoning setting | **UNRESOLVED** |
-| Maximum output tokens | **UNRESOLVED** |
-| Host credential environment-variable name | **UNRESOLVED** |
-| Provider SDK retry-disable setting | **UNRESOLVED** |
+There is no single provider selection gate. Phase 0 queries native Pi for:
 
-The first choice should be an API-key provider that Pi can represent as a
-custom OpenAI-compatible provider. OAuth or a provider requiring native
-library semantics is allowed only by revising Phase 0 to use the concrete
-Pi-native sidecar path and revising the estimate.
+- registered providers and models;
+- authenticated/available status without exposing credential material;
+- model input/reasoning capabilities; and
+- extension-registered providers.
+
+The result is a content-free startup snapshot and digest. Deterministic tests
+use a test provider extension. Live acceptance selects available native models
+through Pi RPC and exercises at least one API-key provider and one OAuth
+provider when the operator profile has them. Providers not called live remain
+available but are reported as inventory-only evidence until first use.
+
+Phase 0 also races two isolated Pi processes against a disposable auth-profile
+fixture and records file-lock/atomic-refresh behavior. Production remains at
+one global active provider-owning controller unless real OAuth refresh and
+failure injection prove a safe higher concurrency strategy.
+
+Users cannot authenticate providers through IM. Hitch can statically filter
+the Pi catalog but never add a provider/model that Pi did not report.
+
+## Sandbox candidates
+
+The Bubblewrap candidate must reuse only bounded reviewed launcher/path-helper
+code from `../hitch-hub` and live entirely behind `hitch-sandbox`.
+
+The Gondolin candidate uses the Pi 0.84.1 example as reference, not as an
+unreviewed production dependency. Evaluation includes image supply chain, QEMU
+arguments, RealFSProvider path behavior, network defaults, systemd resource
+limits, cancellation, startup cost, and asset cleanup. Its own documentation
+states that DoS governance is incomplete, so Hitch must supply it if selected.
+
+The `@anthropic-ai/sandbox-runtime` Pi example is excluded because it only
+replaces bash and permits a local-bash path when sandboxing is disabled or not
+initialized.
 
 ## Deterministic and live evidence
 
-Phase 0 has two separate gates:
+`npm test` is credential-free and proves RPC framing, model snapshot/selection,
+extension loading/UI, complete tool replacement, sandbox denial, cancellation,
+session recovery, and fake channel identities.
 
-1. `npm test` uses a deterministic local upstream fixture and proves exact
-   request parsing, multi-request tool loops, streaming, cancellation, image
-   projection, failures, and sandbox denial without credentials or Internet.
-2. `npm run acceptance:live-provider` is opt-in and exercises the exact
-   provider/model above. It emits a content-free evidence manifest containing
-   commit, lockfile, host/runtime versions, configuration digest, test names,
-   timestamps, and sanitized outcomes.
-
-Both gates are mandatory before Phase 0 is complete. Live credentials,
-prompts, response content, and provider headers are never written to the
-manifest. Telegram and WeChat have equivalent separately named live acceptance
-commands; they are not part of the normal deterministic test command.
+Separately named opt-in commands cover live Pi providers, Telegram, WeChat,
+media, and the selected sandbox backend. Each emits a content-free manifest
+with commit, lockfile, Pi profile/catalog digest, extension manifest, sandbox
+artifacts, host versions, test names, timestamps, and sanitized outcomes.
