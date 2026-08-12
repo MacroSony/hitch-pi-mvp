@@ -2,6 +2,7 @@ dist/
 node_modules/
 spikes/
 packages/hitch-sandbox-extension/
+systemd/
 docs/
 *.md
 *.log

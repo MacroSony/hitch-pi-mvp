@@ -22,10 +22,12 @@ runtime and does not inherit its generalized v2 domain model.
 - [Sol plan-review record](docs/plan-review.md)
 - [Implementation plan](PLAN.md)
 - [Luna implementation handoff](LUNA_HANDOFF.md)
+- [Operator install, recovery, and reset guide](docs/operator-guide.md)
+- [MVP acceptance record](docs/mvp-acceptance.md)
 
-The durable foundation, Telegram text/media path, native Pi/Bubblewrap
-runtime, and bounded artifact outbox are implemented. Earlier Phase 0 evidence
-under `spikes/` found four real
+The durable foundation, Telegram and WeChat private-peer paths, native
+Pi/Bubblewrap runtime, bounded media, and artifact outbox are implemented.
+Earlier Phase 0 evidence under `spikes/` found four real
 hardening gaps. The trusted-personal MVP reset accepts two as attended
 operational risks, excludes the two unsupported operator extensions, and moves
 live provider smoke to dogfooding. The smaller sequence is in
@@ -47,17 +49,21 @@ npm start -- --config /absolute/path/config.json
 
 Copy `config.example.json`, create each configured workspace, Pi profile, and
 WeChat state directory with mode `0700`, and keep bot tokens only in the named
-environment variables. The current command validates and publishes the static
-configuration, initializes SQLite, reports content-free counts, and exits; the
-Telegram worker can now be exercised with the deterministic fake runtime:
+environment variables. The command without a mode validates and publishes the
+static configuration, initializes SQLite, reports content-free counts, and
+exits. The complete operator path, including attended authentication and the
+systemd user service, is in [the operator guide](docs/operator-guide.md).
+
+The real channel workers can be exercised with the deterministic fake runtime:
 
 ```text
 HITCH_TELEGRAM_PRIMARY_TOKEN=... \
-  npm start -- --config /absolute/path/config.json --fake-telegram
+  npm start -- --config /absolute/path/config.json --fake-channels
 ```
 
-This mode uses the real Telegram Bot API but returns clearly labeled fake Pi
-responses.
+This mode uses the real configured Telegram/WeChat accounts and advances their
+cursors, but returns clearly labeled fake Pi responses. Use disposable channel
+accounts for it.
 
 ## Native Pi dogfood
 
@@ -77,7 +83,7 @@ After `npm run build`, start the real vertical slice explicitly:
 
 ```text
 HITCH_TELEGRAM_PRIMARY_TOKEN=... \
-  npm start -- --config /absolute/path/config.json --telegram
+  npm start -- --config /absolute/path/config.json --channels
 ```
 
 Startup pins and checks Pi `0.84.1` plus its dependency closure, validates the
@@ -88,12 +94,17 @@ It exits if no authenticated model is available. `!models`, `!model`, and
 images/files run a native Pi Turn. JPEG, PNG, GIF, and WebP become native Pi
 image blocks, while other files are exposed read-only under `/inbox`.
 `!send <relative-path>` and Pi's `hitch_publish` create immutable bounded
-snapshots and deliver them through Telegram's native file methods.
+snapshots and deliver them through the originating channel's native file
+methods. Authenticate a configured WeChat account with:
+
+```text
+npm run wechat:login -- --state-dir /absolute/private/wechat-state
+```
 
 Real provider and Telegram traffic is always opt-in and never runs in normal
 CI. The host-only sandbox check can be repeated with:
 
 ```text
-HITCH_RUN_SANDBOX_TESTS=1 \
-  node --disable-warning=ExperimentalWarning --test dist/test/native-runtime.test.js
+npm run acceptance:host
+npm run acceptance:service
 ```

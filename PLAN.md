@@ -111,7 +111,7 @@ directions without cross-user paths or credentials entering the sandbox.
 Checkpoint: the same service supports private Telegram and WeChat use for the
 small configured user set.
 
-## Phase 6 — MVP acceptance and operator guide (current)
+## Phase 6 — MVP acceptance and operator guide (completed)
 
 - Run deterministic isolation, duplicate, restart, abort, timeout, media-bound,
   and sandbox fail-closed tests.

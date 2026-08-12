@@ -47,6 +47,14 @@ async function main(): Promise<void> {
   process.stdout.write(
     `WeChat login saved for account ${result.accountId} in the private state directory.\n`,
   );
+  if (
+    result.userId !== undefined &&
+    Buffer.byteLength(result.userId, "utf8") <= 128 &&
+    !/[\u0000-\u001f\u007f]/u.test(result.userId)
+  )
+    process.stdout.write(
+      `Use scanner private peer id ${result.userId} in config.users[].wechat.userId.\n`,
+    );
 }
 
 main().catch((error: unknown) => {

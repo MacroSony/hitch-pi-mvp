@@ -416,6 +416,46 @@ test("abort cancels the active fake Turn without quarantining its session", asyn
   environment.foundation.close();
 });
 
+test("a timed-out Turn is terminal and quarantines rather than replaying", async () => {
+  const environment = setup();
+  const app = new HitchApplication(
+    environment.store,
+    new FakeAgentRuntime(() => ({
+      outcome: "timed-out",
+      text: "partial output must not escape",
+      sessionReusable: false,
+    })),
+  );
+  app.start();
+  assert.equal(
+    app.receiveTelegram("primary", update(35, "101", "slow prompt")).accepted,
+    true,
+  );
+  await app.drain();
+  const database = environment.foundation.database.connection;
+  const turn = database
+    .prepare("SELECT state, outcome, result_text FROM turns WHERE user_id = ?")
+    .get("alice") as {
+    state: string;
+    outcome: string;
+    result_text: string;
+  };
+  const session = database
+    .prepare("SELECT state FROM sessions WHERE user_id = ?")
+    .get("alice") as { state: string };
+  assert.deepEqual(
+    { ...turn },
+    {
+      state: "terminal",
+      outcome: "timed-out",
+      result_text: "agent-failed: the model Turn timed out.",
+    },
+  );
+  assert.equal(session.state, "quarantined");
+  assert.equal(environment.store.hasDispatchableTurn("alice"), false);
+  environment.foundation.close();
+});
+
 test("restart quarantines running work and never dispatches its queued successor", async () => {
   const environment = setup();
   const endpoint = environment.store.resolveTelegramEndpoint(

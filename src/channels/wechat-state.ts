@@ -170,10 +170,21 @@ export function writeWeChatCredentials(
   credentials: WeChatCredentials,
 ): void {
   privateDirectory(stateDirectory);
-  atomicJson(join(stateDirectory, "credentials.json"), credentials);
+  const validated: WeChatCredentials = {
+    schemaVersion: 1,
+    authenticatedAccountId: text(
+      credentials.authenticatedAccountId,
+      "authenticated account id",
+      128,
+    ),
+    token: text(credentials.token, "bot token", 8192),
+    baseUrl: endpoint(credentials.baseUrl, "API URL"),
+    cdnBaseUrl: endpoint(credentials.cdnBaseUrl, "CDN URL"),
+  };
+  atomicJson(join(stateDirectory, "credentials.json"), validated);
   atomicJson(join(stateDirectory, "runtime.json"), {
     schemaVersion: 1,
-    authenticatedAccountId: credentials.authenticatedAccountId,
+    authenticatedAccountId: validated.authenticatedAccountId,
     cursor: "",
     contexts: {},
   } satisfies RuntimeState);

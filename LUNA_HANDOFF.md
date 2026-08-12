@@ -1,8 +1,9 @@
 # Implementation handoff
 
-Status: the trusted-personal reset, durable foundation, Telegram text, native
-Pi/Bubblewrap, bounded media, and WeChat private-peer slices are implemented
-through Phase 5. Phase 6 MVP acceptance and operator guidance is current.
+Status: all six trusted-personal MVP phases are implemented and independently
+reviewed. Deterministic, direct-host, and service-constrained acceptance pass;
+credentialed provider/Telegram/WeChat checks remain honestly opt-in for the
+operator's attended concept test.
 
 ## Objective
 
@@ -21,17 +22,19 @@ marketplace, configuration graph, or public multi-tenant service.
 
 ## Current assignment
 
-Complete only Phase 6 from `PLAN.md` before the next reviewed commit:
+The planned MVP implementation is complete. The next action is operator-led
+setup and attended concept acceptance from `docs/operator-guide.md`:
 
-- run and record the deterministic isolation, restart, abort, timeout, media,
-  and sandbox fail-closed acceptance set;
-- document install, Pi and WeChat login, static configuration, systemd service,
-  backup/recovery, logs, limitations, and complete uninstall/reset steps;
-- keep channel/provider acceptance credentialed and opt-in, and report any
-  unavailable live integration honestly; and
-- fix only release-blocking defects, leaving post-MVP hardening deferred.
+- install the pinned host prerequisites and run all three acceptance commands;
+- authenticate one Pi provider and at least one intended private channel;
+- enroll exact Telegram/WeChat private identities and start the supplied user
+  service; and
+- execute the short attended checklist, recording only integrations actually
+  exercised.
 
-Do not add generalized connector abstractions or broaden the release scope.
+Do not expand the codebase before this concept test demonstrates a concrete
+need. The known post-MVP items remain deferred in `PLAN.md` and the operator
+guide.
 
 ## Review and commit rule
 

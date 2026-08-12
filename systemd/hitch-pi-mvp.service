@@ -1,0 +1,31 @@
+[Unit]
+Description=Hitch Pi trusted-personal MVP
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/hitch-pi-mvp
+Environment=NODE_ENV=production
+EnvironmentFile=-/srv/hitch/service.env
+# Install Node 24 at this system-wide path, or edit this absolute path before
+# enabling the copied unit. Do not point the service at a user's NVM tree.
+ExecStart=/usr/bin/env /usr/local/bin/node --disable-warning=ExperimentalWarning /opt/hitch-pi-mvp/dist/src/main.js --config /srv/hitch/config.json --channels
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+KillMode=mixed
+UMask=0077
+
+# The mandatory inner Bubblewrap boundary owns mount/user namespaces for model
+# tools. Outer systemd mount-namespace directives prevent that nested sandbox
+# on the pinned host, so the dedicated trusted controller does not set them.
+NoNewPrivileges=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+LimitNOFILE=4096
+TasksMax=256
+MemoryMax=2G
+
+[Install]
+WantedBy=default.target
