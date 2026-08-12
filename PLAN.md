@@ -97,7 +97,7 @@ with shell/file operations confined to the configured workspace sandbox.
 Checkpoint: Telegram text, common images, and ordinary files work in both
 directions without cross-user paths or credentials entering the sandbox.
 
-## Phase 5 — WeChat private-peer support (current)
+## Phase 5 — WeChat private-peer support (completed)
 
 - Use the pinned WeChat client only at its raw API boundary; Hitch owns cursor
   persistence and admission order.
@@ -111,7 +111,7 @@ directions without cross-user paths or credentials entering the sandbox.
 Checkpoint: the same service supports private Telegram and WeChat use for the
 small configured user set.
 
-## Phase 6 — MVP acceptance and operator guide (3–6 agent-hours)
+## Phase 6 — MVP acceptance and operator guide (current)
 
 - Run deterministic isolation, duplicate, restart, abort, timeout, media-bound,
   and sandbox fail-closed tests.

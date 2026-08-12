@@ -13,7 +13,8 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "check": "npm run format:check && npm run typecheck && npm test",
-    "start": "node --disable-warning=ExperimentalWarning dist/src/main.js"
+    "start": "node --disable-warning=ExperimentalWarning dist/src/main.js",
+    "wechat:login": "node --disable-warning=ExperimentalWarning dist/src/wechat-login.js"
   },
   "devDependencies": {
     "@types/node": "24.10.1",
@@ -21,6 +22,7 @@
     "typescript": "5.9.3"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "0.84.1"
+    "@earendil-works/pi-coding-agent": "0.84.1",
+    "wechat-ilink-client": "0.1.0"
   }
 }

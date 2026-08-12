@@ -1,8 +1,8 @@
 # Implementation handoff
 
 Status: the trusted-personal reset, durable foundation, Telegram text, native
-Pi/Bubblewrap, and Telegram media slices are implemented through Phase 4.
-Phase 5 WeChat private-peer support is the current phase.
+Pi/Bubblewrap, bounded media, and WeChat private-peer slices are implemented
+through Phase 5. Phase 6 MVP acceptance and operator guidance is current.
 
 ## Objective
 
@@ -21,16 +21,17 @@ marketplace, configuration graph, or public multi-tenant service.
 
 ## Current assignment
 
-Complete only Phase 5 from `PLAN.md` before the next reviewed commit:
+Complete only Phase 6 from `PLAN.md` before the next reviewed commit:
 
-- use the pinned WeChat client only at its raw API boundary;
-- admit exact configured account/private-peer tuples before content/media;
-- reuse the existing sessions, queue, media, sandbox, and outbox path;
-- keep WeChat state and context tokens outside workspaces and owner-bound; and
-- keep real QR/login and channel acceptance opt-in.
+- run and record the deterministic isolation, restart, abort, timeout, media,
+  and sandbox fail-closed acceptance set;
+- document install, Pi and WeChat login, static configuration, systemd service,
+  backup/recovery, logs, limitations, and complete uninstall/reset steps;
+- keep channel/provider acceptance credentialed and opt-in, and report any
+  unavailable live integration honestly; and
+- fix only release-blocking defects, leaving post-MVP hardening deferred.
 
-Do not add Phase 6 packaging or generalized connector abstractions inside the
-Phase 5 commit.
+Do not add generalized connector abstractions or broaden the release scope.
 
 ## Review and commit rule
 

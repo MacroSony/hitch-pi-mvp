@@ -1,6 +1,8 @@
 import { HitchApplication } from "./app/application.js";
 import { HitchStore } from "./app/store.js";
 import { TelegramBotClient, TelegramWorker } from "./channels/telegram.js";
+import { WeChatIlinkClient, WeChatWorker } from "./channels/wechat.js";
+import { WeChatStateStore } from "./channels/wechat-state.js";
 import { loadConfig, readRequiredSecret } from "./config/config.js";
 import { bootstrapFoundation } from "./foundation/bootstrap.js";
 import { NativePiRuntime } from "./pi/native-runtime.js";
@@ -9,39 +11,44 @@ import { FakeAgentRuntime, type AgentRuntime } from "./runtime/runtime.js";
 
 interface CliOptions {
   readonly configPath: string;
-  readonly mode: "check" | "fake-telegram" | "telegram";
+  readonly mode: "check" | "fake-channels" | "channels";
 }
 
 function options(arguments_: readonly string[]): CliOptions {
   const configIndex = arguments_.indexOf("--config");
   const configPath =
     configIndex === -1 ? undefined : arguments_[configIndex + 1];
-  const fakeTelegram = arguments_.includes("--fake-telegram");
-  const nativeTelegram = arguments_.includes("--telegram");
-  const expectedLength = fakeTelegram || nativeTelegram ? 3 : 2;
+  const fakeChannels =
+    arguments_.includes("--fake-channels") ||
+    arguments_.includes("--fake-telegram");
+  const nativeChannels =
+    arguments_.includes("--channels") || arguments_.includes("--telegram");
+  const expectedLength = fakeChannels || nativeChannels ? 3 : 2;
   if (
     configIndex === -1 ||
     configPath === undefined ||
-    (fakeTelegram && nativeTelegram) ||
+    (fakeChannels && nativeChannels) ||
     arguments_.length !== expectedLength ||
     arguments_.some(
       (argument, index) =>
         index !== configIndex &&
         index !== configIndex + 1 &&
         argument !== "--fake-telegram" &&
-        argument !== "--telegram",
+        argument !== "--telegram" &&
+        argument !== "--fake-channels" &&
+        argument !== "--channels",
     )
   ) {
     throw new Error(
-      "usage: hitch-pi-mvp --config /absolute/path/config.json [--telegram | --fake-telegram]",
+      "usage: hitch-pi-mvp --config /absolute/path/config.json [--channels | --fake-channels]",
     );
   }
   return {
     configPath,
-    mode: fakeTelegram
-      ? "fake-telegram"
-      : nativeTelegram
-        ? "telegram"
+    mode: fakeChannels
+      ? "fake-channels"
+      : nativeChannels
+        ? "channels"
         : "check",
   };
 }
@@ -68,14 +75,37 @@ async function main(): Promise<void> {
       return;
     }
 
-    if (config.telegramAccounts.length === 0)
-      throw new Error("Telegram mode requires a configured Telegram account");
+    if (
+      config.telegramAccounts.length === 0 &&
+      config.wechatAccounts.length === 0
+    ) {
+      throw new Error("channel mode requires at least one configured account");
+    }
     const media = new MediaStore(
       foundation.topology.dataRoot.path,
       config.minimumFreeBytes,
     );
+    const telegramClients = config.telegramAccounts.map((account) => ({
+      account,
+      client: new TelegramBotClient(readRequiredSecret(account.botTokenEnv)),
+    }));
+    const wechatStates = config.wechatAccounts.map((account) => ({
+      account,
+      state: new WeChatStateStore(account.id, account.stateDir),
+    }));
+    if (
+      new Set(
+        wechatStates.map(
+          ({ state }) => state.credentials.authenticatedAccountId,
+        ),
+      ).size !== wechatStates.length
+    ) {
+      throw new Error(
+        "configured WeChat accounts must use distinct authenticated bot accounts",
+      );
+    }
     const runtime: AgentRuntime =
-      cli.mode === "fake-telegram"
+      cli.mode === "fake-channels"
         ? new FakeAgentRuntime()
         : await NativePiRuntime.create({
             dataRoot: foundation.topology.dataRoot.path,
@@ -90,17 +120,22 @@ async function main(): Promise<void> {
     );
     media.cleanupUnreferenced(store.artifactStorageKeys());
     const application = new HitchApplication(store, runtime);
-    application.start();
-    const workers = config.telegramAccounts.map(
-      (account) =>
-        new TelegramWorker(
-          account.id,
-          new TelegramBotClient(readRequiredSecret(account.botTokenEnv)),
-          application,
-          store,
-          media,
-        ),
+    const telegramWorkers = telegramClients.map(
+      ({ account, client }) =>
+        new TelegramWorker(account.id, client, application, store, media),
     );
+    const wechatWorkers = wechatStates.map(({ account, state }) => {
+      return new WeChatWorker(
+        account.id,
+        new WeChatIlinkClient(state.credentials),
+        state,
+        application,
+        store,
+        media,
+      );
+    });
+    const workers = [...telegramWorkers, ...wechatWorkers];
+    application.start();
     const shutdown = new AbortController();
     const stop = (): void => {
       shutdown.abort();
@@ -112,12 +147,13 @@ async function main(): Promise<void> {
       process.stdout.write(
         `${JSON.stringify({
           status: "running",
-          runtime: cli.mode === "fake-telegram" ? "fake" : "native-pi",
+          runtime: cli.mode === "fake-channels" ? "fake" : "native-pi",
           ...(runtime instanceof NativePiRuntime
             ? { catalogDigest: runtime.catalogDigest }
             : {}),
           users: foundation.topology.users.length,
-          telegramAccounts: workers.length,
+          telegramAccounts: telegramWorkers.length,
+          wechatAccounts: wechatWorkers.length,
         })}\n`,
       );
       await Promise.all(workers.map((worker) => worker.run(shutdown.signal)));

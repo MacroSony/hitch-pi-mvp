@@ -7,9 +7,17 @@ import {
   classifyTelegramIdentity,
   readTelegramContent,
 } from "../channels/telegram-ingress.js";
+import {
+  classifyWeChatIdentity,
+  readWeChatContent,
+} from "../channels/wechat-ingress.js";
 import { parseCommand } from "./commands.js";
 import { AppError, type FailureCategory } from "./errors.js";
-import { HitchStore, type MessageIdentity } from "./store.js";
+import {
+  HitchStore,
+  type EndpointContext,
+  type MessageIdentity,
+} from "./store.js";
 
 export interface IngressResult {
   readonly accepted: boolean;
@@ -18,6 +26,7 @@ export interface IngressResult {
   readonly message?: string;
   readonly updateId?: number;
   readonly replyPrivateChatId?: string;
+  readonly replyPeerId?: string;
 }
 
 export class HitchApplication {
@@ -64,33 +73,16 @@ export class HitchApplication {
       if (artifacts.some((artifact) => artifact.userId !== endpoint.userId))
         throw new AppError("rejected", "Telegram media owner does not match");
       const content = readTelegramContent(ingress, artifacts);
-      const identity: MessageIdentity = {
-        endpoint,
-        idempotencyKey: ingress.idempotencyKey,
-        contentDigest: content.contentDigest,
-      };
-      const command = parseCommand(content.text);
-      if (command === null) {
-        const admitted = this.store.admitPrompt(
-          identity,
+      return {
+        ...this.#receiveAuthorized(
+          endpoint,
+          ingress.idempotencyKey,
           content.text,
+          content.contentDigest,
           artifacts,
-        );
-        this.#schedule(admitted.userId);
-        return { accepted: true, duplicate: admitted.duplicate, updateId };
-      }
-      if (artifacts.length > 0)
-        throw new AppError("rejected", "commands cannot include media");
-      const result = this.store.executeCommand(
-        identity,
-        command,
-        content.text,
-        this.runtime.models ?? [],
-      );
-      if (result.abortTurnId !== null)
-        this.#controllers.get(result.abortTurnId)?.abort();
-      this.#schedule(result.userId);
-      return { accepted: true, duplicate: result.duplicate, updateId };
+        ),
+        updateId,
+      };
     } catch (error) {
       if (error instanceof AppError) {
         return {
@@ -111,6 +103,92 @@ export class HitchApplication {
         ...(replyPrivateChatId === undefined ? {} : { replyPrivateChatId }),
       };
     }
+  }
+
+  public receiveWeChat(
+    accountId: string,
+    authenticatedAccountId: string,
+    message: unknown,
+    artifacts: readonly RuntimeArtifact[] = [],
+  ): IngressResult {
+    let replyPeerId: string | undefined;
+    try {
+      if (this.#stopping)
+        throw new AppError("busy", "Hitch is stopping; try again shortly");
+      const ingress = classifyWeChatIdentity(authenticatedAccountId, message);
+      const endpoint = this.store.resolveWeChatEndpoint(
+        accountId,
+        ingress.platformUserId,
+      );
+      if (endpoint === null)
+        throw new AppError(
+          "rejected",
+          "WeChat private endpoint is not configured",
+        );
+      replyPeerId = endpoint.platformUserId;
+      if (artifacts.some((artifact) => artifact.userId !== endpoint.userId))
+        throw new AppError("rejected", "WeChat media owner does not match");
+      const content = readWeChatContent(ingress, artifacts);
+      return {
+        ...this.#receiveAuthorized(
+          endpoint,
+          ingress.idempotencyKey,
+          content.text,
+          content.contentDigest,
+          artifacts,
+        ),
+        replyPeerId,
+      };
+    } catch (error) {
+      if (error instanceof AppError) {
+        return {
+          accepted: false,
+          duplicate: false,
+          category: error.category,
+          message: error.message,
+          ...(replyPeerId === undefined ? {} : { replyPeerId }),
+        };
+      }
+      return {
+        accepted: false,
+        duplicate: false,
+        category: "internal-error",
+        message: "internal-error: WeChat message could not be admitted",
+        ...(replyPeerId === undefined ? {} : { replyPeerId }),
+      };
+    }
+  }
+
+  #receiveAuthorized(
+    endpoint: EndpointContext,
+    idempotencyKey: string,
+    text: string,
+    contentDigest: string,
+    artifacts: readonly RuntimeArtifact[],
+  ): IngressResult {
+    const identity: MessageIdentity = {
+      endpoint,
+      idempotencyKey,
+      contentDigest,
+    };
+    const command = parseCommand(text);
+    if (command === null) {
+      const admitted = this.store.admitPrompt(identity, text, artifacts);
+      this.#schedule(admitted.userId);
+      return { accepted: true, duplicate: admitted.duplicate };
+    }
+    if (artifacts.length > 0)
+      throw new AppError("rejected", "commands cannot include media");
+    const result = this.store.executeCommand(
+      identity,
+      command,
+      text,
+      this.runtime.models ?? [],
+    );
+    if (result.abortTurnId !== null)
+      this.#controllers.get(result.abortTurnId)?.abort();
+    this.#schedule(result.userId);
+    return { accepted: true, duplicate: result.duplicate };
   }
 
   #schedule(userId: string): void {

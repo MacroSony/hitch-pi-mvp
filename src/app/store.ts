@@ -176,6 +176,37 @@ export class HitchStore {
         };
   }
 
+  public resolveWeChatEndpoint(
+    accountId: string,
+    platformUserId: string,
+  ): EndpointContext | null {
+    const row = this.#database
+      .prepare(
+        `SELECT e.id, e.user_id, e.account_id, e.platform_user_id
+         FROM channel_endpoints e
+         JOIN users u ON u.id = e.user_id
+         WHERE e.kind = 'wechat' AND e.account_id = ? AND e.platform_user_id = ?
+           AND e.private_chat_id IS NULL AND e.enabled = 1 AND u.enabled = 1`,
+      )
+      .get(accountId, platformUserId) as
+      | {
+          id: string;
+          user_id: string;
+          account_id: string;
+          platform_user_id: string;
+        }
+      | undefined;
+    return row === undefined
+      ? null
+      : {
+          id: row.id,
+          userId: row.user_id,
+          accountId: row.account_id,
+          platformUserId: row.platform_user_id,
+          privateChatId: row.platform_user_id,
+        };
+  }
+
   public getTelegramOffset(accountId: string): number {
     const row = this.#database
       .prepare("SELECT value FROM app_meta WHERE key = ?")
@@ -1106,10 +1137,20 @@ export class HitchStore {
     accountId: string,
     limit = 16,
   ): readonly OutboxDelivery[] {
+    return this.#pendingOutbox("telegram", accountId, limit);
+  }
+
+  #pendingOutbox(
+    channel: "telegram" | "wechat",
+    accountId: string,
+    limit: number,
+  ): readonly OutboxDelivery[] {
     return this.#database
       .prepare(
         `SELECT o.id, o.user_id AS userId, e.account_id AS accountId,
-                e.private_chat_id AS privateChatId, o.kind, o.payload_text AS text,
+                CASE WHEN e.kind = 'telegram' THEN e.private_chat_id
+                     ELSE e.platform_user_id END AS privateChatId,
+                o.kind, o.payload_text AS text,
                 a.id AS artifactId, a.storage_key AS storageKey, a.sha256,
                 a.bytes, a.media_kind AS mediaKind, a.mime_type AS mimeType,
                 a.display_name AS displayName
@@ -1117,11 +1158,11 @@ export class HitchStore {
          JOIN channel_endpoints e ON e.id = o.endpoint_id AND e.user_id = o.user_id
          JOIN users u ON u.id = o.user_id
          LEFT JOIN artifacts a ON a.id = o.artifact_id AND a.user_id = o.user_id
-         WHERE e.kind = 'telegram' AND e.account_id = ? AND e.enabled = 1 AND u.enabled = 1
+         WHERE e.kind = ? AND e.account_id = ? AND e.enabled = 1 AND u.enabled = 1
            AND o.state IN ('pending', 'retryable') AND o.attempts < 5
          ORDER BY o.created_at, o.id LIMIT ?`,
       )
-      .all(accountId, limit)
+      .all(channel, accountId, limit)
       .map((value) => {
         const row = value as {
           id: string;
@@ -1178,6 +1219,13 @@ export class HitchStore {
           },
         };
       });
+  }
+
+  public pendingWeChatOutbox(
+    accountId: string,
+    limit = 16,
+  ): readonly OutboxDelivery[] {
+    return this.#pendingOutbox("wechat", accountId, limit);
   }
 
   public claimOutbox(delivery: OutboxDelivery): boolean {
