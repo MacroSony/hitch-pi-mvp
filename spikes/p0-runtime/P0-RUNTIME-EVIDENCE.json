@@ -1,0 +1,210 @@
+{
+  "schemaVersion": 1,
+  "type": "hitch.phase0.runtime-evidence",
+  "createdAt": "2026-08-12T15:30:33.229Z",
+  "inputs": {
+    "pi": "0.84.1",
+    "piPackageTreeSha256": "7298ead16e553a8ffc372ca6a5a17ccfd711ae0887830134255dcea08be55bba",
+    "piDependencyClosureSha256": "6d2055eaeef6823fd4b6edc062314e383fc6e233a4634a13e868a86eaebbcec4",
+    "node": "v24.14.0",
+    "npm": "11.9.0",
+    "kernel": "7.0.0-28-generic",
+    "providerFixtureSha256": "12e461ccc66c6cce800fabe01362f755876b83de6fecfb9a5ec514867b12b0e7",
+    "oauthWorkerSha256": "5df72d71ab514b10ecdadd41332955e37a9cfda5d150bb321ec1ff757b198eff",
+    "authCrashWorkerSha256": "1b0c77879867ac3d122c8ccc3800c08302cffc1d49887318572c74d5f19498b6",
+    "runnerSha256": "7d587e1fba077d828672a14f7298b7b208afd03c18eed85f86cbc4b697dfd23a"
+  },
+  "controls": {
+    "realCredentialsUsed": false,
+    "realProviderCallsMade": false,
+    "syntheticProviderCallsMade": 8,
+    "offline": true,
+    "telemetry": false,
+    "ambientHomeUsed": false
+  },
+  "cases": {
+    "modelAndSession": {
+      "pass": true,
+      "exactModels": [
+        "hitch-fixture-key/plain-text",
+        "hitch-fixture-key/reasoning-image",
+        "hitch-fixture-oauth/oauth-reasoning"
+      ],
+      "exactModelCapabilities": [
+        {
+          "key": "hitch-fixture-key/plain-text",
+          "reasoning": false,
+          "input": [
+            "text"
+          ]
+        },
+        {
+          "key": "hitch-fixture-key/reasoning-image",
+          "reasoning": true,
+          "input": [
+            "image",
+            "text"
+          ]
+        },
+        {
+          "key": "hitch-fixture-oauth/oauth-reasoning",
+          "reasoning": true,
+          "input": [
+            "text"
+          ]
+        }
+      ],
+      "catalogSha256": "21ce1e0a841a551745088c97b7c0f42c06e651c4e99b60730a2398e64fa48fa2",
+      "reasoningLevels": [
+        "off",
+        "minimal",
+        "low",
+        "medium",
+        "high"
+      ],
+      "unknownModelRejected": true,
+      "restoredAcrossFreshController": true,
+      "restoredModel": "hitch-fixture-key/reasoning-image",
+      "restoredThinking": "high",
+      "nonReasoningClamp": "off",
+      "sessionId": "11111111-1111-4111-8111-111111111111",
+      "sessionFile": "2026-08-12T15-30-24-891Z_11111111-1111-4111-8111-111111111111.jsonl",
+      "sessionEntryTypes": [
+        "session",
+        "model_change",
+        "thinking_level_change",
+        "model_change",
+        "thinking_level_change",
+        "thinking_level_change",
+        "message",
+        "message",
+        "message",
+        "message",
+        "model_change",
+        "thinking_level_change"
+      ],
+      "providerStreamCalls": 2,
+      "toolLoopSettlement": {
+        "turnEnds": 2,
+        "agentEnds": 1,
+        "agentSettled": 1,
+        "dependentRpcAfterSettled": true
+      },
+      "durableSync": {
+        "first": {
+          "fileFsync": true,
+          "parentDirectoryFsync": true
+        },
+        "second": {
+          "fileFsync": true,
+          "parentDirectoryFsync": true
+        }
+      }
+    },
+    "preFlushTranscript": {
+      "pass": true,
+      "stateRetainedInProcess": true,
+      "transcriptCreatedBeforeFirstAssistant": false,
+      "providerStreamCalls": 0
+    },
+    "oauthModelRpc": {
+      "pass": true,
+      "model": "hitch-fixture-oauth/oauth-reasoning",
+      "thinking": "medium",
+      "catalogSha256": "21ce1e0a841a551745088c97b7c0f42c06e651c4e99b60730a2398e64fa48fa2",
+      "selectedPromptedOverRpc": true,
+      "restoredAcrossFreshController": true,
+      "settlement": {
+        "turnEnds": 1,
+        "agentEnds": 1,
+        "agentSettled": 1,
+        "dependentRpcAfterSettled": true
+      },
+      "providerStreamCalls": 1,
+      "durableSync": {
+        "first": {
+          "fileFsync": true,
+          "parentDirectoryFsync": true
+        },
+        "second": {
+          "fileFsync": true,
+          "parentDirectoryFsync": true
+        }
+      }
+    },
+    "retrySettlement": {
+      "pass": true,
+      "providerStreamCalls": 2,
+      "autoRetryStarts": 1,
+      "autoRetryEnds": 1,
+      "settlement": {
+        "turnEnds": 2,
+        "agentEnds": 2,
+        "agentSettled": 1,
+        "dependentRpcAfterSettled": true
+      }
+    },
+    "oauthConcurrencySuccess": {
+      "pass": true,
+      "processes": 2,
+      "bothProcessesReadyBeforeBarrier": true,
+      "refreshAttempts": 1,
+      "finalCredential": "single-rotation-valid-oauth",
+      "validJson": true,
+      "mode": "0600",
+      "lockReleased": true,
+      "exactModelPerProcess": "hitch-fixture-oauth/oauth-reasoning",
+      "authResolvedProcesses": 2,
+      "serializedPersistenceOnly": true,
+      "atomicCrashSafetyProven": false
+    },
+    "oauthConcurrencyFailure": {
+      "pass": true,
+      "processes": 2,
+      "bothProcessesReadyBeforeBarrier": true,
+      "refreshAttempts": 2,
+      "finalCredential": "byte-identical-expired-fixture",
+      "validJson": true,
+      "mode": "0600",
+      "lockReleased": true,
+      "exactModelPerProcess": "hitch-fixture-oauth/oauth-reasoning",
+      "authResolvedProcesses": 0,
+      "serializedPersistenceOnly": true,
+      "atomicCrashSafetyProven": false
+    },
+    "authWriteCrash": {
+      "pass": true,
+      "injectedFailure": "SIGKILL-during-in-place-write",
+      "originalBytesPreserved": false,
+      "validJsonAfterCrash": false,
+      "atomicCrashSafetyPresent": false,
+      "productionDisposition": "blocked-until-auth-write-uses-fsync-temp-rename-and-parent-directory-fsync"
+    },
+    "concurrentSessionOpen": {
+      "pass": true,
+      "processes": 2,
+      "syntheticStreamDelayMs": 300,
+      "sameSessionFile": true,
+      "jsonlParseSucceeded": true,
+      "linesBefore": 6,
+      "linesAfter": 10,
+      "siblingBranches": true,
+      "concurrentTurnsOnSelectedBranch": 1,
+      "concurrentTurnsOmittedFromSelectedBranch": 1,
+      "providerStreamCalls": 3,
+      "seedDurableSync": {
+        "fileFsync": true,
+        "parentDirectoryFsync": true
+      },
+      "productionDisposition": "forbidden-by-one-global-controller-gate"
+    }
+  },
+  "decision": {
+    "controllerConcurrency": "one-global-active-controller",
+    "transcriptDurability": "Hitch-fsync-file-and-parent-directory-after-agent-settled-and-clean-exit",
+    "authPersistence": "serialized-but-not-crash-atomic-in-pinned-Pi",
+    "phase0FinalDisposition": "blocked-on-crash-atomic-auth-persistence-and-opt-in-live-provider-checks",
+    "reason": "The deterministic subgate passes and exposes Pi's in-place auth-write failure; it does not waive the security floor."
+  },
+  "outcome": "deterministic-subgate-pass-with-explicit-final-blocker"
+}

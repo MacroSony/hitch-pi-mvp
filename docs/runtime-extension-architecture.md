@@ -1,6 +1,6 @@
 # Native Pi runtime and sandbox-extension decision
 
-Status: proposed MVP architecture, pending Phase 0 proof
+Status: selected architecture for the trusted-personal MVP
 
 ## Decision
 
@@ -36,7 +36,7 @@ Telegram / WeChat
    Pi RPC controller (trusted)
  native providers + operator Pi auth
  mandatory hitch-sandbox extension
- optional allowlisted operator extensions
+ optional operator extensions deferred
         |
    sandbox backend
  /workspace rw, /inbox ro, bounded /tmp
@@ -47,8 +47,12 @@ Telegram / WeChat
 
 Each Hitch session keeps Pi's private transcript and selected provider/model.
 Each Turn starts a fresh Pi RPC controller against that session. Only one Turn
-per user runs at once. A crash or forced close still quarantines the session
-unless a durable Pi terminal/flush boundary is proven.
+per user runs at once, and one global controller gate remains because Pi auth
+state is shared. After first flush, Hitch reopens the exact private transcript
+path; `--session-id` is not a safe lookup/persistence boundary. A crash or
+forced close still quarantines the session unless Pi emits `agent_settled`,
+exits cleanly, and Hitch fsyncs the transcript plus its parent directory. RPC
+prompt success, `turn_end`, and `agent_end` are not that boundary.
 
 ## Provider and model behavior
 
@@ -83,8 +87,9 @@ extension is fatal and never falls back to host tools.
 
 ### Operator extensions
 
-Static configuration may enable reviewed extension packages globally or per
-user. They are pinned by package/version/integrity or file digest, loaded from
+The initial MVP enables none. A future static configuration may enable a
+reviewed extension package globally or per user. It is pinned by
+package/version/integrity or file digest, loaded from
 operator-owned read-only paths, and receive the normal Pi extension API:
 
 - tools and commands;
@@ -96,6 +101,11 @@ operator-owned read-only paths, and receive the normal Pi extension API:
 Hitch lists extension commands with `!commands`, forwards `/command` prompts,
 and maps `select`, `confirm`, `input`, notifications, and status requests to
 bounded, expiring IM interactions. Unsupported TUI-only UI fails clearly.
+
+Every enabled operator extension needs a concrete compatibility decision. The
+proposed contracts for Pi Forge and ComfyUI Paint are recorded in
+`docs/operator-extension-compatibility.md`, but their released artifacts do not
+provide those service modes and are excluded from the initial MVP.
 
 Operator extensions execute in the trusted Pi controller. Their model-callable
 tools are not automatically sandboxed: the extension must use the Hitch
@@ -115,7 +125,7 @@ API proxy. Neither is a shortcut.
 
 ## Sandbox backend choice
 
-Phase 0 compares two concrete backends behind the same mandatory extension:
+Phase 0 compared two concrete backends behind the same mandatory extension:
 
 1. **Custom Bubblewrap backend — default candidate.** Reuse the reviewed
    launcher, `openat2`, process-tree, and workspace-tool code from
@@ -133,10 +143,13 @@ The Pi `sandbox` example based on `@anthropic-ai/sandbox-runtime` is not an MVP
 candidate: it overrides only bash and can fall back to local bash when disabled
 or initialization fails.
 
-Phase 0 chooses one production backend using startup latency, cancellation,
-resource limits, workspace/inbox semantics, media publication, and adversarial
-tests. Hitch core depends only on the extension contract; it does not contain
-provider-specific or sandbox-backend-specific routing.
+The trusted-personal MVP selects the custom Bubblewrap design proven by the
+deterministic subgate. The deployment filesystem lacks an enforceable
+per-workspace project quota; this is now an explicit attended-MVP limitation,
+covered by application object/temp limits, free-space admission checks, and
+operator monitoring. Gondolin remains unevaluated and is not required unless
+Bubblewrap fails on the deployment host. Hitch core still depends only on the
+extension contract and contains no provider-specific routing.
 
 ## What becomes simpler
 
@@ -148,4 +161,5 @@ provider-specific or sandbox-backend-specific routing.
 
 What does not disappear is the sandbox security work. The extension/backend
 must still prove complete tool replacement, path confinement, process-tree
-cleanup, resource quotas, media publication, and fail-closed startup.
+cleanup, practical execution bounds, media publication, and fail-closed
+startup.

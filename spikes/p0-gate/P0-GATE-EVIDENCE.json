@@ -1,0 +1,102 @@
+{
+  "schemaVersion": 1,
+  "type": "hitch.phase0.consolidated-gate-evidence",
+  "createdAt": "2026-08-12T15:30:51.129Z",
+  "inputs": {
+    "node": "v24.14.0",
+    "operatorPackageLockSha256": "75e860aac1cc09cad3087acc39e2f0fe34a05cf91e416761a4f2c3be1f9f3c20",
+    "operatorPackages": {
+      "forge": {
+        "name": "@zihanw/pi-forge",
+        "version": "0.4.0",
+        "integrity": "sha512-/B8DBXtqFLIl+Llrr1HJRYUDd2cd4jDt6CsJdBC8kCxn9Kh6Wes9AUpT+b6Cl5NB9oSMtaL0YhYitvfyUk00lQ==",
+        "installedTreeSha256": "4e3eb7894ea12b357f2be7b15929ad9b71f0d64f7e84d9b4e1a8ba075b32ef8d",
+        "entrySha256": "4ff562bb8c580f4765def12d1bd7b05bdb6e7e1249b588c0ae1c936484cee09b"
+      },
+      "paint": {
+        "name": "pi-comfyui-paint",
+        "version": "0.3.0",
+        "integrity": "sha512-6LWaOObIXWvVu49Ycz/UUb8Dd/LgPoh6gYSiwRUPNhhRUvEDuePlnC4RjBElLIkdbLfcEvCTMKGQANds8dA/Iw==",
+        "installedTreeSha256": "023684bd2cdaf9d18d2ca405ff8767d2d8fa473dd8981fd2bec7d9c4074ffec6",
+        "entrySha256": "54a485be3de20778822cbd3744c081413b4da58662fd70b58d04586242fd7702"
+      },
+      "volcengine": {
+        "name": "pi-volcengine-provider",
+        "version": "0.1.2",
+        "integrity": "sha512-Cv5ZArW9Yr5su6dEvuyK3YCoLVL7nCg5FK8abCquKRpU57PnZs2+9u9hWeOZtxBMMtNZU4wGFdh59iyaelOxQA==",
+        "installedTreeSha256": "9dfa09264530ff487eee87b1a920706cd8fce9b4639c93b36304bdf83eb288e1",
+        "entrySha256": "966ede67829be738e507be7754d66d4067260628b66cab2ff7fc2a841266a6ac"
+      }
+    },
+    "runnerSha256": "5dc5270c720d45d81719ffa9553e9140df8ca927f52ff7289a6a18612f4ab202",
+    "acceptedCheckpoints": {
+      "p0a": {
+        "runnerSha256": "ce4e94ea52d7bf0153a520c59b0d35d61ba5ddf99e84c08e70623257f290c112",
+        "normalizedManifestSha256": "d1f531b5470bfc5802695333c9ffeab37e38dfd90ae53e810101bdc8fc636ef1"
+      },
+      "runtime": {
+        "runnerSha256": "7d587e1fba077d828672a14f7298b7b208afd03c18eed85f86cbc4b697dfd23a",
+        "normalizedManifestSha256": "508417b69ba4d327c7dfa4424c503d875c41b468f34e65ef89abf37cc7f9ba28"
+      },
+      "sandbox": {
+        "runnerSha256": "531cf3054f2b3e8dc918e5425721d59a1b59a36e47c3144c6b61ce215bae3362",
+        "normalizedManifestSha256": "094dbfcf8bc1d2e76e3f020e3a6f7fd428388cdaf05fee946284bb309e05a980"
+      },
+      "transports": {
+        "runnerSha256": "097559862d79c2c6b8fc688dee36d8d79ffc828c415d7ba15490a46673636349",
+        "normalizedManifestSha256": "13ffea9b59209f00b1e971da3ecd66feaeefcaf4ab8489fbfedb7cfda3676687"
+      }
+    }
+  },
+  "controls": {
+    "realCredentialsUsed": false,
+    "realProviderCallsMade": false,
+    "realChannelCallsMade": false,
+    "externalNetworkUsed": false
+  },
+  "checkpointResults": {
+    "p0a": "pass",
+    "runtime": "deterministic-subgate-pass-with-explicit-final-blocker",
+    "sandbox": "deterministic-subgate-pass-with-host-quota-blocker",
+    "transports": "deterministic-inventory-pass-live-channel-evidence-deferred"
+  },
+  "checkpointAttestation": {
+    "exactRunnerDigestsVerified": true,
+    "fullCaseSetsPassed": true,
+    "normalizedManifestsVerified": true,
+    "outcomeOnlyFakeRejected": true
+  },
+  "operatorExtensions": {
+    "forge": {
+      "installed": true,
+      "serviceModePresent": false,
+      "disposition": "excluded-from-mvp-manifest"
+    },
+    "comfyuiPaint": {
+      "installed": true,
+      "serviceModePresent": false,
+      "disposition": "excluded-from-mvp-manifest"
+    },
+    "volcengineProvider": {
+      "installed": true,
+      "providerOnly": true,
+      "disposition": "inventory-only-pending-operator-profile-and-live-smoke"
+    }
+  },
+  "phase0Blockers": [
+    "pi-auth-writer-not-crash-atomic",
+    "production-workspace-project-quota-unavailable",
+    "forge-hitch-service-mode-unavailable",
+    "comfyui-paint-hitch-service-mode-unavailable",
+    "operator-profile-and-real-api-key-oauth-smoke-unrun"
+  ],
+  "deferredFinalAcceptance": [
+    "live-telegram-wechat-media-acceptance-unrun",
+    "gondolin-unevaluated-qemu-unavailable"
+  ],
+  "decision": {
+    "phase0ReleaseGate": "blocked",
+    "phase1Authorized": false
+  },
+  "outcome": "blocked"
+}

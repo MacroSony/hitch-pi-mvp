@@ -1,9 +1,13 @@
 # Product scope
 
+Status: trusted-personal MVP baseline
+
 ## Outcome
 
-One Linux service lets a small statically configured user set operate Pi
-coding-agent sessions through private Telegram and WeChat conversations.
+One Linux service lets a small statically configured, personally trusted user
+set operate Pi coding-agent sessions through private Telegram and WeChat
+conversations. The purpose is to test whether the interaction model is useful,
+not to launch a public or adversarial multi-tenant service.
 
 For each enrolled person, Hitch provides:
 
@@ -12,14 +16,16 @@ For each enrolled person, Hitch provides:
 - named Pi sessions with durable context and per-session model selection;
 - every provider/model currently registered and authenticated in the
   operator-managed Pi profile, subject to an optional static allowlist;
-- pinned operator extensions, extension commands, and IM-compatible extension
-  interactions;
+- the mandatory Hitch sandbox extension and, later, explicitly selected
+  operator extensions whose features are needed for dogfooding;
 - text, image, and ordinary-file input/output;
 - bounded queueing, status, cancellation, recovery, and session selection;
 - model-facing shell/file tools routed through an OS sandbox extension; and
 - useful failure reporting and restart behavior.
 
-This is an attended private MVP, not a public service.
+This is an attended private MVP, not a public service. Human users are trusted;
+model-generated commands, workspace content, inbound files, and channel input
+are not trusted to execute on the host.
 
 ## Supported user experience
 
@@ -38,13 +44,10 @@ channels, shared sessions, and forwarded identity claims are rejected.
 | `!models [filter]` | List allowed models reported by the current Pi profile |
 | `!model <provider>/<model>` | Select an available model for this session |
 | `!thinking <level>` | Select a thinking level supported by the model |
-| `!commands` | List enabled extension commands |
 | `!send <relative-path>` | Snapshot and send a workspace file |
 
-Enabled `/extension-command` messages are passed to Pi. Extension dialogs are
-represented as bounded, expiring reply interactions. Text notifications and
-status are delivered or coalesced; unsupported terminal-only UI is rejected
-clearly.
+Optional extension commands and RPC UI projection are post-MVP features when a
+specific operator extension is selected.
 
 All other non-command text submits a Turn. If no session exists, Hitch creates
 one. Unknown `!` commands are rejected rather than passed to Pi.
@@ -61,13 +64,18 @@ using a host-private operator profile and its native provider/auth machinery.
 Changes to authentication, provider extensions, or model catalogs are made by
 the operator outside chat and published after restart.
 
-Extension support means:
+Initial extension support means:
 
 - one mandatory pinned Hitch sandbox/media extension;
-- optional pinned operator extensions, globally or per configured user;
-- provider registration, tools, commands, events, system-prompt hooks, and RPC
-  extension UI supported through Pi's normal extension API; and
+- no optional operator extension is required for the first usable build;
+- optional pinned operator extensions may be added after the core concept works
+  and their concrete host authority is understood;
 - package/version/integrity or source digest recorded at startup.
+
+The proposed Forge/ComfyUI subsets are recorded in
+`docs/operator-extension-compatibility.md`, but both are deferred because their
+released packages do not implement those service modes. Successful Pi loading
+alone is not a reason to expose a model-controlled host tool.
 
 Operator extensions run with Pi controller authority and can access provider
 credentials. They are trusted installed code, not a user sandbox. Workspace
@@ -101,8 +109,9 @@ features.
 - Private conversations and one workspace per user.
 - Fresh Pi controller and sandbox backend per Turn, with resumable private Pi
   session storage.
-- Pi/controller extensions are trusted; model tools and generated code are
-  sandboxed.
+- Pi/controller extensions are trusted; standard file/shell tools and generated
+  code are sandboxed, while declared host-authority tools stay inside their
+  certified policy.
 - No automatic replay of an uncertain agent Turn.
 
 ## Explicit non-goals
@@ -120,24 +129,25 @@ features.
 
 ## MVP completion gate
 
-Two users must independently use Telegram and WeChat while acceptance proves:
+Deterministic tests use two fake users. Attended live acceptance may use the
+small set of personal accounts available to the operator. Completion proves:
 
-1. channel identity cannot select another Hitch user;
-2. neither user can access another user's sessions, workspace, inbox,
-   artifacts, Pi state, cancellation, or delivery;
+1. exact private-channel tuples select only their configured Hitch user;
+2. sessions, workspaces, files, cancellation, and delivery stay owner-scoped;
 3. Pi context and model choice survive fresh controller processes;
-4. Pi enumerates and selects allowed registered/authenticated providers and at
-   least an API-key and OAuth auth family pass live smoke when available;
-5. pinned operator extension commands and IM-compatible UI work;
-6. no workspace extension loads and every standard Pi filesystem/shell tool or
-   direct shell path enters the sandbox with no fail-open host path; any
-   operator-extension host tool is explicitly declared and trusted;
-7. provider/channel credentials never appear in the sandbox guest, workspace,
-   inbox, tool arguments/results, channel output, Hitch database, or logs;
-8. cancellation/timeout removes the sandbox process tree and ambiguous Pi
-   close quarantines the session;
-9. text, image, and ordinary-file input/output work on both channels;
-10. restart preserves queued work, never replays an unknown Turn, and keeps
-    delivery ownership; and
-11. configuration, dependency, extension, auth-profile, and deployment
-    documentation match the tested commit.
+4. at least one operator-authenticated Pi provider completes useful Turns;
+5. no workspace extension loads and every standard Pi filesystem/shell tool or
+   direct shell path enters Bubblewrap with no host fallback;
+6. provider/channel credentials do not enter the tool sandbox, workspace,
+   database, logs, or chat output;
+7. cancellation removes the sandbox process tree, while ambiguous work is
+   quarantined rather than replayed;
+8. text works over Telegram and WeChat, and common image/file paths work for
+   the channels supported by the configured accounts;
+9. restart preserves admitted work and session ownership; and
+10. a new operator can install, configure, authenticate, start, and recover the
+    attended service using the checked-in guide.
+
+Optional operator extensions, multiple live authentication families, hard
+per-workspace quotas, and exhaustive hostile-user testing are not completion
+requirements for this MVP.

@@ -1,0 +1,100 @@
+{
+  "schemaVersion": 1,
+  "type": "hitch.phase0.transport-inventory-evidence",
+  "createdAt": "2026-08-12T15:30:51.121Z",
+  "inputs": {
+    "node": "v24.14.0",
+    "legacyCommit": "f3b90e57f19d345616b94119174113e96129bf78",
+    "selectedLegacyFilesSha256": {
+      "src/channels/telegram.ts": "b73c636b5b9dabb4cfe2644dd9c82d54b85d6b73456b24e7e86394b5f922ecc1",
+      "src/channels/wechat.ts": "0598d98f13140e422f464a13e94abe3b80899d63620b17ed7f564b842a7e3167",
+      "src/channels/types.ts": "d75e36da4ad650370b7434c1e1166f12409d542b76b338ebf09c0d38bffaf59b",
+      "src/channels/multi.ts": "b25b180a9185693c3347757dea41942c1a5125f639a73700e71819486e68a198",
+      "src/security/authorization.ts": "6e7a0b6a98c2f5be86b1338c0595ae8072b36c9810da537df1f3a5534eae775b",
+      "src/core/media-cache.ts": "b72c08b0dbb6bde4b521cca89e0479013565fd1a9149f331731c1152d357d73f",
+      "src/core/hub.ts": "136d4e58c777aa4c06c75d92e4c48184d3f3797ed722784c3f4140e83ad5647f",
+      "src/config/schema.ts": "d05b91c6fcf80d2f3135b22a1365caccf79937eba861601dcbf25f51023f0296",
+      "src/config/load-config.ts": "7d486ba7db0395761e69a7501d1c517687f9ccf80d512a8cb853067e07484e16",
+      "package-lock.json": "4355a83fc2ee314bd3666693e98ddaa815e4c40e85e27a37fd2d08e075afa263"
+    },
+    "wechatClient": "wechat-ilink-client@0.1.0",
+    "wechatClientIntegrity": "sha512-/gsWGEGEsWA7C5cgfKtguCL7QPdT95I1HfHHiRcHtwQppwVfgD8aDL4m4soANp1qQDl5RgiJ7q9gh9X5cXUfqA==",
+    "wechatClientTreeSha256": "6205dfffd66cef090dab6981fb01b11d7db17c89c7b80c17f7206340fe726302",
+    "contractSha256": "2409b50d24c6cea51bd92efc1e67b66673b2a5b62e74c4250b4d848936a4576a",
+    "inventorySha256": "ebb8224d5d3e7d6115351d14ba25ccc50f901a315328fb441674ec61c5dfcc2c",
+    "runnerSha256": "097559862d79c2c6b8fc688dee36d8d79ffc828c415d7ba15490a46673636349"
+  },
+  "controls": {
+    "realCredentialsUsed": false,
+    "realChannelCallsMade": false,
+    "networkCallsMade": false,
+    "messageContentRecorded": false,
+    "selectedLegacyFilesMatchCommit": true
+  },
+  "legacyFindings": {
+    "telegramPrivateChatTypeAbsent": true,
+    "telegramCursorMemoryOnly": true,
+    "telegramBackgroundHandlingCanAdvancePollingBeforeAdmission": true,
+    "telegramMediaBufferedBeforeActualBound": true,
+    "telegramOutboundLivePathBuffered": true,
+    "wechatGroupPreferredAsChatIdentity": true,
+    "wechatUnstableWallClockIdFallback": true,
+    "wechatCursorSavedBeforeMessageHandling": true,
+    "wechatEventEmitterDoesNotAwaitAdapterAdmission": true,
+    "wechatStateWritesNotCrashAtomic": true,
+    "wechatMediaBufferedBeforeActualBound": true,
+    "contextTokenNotAccountPeerBound": true,
+    "crossPrincipalMediaDeduplicationPresent": true,
+    "multiChannelQueueUnbounded": true
+  },
+  "cases": {
+    "telegram": {
+      "pass": true,
+      "total": 12,
+      "accepted": 2,
+      "rejected": 10,
+      "rejectionReasons": {
+        "group-or-ambiguous-chat": 3,
+        "identity-mismatch": 2,
+        "identity-missing": 2,
+        "message-id-unstable": 1,
+        "payload-ambiguous": 1,
+        "update-id-unstable": 1
+      },
+      "privateTupleRequiredBeforeMedia": true,
+      "callbackContentNotIdentity": true
+    },
+    "wechat": {
+      "pass": true,
+      "total": 9,
+      "accepted": 2,
+      "rejected": 7,
+      "rejectionReasons": {
+        "account-mismatch": 1,
+        "group-message": 1,
+        "identity-mismatch": 1,
+        "identity-missing": 1,
+        "message-id-unstable": 1,
+        "not-user-message": 1,
+        "recipient-mismatch": 1
+      },
+      "privateAccountPeerRequiredBeforeMedia": true,
+      "contextTokenBoundToAccountPeer": true
+    },
+    "idempotency": {
+      "pass": true,
+      "newThenDuplicate": true,
+      "sameKeyDifferentDigestConflict": true,
+      "endpointNamespaceSeparatesSameNumericIds": true,
+      "controlCharacterIdentifiersRejected": true,
+      "lengthPrefixedCompositeKeysUnambiguous": true
+    }
+  },
+  "decision": {
+    "telegramLegacyAdapter": "reference-only-rebuild-around-durable-intake",
+    "wechatLegacyAdapter": "reference-only-do-not-use-high-level-monitor",
+    "wechatClient": "pinned-candidate-for-raw-api-live-inventory-only",
+    "productionTransportSelected": false
+  },
+  "outcome": "deterministic-inventory-pass-live-channel-evidence-deferred"
+}

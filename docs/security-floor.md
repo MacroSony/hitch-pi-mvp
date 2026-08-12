@@ -1,162 +1,146 @@
-# Security floor
+# Trusted-personal MVP safety baseline
 
-The simplified architecture cuts provider-broker scope. It does not cut the
-boundaries separating users, model-executed code, host data, channel secrets,
-or delivery ownership.
+## Threat model
 
-## Trust boundary
+Hitch is an attended service for a few statically configured people personally
+trusted by the operator. It is not designed for public signup, hostile tenants,
+shared workspaces, or unattended automation.
 
-Trusted host code consists of Hitch, Pi 0.84.1, the selected sandbox library,
-and explicitly pinned operator extensions. Pi's native controller and those
-extensions may access the operator Pi profile and provider credentials.
+Trusted host code consists of Hitch, pinned Pi, the selected sandbox backend,
+and any explicitly enabled operator extension. Untrusted inputs consist of
+model output, model-created commands, workspace content, inbound files, and
+chat content. Trusted people can still trigger unsafe model behavior by
+accident, so model-facing file and shell execution must not run directly on the
+host.
 
-Untrusted code consists of model output, standard filesystem/shell tool
-commands, workspace contents, inbound files, project configuration, and chat
-input. It must not execute outside the sandbox backend or install/load a Pi
-extension. Arguments sent to a declared host-authority operator tool are
-validated under that trusted extension's reviewed policy.
+The baseline below is intentionally smaller than a production multi-tenant
+security program. It preserves the boundaries needed to test the product
+without pretending the MVP is hardened for adversarial users.
 
-This means extension trust is binary for the MVP: an enabled operator extension
-has host/controller authority. “Installed but untrusted” is not a supported
-state.
+## Required controls
 
-## Non-negotiable controls
+### Identity and ownership
 
-### Identity and state
+- Accept only exact statically configured private-channel tuples derived from
+  authenticated Telegram or WeChat metadata. Reject groups and missing or
+  contradictory identity fields before content or media work.
+- Scope sessions, Turns, selected models, cancellation, artifacts, and outbox
+  rows to the authenticated Hitch user.
+- Reject duplicate endpoint tuples, duplicate/nested user workspaces, and
+  workspace overlap with Hitch data, Pi profiles, or channel state.
+- Persist message admission before execution. Duplicate messages resolve to
+  the original Turn; a conflicting reuse is rejected.
 
-- Accept exact static private-channel tuples derived from authenticated update
-  metadata; never identity claims in content.
-- Scope session, Turn, model change, interaction, artifact, cancellation, and
-  delivery mutations by authenticated user in the same query/transaction.
-- Reject duplicate identities, tuple reassignment, workspace path/inode drift,
-  same-inode/nested workspaces, and service-root overlap.
-- Persist admission before execution and never replay `starting`, `running`, or
-  otherwise uncertain work.
+### Pi and extensions
 
-### Pi controller and extensions
-
-- Pin Pi and every extension by package/version/integrity or file digest.
-- Use a host-private operator Pi auth/profile path; never mount it into the
-  sandbox or expose it through media/tools.
-- Disable discovery, project trust, context files, workspace settings,
-  packages, project extensions, and implicit global extensions.
-- Disable Pi built-in tools and load the mandatory Hitch extension explicitly.
-- Attest the exact enabled tool/command/provider/extension snapshot before
-  accepting a prompt.
-- Operator extensions are trusted code. Users cannot install, enable, edit,
-  reload, or supply them from chat/workspace.
-- Bound and owner-bind extension UI requests; never treat their text/payload as
-  identity or authority.
+- Pin Pi and the mandatory Hitch extension. Use a dedicated, host-private Pi
+  profile that is never mounted into the tool sandbox.
+- Disable Pi project/global discovery, context files, workspace settings,
+  packages, project extensions, skills, prompts, and themes.
+- Disable Pi built-in tools. Before each prompt, attest that `read`, `write`,
+  `edit`, `bash`, `grep`, `find`, `ls`, and `hitch_publish` come from the
+  mandatory extension and that direct RPC bash is intercepted.
+- Extension initialization, duplicate registration, digest drift, or sandbox
+  startup failure aborts the Turn. There is no direct host fallback.
+- Optional operator extensions are absent from the initial MVP. Adding one is
+  an explicit operator trust decision and a later scoped change.
 
 ### Sandbox and process
 
-- Every standard Pi file/shell tool and direct user/RPC bash path routes to the
-  selected OS sandbox backend.
-- There is no direct-execution fallback after extension, backend, resource, or
-  namespace failure.
-- Open and revalidate canonical workspace roots without symlink following.
-- Expose only current workspace, current Turn inbox, bounded temp/runtime, and
-  the scoped publication bridge; never other users, Hitch/channel state,
-  provider auth, host home, or Pi profile.
-- Deny sandbox external networking by default.
-- Enforce wall, CPU, memory, process, temp, disk-quota, and output limits
-  outside untrusted code.
-- Cancellation/timeout kills and proves absence of the complete sandbox process
-  tree before releasing capacity.
-- A Pi session remains active after abort/timeout only after a proven terminal,
-  close/flush, durable sync, and clean controller exit; ambiguity quarantines.
+- Route every standard Pi filesystem/shell tool and direct user/RPC bash path
+  through Bubblewrap.
+- Expose only the current workspace read-write, current Turn inbox read-only,
+  bounded temporary storage, minimal runtime files, and the scoped publication
+  bridge. Do not expose host home, Pi auth, Hitch/channel data, or another user.
+- Deny sandbox networking by default.
+- Enforce practical wall-time, memory, process-count, temporary-storage, and
+  combined-output limits using the proven systemd/Bubblewrap backend.
+- Cancellation and timeout terminate the sandbox scope and confirm it is empty
+  before releasing the single controller slot.
+- Wait for Pi `agent_settled`. A forced or ambiguous controller close marks the
+  Turn unknown and quarantines the session instead of replaying it.
 
 ### Credentials and providers
 
-- Channel credentials remain only in Hitch channel adapters.
-- Provider credentials remain only in Pi's trusted controller/profile and may
-  be visible to trusted operator extensions.
-- No credential may enter the sandbox environment, files, arguments, VFS,
-  workspace, inbox, tool input/result, RPC output, SQLite, audit, or chat.
-- Provider login/logout and auth mutation are host-operator actions, never IM
-  commands.
-- Serialize provider-owning controllers globally until shared Pi profile/OAuth
-  refresh behavior is proven safe across processes; never trade credential
-  corruption for throughput.
-- Model selection must resolve to Pi's attested available-model snapshot and
-  optional static allowlist.
-- Do not automatically replay a Turn after uncertain provider/controller
-  interruption. Pi-native transient retries must be visible and abortable;
-  Phase 0 records their exact behavior rather than making a false exactly-once
-  provider claim.
+- Keep channel credentials in channel adapters and provider credentials in
+  Pi's trusted profile. Do not store them in SQLite or log/chat payloads.
+- Build controller and sandbox environments from explicit allowlists. No
+  provider or channel secret may enter the sandbox environment, arguments,
+  files, tool results, workspace, or inbox.
+- Provider login/logout is an attended host-operator action, never an IM
+  command.
+- Run at most one provider-owning Pi controller globally.
+- Validate that Pi profile JSON is readable before startup and provide clear
+  backup/re-login recovery if the pinned Pi writer is interrupted.
+- Resolve model changes only against Pi's current reported model catalog and
+  an optional static allowlist.
 
-### Media
+### Media and delivery
 
-- Stream intake to exclusive temps with advertised/observed byte limits,
-  incremental hash, structural MIME/image checks, and atomic promotion.
-- Bound image dimensions, decoded pixels, frames, names, captions, and counts.
-- Mount inbound files read-only with generated names.
-- Snapshot outbound files by verified descriptor with `openat2`, regular/
-  single-link checks, pre/post metadata, and no path reopen.
-- Never deliver a live path or object owned by another user/Turn.
+- Apply advertised and observed byte/count limits while receiving input. Use
+  exclusive owner-private temporaries, generated storage names, hashes, and
+  atomic promotion. Never use a supplied filename as a storage path.
+- Mount inbound files read-only. Treat only validated JPEG, PNG, GIF, and WebP
+  objects as native images; other accepted files remain opaque.
+- Snapshot outbound workspace files into immutable owner-private artifacts
+  through the descriptor-confined Phase 0 publication helper. Delivery never
+  reopens a live workspace path.
+- Persist terminal text and artifact deliveries to the owner-bound outbox
+  before sending. A channel retry may duplicate delivery, but it must not rerun
+  the agent Turn.
 
-### Persistence and operations
+### Bounds and operations
 
-- Use private data roots, foreign keys, explicit transactions, quotas,
-  retention, and bounded audit rotation.
-- Removing a user/endpoint/extension disables immutable publication; it does
-  not repurpose identity or silently mutate active sessions.
-- Outbox delivery and extension replies recheck the original endpoint tuple and
-  enabled owner.
+- Enforce the compiled prompt, queue, object, media, output, session-count, and
+  execution bounds documented in `docs/architecture.md`.
+- Refuse new media/Turn work when configured free-space thresholds are crossed.
+  Surface a clear operator warning that initial workspaces lack kernel-enforced
+  per-user disk quotas.
+- Use a private data root, SQLite foreign keys and explicit transactions, and
+  owner-private file modes.
+- Keep real provider/channel credentials and live calls out of deterministic
+  tests.
 
-## Accepted MVP compromises
+## Accepted MVP risks
 
-- The operator Pi profile and provider accounts are shared service resources.
-- Pi and approved operator extensions are in the provider-secret boundary.
-- There is no protection from root, the Hitch service account, or a malicious
-  approved extension.
-- Configuration/restart replace dynamic administration and extension reload.
+- Pi 0.84.1 serializes OAuth refresh but writes `auth.json` in place. A host or
+  process crash during that write can require restoring the operator backup or
+  logging in again. This is accepted for an attended MVP and remains a
+  post-MVP upstream hardening item.
+- The initial ext4 deployment has no project quota. Configured object/temp
+  limits and free-space checks reduce accidental exhaustion, but a runaway
+  workspace can consume shared disk. The operator monitors and can stop the
+  service.
+- Users are trusted not to attack identity, ownership, or resource controls.
+  Deterministic isolation tests still guard accidental cross-user bugs.
 - Delivery may duplicate after an ambiguous channel response.
-- Interrupted Pi/provider work becomes unknown and its session may quarantine.
-- Audit is bounded metadata, not tamper-evident.
+- Audit and retention are operationally useful but not tamper-evident or
+  exhaustively crash-tested.
+- Only providers and channel accounts actually available to the operator need
+  live MVP acceptance. Unavailable integrations are reported, not simulated as
+  live success.
 
-## Rejected shortcuts
+## Deferred hardening
 
-- Loading workspace/project/chat-supplied Pi extensions.
-- Assuming arbitrary extension tools are sandboxed automatically.
-- Leaving any built-in/direct host tool path enabled beside the Hitch
-  replacements.
-- Falling back to host execution when the sandbox fails.
-- Sharing workspaces, Pi session directories, or writable runtime/config paths.
-- Passing provider/channel credentials into the tool sandbox.
-- Treating prompts, forwards, filenames, callbacks, extension UI, or group
-  sender ids as authenticated identity.
-- Reading outbound files from unresolved strings or retrying unknown Turns.
+- public/hostile users, signup, roles, groups, shared sessions, and remote
+  administration;
+- kernel-enforced workspace quotas and complete hostile disk-exhaustion proof;
+- a patched crash-atomic upstream Pi credential writer;
+- Forge, ComfyUI Paint, arbitrary operator extensions, skills, MCP adapters,
+  and user-installed code;
+- high availability, horizontal scaling, exactly-once channel delivery, and
+  unattended scheduling; and
+- exhaustive filesystem race, media bomb, provider-family, dependency-failure,
+  and channel-failure certification beyond the MVP paths.
 
-## Minimum deterministic adversarial suite
+## Release-stopping failures
 
-1. Cross-user session/model/interaction/Turn/artifact id guessing.
-2. Telegram/WeChat private tuples, group rejection, missing fields, duplicates,
-   tuple drift, and idempotency conflicts.
-3. Workspace absolute/`..`/symlink/hardlink/rename/mount overlap attacks.
-4. Malicious `.pi` settings, context, extension, package, skill, prompt, and
-   environment/proxy discovery attempts.
-5. Tool enumeration proving only replacement tools, direct RPC bash routing,
-   extension startup failure, duplicate override, and zero host fallback.
-6. Sandbox reads of host home, Pi auth, Hitch state, other users, credentials,
-   external network, and another Turn's publication bridge.
-7. Sandbox forks, CPU/memory/disk/output exhaustion, timeout, cancellation, and
-   complete process-tree cleanup.
-8. Provider/model allowlist, unavailable auth, model switching, thinking
-   levels, sanitized failures, and interrupted Pi controller behavior.
-9. Extension command/UI ownership, expiry, replay, cross-user reply, excessive
-   output, and unsupported TUI operations.
-10. Media MIME spoofing, oversize, bombs, malicious names, symlink swaps,
-    mutation, partial/orphan cleanup, and quota exhaustion.
-11. Restart during every Turn, interaction, outbox, and possibly-sent state.
+Stop rather than weaken the MVP if an untrusted file/shell path can execute on
+the host, a credential reaches the tool sandbox or user output, a channel tuple
+can select another owner, cancellation leaves its sandbox scope running, or an
+unknown Turn is automatically replayed.
 
-Live Telegram, WeChat, multiple Pi auth families, sandbox, media, and extension
-acceptance use separately named opt-in commands and content-free manifests.
-
-## Sanitized failures
-
-Users receive a stable category and correlation id: `rejected`, `busy`,
-`media-invalid`, `session-quarantined`, `model-unavailable`,
-`extension-failed`, `sandbox-failed`, `agent-failed`, `delivery-failed`, or
-`internal-error`. Provider bodies, credentials, tokens, host paths, raw tool
-payloads, extension exceptions, and channel internals never enter chat/audit.
+Users receive stable failure categories such as `rejected`, `busy`,
+`media-invalid`, `session-quarantined`, `model-unavailable`, `sandbox-failed`,
+`agent-failed`, `delivery-failed`, and `internal-error`. Raw provider bodies,
+tokens, host paths, and internal tool payloads do not enter chat responses.

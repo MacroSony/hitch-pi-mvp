@@ -1,0 +1,114 @@
+{
+  "schemaVersion": 1,
+  "type": "hitch.phase0.sandbox-evidence",
+  "createdAt": "2026-08-12T15:30:50.294Z",
+  "inputs": {
+    "pi": "0.84.1",
+    "piPackageTreeSha256": "7298ead16e553a8ffc372ca6a5a17ccfd711ae0887830134255dcea08be55bba",
+    "piDependencyClosureSha256": "6d2055eaeef6823fd4b6edc062314e383fc6e233a4634a13e868a86eaebbcec4",
+    "node": "v24.14.0",
+    "kernel": "7.0.0-28-generic",
+    "bubblewrap": "bubblewrap 0.9.0",
+    "systemd": "systemd 255 (255.4-1ubuntu8.17)",
+    "extensionSha256": "9cc0929c921c47632c2ba53701c95dd5fd195712e1671779931bdaf7c59bf1d8",
+    "backendSha256": "72d9d2e11012a77dda0491253cc346c5417cfd7a67a0e7042dd79ea7cb91a2c1",
+    "workerSourceSha256": "7c591aeaa72ca63ddb09db42ee0562505ea3f416264f64870e69e9d8970f2cd9",
+    "helperSourceSha256": "766c4e48ab4862f5f9afc394b15c48a69ed6988fc32267e94f0512f225b07c6f",
+    "compiledHelperSha256": "9428f425beb6a544616920f66b74c6d7d4b2b92e9ccf3923a55f9796cf513027",
+    "providerFixtureSha256": "40f1cde139aaf0d47e3f6b640dbb7436abc999031112552fef2683c32d1bc323",
+    "runnerSha256": "531cf3054f2b3e8dc918e5425721d59a1b59a36e47c3144c6b61ce215bae3362"
+  },
+  "controls": {
+    "realCredentialsUsed": false,
+    "realProviderCallsMade": false,
+    "externalNetworkAllowed": false,
+    "ambientHomeUsed": false,
+    "gondolinEvaluated": false,
+    "gondolinReason": "qemu-unavailable"
+  },
+  "cases": {
+    "toolAndMediaRouting": {
+      "pass": true,
+      "exactTools": [
+        "bash",
+        "edit",
+        "find",
+        "grep",
+        "hitch_publish",
+        "ls",
+        "read",
+        "write"
+      ],
+      "directRpcBashRouted": true,
+      "nativeImageReachedProvider": true,
+      "workspaceReadWrite": true,
+      "inboxReadOnly": true,
+      "publicationSnapshot": true,
+      "providerStreamCalls": 9,
+      "agentSettled": true,
+      "toolSchemaDigest": "198eb6c8949ac454b550602553fcbf4f19691ea7c5c0d3c4e796a97b1d7976bd"
+    },
+    "resources": {
+      "pass": true,
+      "workspaceWritable": true,
+      "inboxReadOnly": true,
+      "hostHomeDenied": true,
+      "otherUserWorkspaceDenied": true,
+      "externalNetworkDenied": true,
+      "temporaryStorageBounded": true,
+      "processCountBounded": true,
+      "combinedOutputBounded": true,
+      "wallTimeBounded": true,
+      "memoryBounded": true,
+      "cpuQuotaAttested": "50%",
+      "cancellationProcessTreeCleanup": true,
+      "symlinkPublicationRejected": true,
+      "intermediateSymlinkPublicationRejected": true,
+      "hardlinkPublicationRejected": true,
+      "mutatingPublicationRejected": true,
+      "alreadyAbortedPublicationRejected": true,
+      "midCopyPublicationAbortCleanup": true
+    },
+    "pathSafety": {
+      "pass": true,
+      "symlinkWorkspaceRejected": true,
+      "openat2Revalidation": true,
+      "fdBoundMounts": true,
+      "reviewedWorkerSealedInMemfd": true
+    },
+    "cancellation": {
+      "pass": true,
+      "abortResponse": true,
+      "agentSettled": true,
+      "toolEnded": true
+    },
+    "failClosed": {
+      "pass": true,
+      "initializationFailure": {
+        "pass": true,
+        "rejectedBeforeRpc": true,
+        "hostFallbackExecuted": false
+      },
+      "failedStartupFreshness": {
+        "pass": true,
+        "freshControllerNonceRequired": true,
+        "priorReadinessRejected": true,
+        "workSubmitted": false,
+        "hostFallbackExecuted": false
+      },
+      "allBackendCleanupsConfirmed": true,
+      "activeUnitsAfterSuite": 0,
+      "noHostFallbackObserved": true
+    }
+  },
+  "hostPrerequisites": {
+    "workspaceProjectQuotaAvailable": false,
+    "qemuAvailable": false
+  },
+  "decision": {
+    "candidate": "custom-bubblewrap",
+    "deterministicSubgate": "pass",
+    "productionDisposition": "blocked-until-production-filesystem-enables-enforceable-project-quota"
+  },
+  "outcome": "deterministic-subgate-pass-with-host-quota-blocker"
+}

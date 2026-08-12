@@ -1,146 +1,154 @@
-# Implementation plan
+# Trusted-personal MVP implementation plan
 
-## Estimate units
+## Delivery rule
 
-Estimates are **active Luna agent-hours**, including repository inspection,
-tool execution, test runs, debugging, and one self-review pass. External
-waiting for package downloads, provider login, Telegram setup, WeChat QR
-confirmation, or user feedback is listed separately.
+Build the smallest vertical product that lets a few statically configured,
+trusted people use private Pi sessions from Telegram and WeChat. The model and
+workspace contents are still untrusted, so filesystem and shell tools remain
+inside the mandatory Bubblewrap-backed Hitch extension.
 
-With Luna allowed to run continuously and operator checkpoints answered
-promptly, the user-testable Telegram build should take roughly 24–48 elapsed
-hours and the full two-channel actual-usage gate roughly 3–7 elapsed days. The
-more reliable planning range is the active-agent range below because paused
-agents and live-service availability dominate calendar time.
+Implement one phase at a time. Before each phase commit, request an independent
+subagent review, resolve blocking findings, run the deterministic checks, and
+record the result in the commit message or phase handoff.
 
-## Phase 0 — Prove the revised runtime boundary (4–8 agent-hours)
+Real credentials and live channel/provider checks are always opt-in. They never
+run in normal CI.
 
-1. Pin the exact Pi and sandbox candidate inputs in
-   `docs/phase-0-inputs.md`.
-2. Start Pi 0.84.1 against a disposable fixture profile, then run an opt-in
-   inventory against the configured operator profile without copying its
-   credentials; enumerate registered/available models and switch provider,
-   model, and thinking level without Hitch provider translation.
-3. Test shared-profile concurrency and OAuth refresh failure; retain a global
-   one-controller gate unless atomic behavior is proven.
-4. Load only the mandatory Hitch extension, disable built-in tools, and prove
-   that every file/shell path—including direct RPC bash—uses the extension.
-5. Prototype the Bubblewrap backend using bounded code copied from
-   `../hitch-hub`; measure the official Gondolin extension/backend if QEMU is
-   made available.
-6. Prove workspace rw, inbox ro, host/other-user denial, no sandbox credential,
-   cancellation, timeout, process cleanup, and `hitch_publish` bridging.
-7. Verify session continuity across fresh Pi processes and quarantine on every
-   forced or ambiguous close.
-8. Inventory existing Telegram/WeChat transport code and its unsafe identity or
-   media assumptions.
+## Phase 0 — MVP reset and retained evidence (current)
 
-Gate: record the selected sandbox backend, Pi profile/auth boundary, loaded
-extension manifest, available-model snapshot, commands, measurements, and
-adversarial evidence in `docs/phase-0-decisions.md`. Stop if any built-in or
-extension tool can execute model-controlled work outside the sandbox.
+- Retain the deterministic runtime, extension, sandbox, and transport evidence
+  under `spikes/` as design input.
+- Accept Pi `auth.json` crash recovery as an attended-operator limitation for
+  the MVP. Use one controller globally, validate the profile before launch, and
+  document backup/re-login recovery.
+- Accept that the initial host has no project quota. Enforce configured object,
+  inbox, output, temp, and execution bounds; check free space; document that the
+  workspace itself has no hard per-user disk isolation.
+- Exclude Pi Forge and ComfyUI Paint from the initial manifest. Their missing
+  Hitch service modes do not block the core MVP.
+- Move real provider inventory and API-key/OAuth smoke to opt-in dogfood
+  acceptance. One working provider is enough for the first usable build.
+- Select the proven Bubblewrap spike as the production starting point. Do not
+  evaluate Gondolin unless Bubblewrap fails on the deployment host.
 
-## Phase 1 — Durable foundation (5–9 agent-hours)
+Checkpoint: the required documents consistently authorize Phase 1 under the
+trusted-personal threat model, while preserving sandbox and credential
+separation.
 
-- Add Node 24/TypeScript setup, lockfile, lint/typecheck/build/test commands,
-  and CI.
-- Implement strict static configuration and secret references.
-- Create the small SQLite schema from `docs/architecture.md` with foreign keys,
-  WAL, explicit transactions, deterministic clocks/IDs, and restart tests.
-- Publish immutable users, endpoints, workspaces, and extension profiles.
-- Add owner-namespaced private blobs and quota verification.
+## Phase 1 — Minimal durable foundation (3–6 agent-hours)
 
-Checkpoint: fake channels boot/reopen a private data root and reject unsafe
-configuration, path overlap, quota failure, or unknown schema state.
+- Add Node.js 24, TypeScript, a committed lockfile, format/typecheck/test/build
+  commands, and CI.
+- Use a strict JSON configuration with environment-variable secret references.
+- Create a small SQLite schema for users, exact channel endpoints, sessions,
+  turns, and outbox rows. Enable foreign keys and explicit transactions.
+- Publish static users/workspaces on startup and reject duplicate endpoint
+  tuples; missing, non-directory, or non-private workspace paths; nested user
+  workspaces; and overlap with the data root.
+- Provide deterministic clocks/IDs and credential-free restart tests.
 
-## Phase 2 — Telegram text and sessions (8–14 agent-hours)
+Checkpoint: the service boots and reopens a private data root with two fake
+users, and unsafe configuration fails before channel or Pi startup.
 
-- Implement exact private identity mapping, idempotent intake, per-user FIFO,
-  durable outbox, and the session/recovery commands.
-- Add the Pi RPC lifecycle with a deterministic fake runtime first.
-- Port Telegram long polling, text delivery, health, and shutdown.
-- Prove two-user isolation, duplicate suppression, restart, stop, abort, and
-  forced-close quarantine.
+## Phase 2 — Telegram text vertical slice (5–9 agent-hours)
 
-Checkpoint: two Telegram users can independently hold durable text sessions.
+- Implement direct Bot API long polling with exact bot/private-chat/sender
+  admission before content handling.
+- Persist idempotent intake before execution, with one active and three queued
+  Turns per user.
+- Add a small Pi runtime interface and deterministic fake runtime.
+- Implement `!new`, `!sessions`, `!switch`, `!status`, `!abort`, `!stop`, and
+  `!recover`.
+- Persist terminal text to a bounded outbox before delivery; tolerate possible
+  duplicate chat delivery but never duplicate an agent Turn.
+- Prove two-user isolation, restart behavior, and uncertain-Turn quarantine.
 
-## Phase 3 — Native Pi providers and extensions (8–16 agent-hours)
+Checkpoint: two allowlisted Telegram fixtures can independently use durable
+text sessions through the fake runtime.
 
-- Connect the Phase 0 Pi controller and selected sandbox extension/backend.
-- Add `!models`, `!model`, `!thinking`, and `!commands`.
-- Persist selected model/reasoning per session and validate it against Pi's
-  current available-model snapshot.
-- Load pinned operator extensions from read-only paths.
-- Bridge extension commands and bounded RPC UI interactions to IM replies.
-- Add live acceptance for at least two differently authenticated Pi providers,
-  one API-key and one OAuth provider when available.
+## Phase 3 — Native Pi and Bubblewrap dogfood (5–10 agent-hours)
 
-Checkpoint: the same session can deliberately switch among allowed Pi-native
-models; provider credentials remain absent from the tool sandbox and outputs.
+- Promote the bounded Phase 0 mandatory extension and Bubblewrap backend into
+  production modules.
+- Start one fresh pinned Pi controller per Turn, with one global controller
+  slot and the dedicated operator profile.
+- Disable discovery and built-in tools; attest the mandatory replacement tools
+  and direct RPC bash before prompting.
+- Add `!models`, `!model`, and `!thinking`, persisting selection per session.
+- Wait for `agent_settled`; quarantine on ambiguous close. On clean exit, sync
+  the transcript and its parent directory.
+- Add startup validation for the Pi profile and clear operator recovery
+  instructions for a corrupt profile.
+- Run an opt-in live Telegram plus one-provider smoke.
 
-## Phase 4 — Telegram full media (12–22 agent-hours)
+Checkpoint: one trusted user can perform useful Pi coding turns over Telegram,
+with shell/file operations confined to the configured workspace sandbox.
 
-- Port image/document download and upload.
-- Implement streaming temp intake, size/count limits, hashing, MIME/image
-  validation, atomic owner-private blobs, cleanup, and read-only inbox mounts.
-- Pass supported images to Pi natively and ordinary files by sandbox path.
-- Implement descriptor-based `!send` snapshots and the authenticated
-  `hitch_publish` extension bridge.
-- Test symlink/hardlink/rename races, mutation, oversize, decompression bombs,
-  abort, and delivery restart.
+## Phase 4 — Basic images and files (4–8 agent-hours)
 
-Checkpoint: two Telegram users exchange text, images, and ordinary files
-without workspace, credential, or artifact leakage.
+- Stream inbound objects to owner-private temporary files with configured byte
+  and count limits, hashing, generated storage names, and atomic promotion.
+- Pass JPEG, PNG, GIF, and WebP as native Pi images; mount other files read-only
+  in the current Turn inbox.
+- Implement bounded immutable snapshots for `!send` and `hitch_publish` using
+  the existing descriptor-confined Phase 0 helper.
+- Deliver bounded artifacts through the outbox and clean abandoned temporaries.
 
-## Phase 5 — WeChat and multi-channel operation (8–14 agent-hours)
+Checkpoint: Telegram text, common images, and ordinary files work in both
+directions without cross-user paths or credentials entering the sandbox.
 
-- Port QR login, sync/context state, receiving, sending, throttling, cooldown,
-  and upload behavior.
-- Apply the same identity/session/Turn/media/outbox services as Telegram.
-- Keep WeChat state outside all workspaces and tool sandboxes.
-- Prove exact private-peer routing and group rejection.
+## Phase 5 — WeChat private-peer support (4–8 agent-hours)
 
-Checkpoint: one service safely runs Telegram and WeChat for two users.
+- Use the pinned WeChat client only at its raw API boundary; Hitch owns cursor
+  persistence and admission order.
+- Accept only exact configured account/private-peer tuples with stable message
+  IDs, and reject groups before media work.
+- Reuse the same sessions, queue, media, sandbox, and outbox services.
+- Keep WeChat credentials, cursors, and context tokens outside workspaces and
+  bind context tokens to the exact account/peer tuple.
+- Run opt-in QR/login and send/receive acceptance.
 
-## Phase 6 — Actual-usage gate (12–24 agent-hours)
+Checkpoint: the same service supports private Telegram and WeChat use for the
+small configured user set.
 
-- Complete the adversarial suite in `docs/security-floor.md`.
-- Add text chunking, bounded retries, graceful shutdown, diagnostics,
-  retention, audit rotation, backup, upgrade, and revocation guidance.
-- Exercise process death in every Turn/outbox state and dependency failures.
-- Run attended Telegram, WeChat, native-provider, operator-extension, sandbox,
-  media, abort, restart, and recovery acceptance with two users.
+## Phase 6 — MVP acceptance and operator guide (3–6 agent-hours)
 
-Checkpoint: every product completion condition is recorded against one commit,
-one dependency lock, one Pi profile digest, and one host snapshot.
+- Run deterministic isolation, duplicate, restart, abort, timeout, media-bound,
+  and sandbox fail-closed tests.
+- Run attended live checks for the configured channels and providers that are
+  actually available; record unavailable integrations honestly.
+- Document installation, Pi login, config, systemd service, backup/recovery,
+  logs, known limitations, and complete uninstall/reset steps.
+- Fix only release-blocking defects. Move hard quotas, crash-atomic upstream Pi
+  auth persistence, optional operator extensions, stronger audit/retention, and
+  broader provider matrices to post-MVP work.
 
-## Milestone forecast
+Checkpoint: a new operator can follow the guide and use the concept without
+editing source code.
 
-| Milestone | Cumulative active agent time | Typical external checkpoints |
-| --- | ---: | --- |
-| Runtime/sandbox decision | 4–8 h | QEMU choice if Gondolin is tested |
-| Telegram text dogfood | 17–31 h | Bot token and two test identities |
-| Native providers + extensions | 25–47 h | Pi auth and one extension approval |
-| Telegram full-media dogfood | 37–69 h | Live upload/download checks |
-| Telegram + WeChat feature-complete | 45–83 h | WeChat QR/login availability |
-| Actual-usage release gate | 57–107 h | Two-user attended acceptance |
+## MVP safety baseline
 
-Expect approximately 8–14 implementation/review cycles. A failed sandbox
-candidate can add 8–16 agent-hours; unstable WeChat behavior can add 6–12.
-Provider breadth itself is no longer a per-provider implementation estimate
-because Pi owns it, though each important auth family still needs live smoke
-evidence.
+The following remain release requirements even for trusted users:
 
-## Implementation constraints
+- exact private-channel allowlisting and owner-scoped state access;
+- no provider/channel credentials in workspaces, SQLite, logs, chat, or the
+  tool sandbox;
+- no workspace/project Pi extension or configuration discovery;
+- every standard file/shell tool and direct bash path enters Bubblewrap, with
+  no host fallback;
+- bounded input, output, queue depth, and execution time;
+- cancellation cleans up the sandbox process tree before capacity reuse; and
+- uncertain work is quarantined rather than automatically replayed.
 
-- Do not import `../hitch-hub` at runtime. Copy only bounded modules with tests
-  or provenance.
-- Do not bring over the generalized v2 schema, authorization graph, remote
-  protocol, or provider broker.
-- Pi and enabled operator extensions are trusted controller code. Workspace or
-  chat users cannot add extensions.
-- Every model-facing tool and direct shell path must fail closed through the
-  selected sandbox backend; no host fallback exists.
-- Real provider/channel tests remain opt-in; deterministic equivalents run in
-  normal CI and never claim live acceptance.
-- Keep commits phase-bounded and the repository green.
+## Explicitly deferred hardening
+
+- hostile or public users, groups, signup, roles, remote administration, or
+  shared workspaces;
+- high availability, horizontal scale, exactly-once delivery, and unattended
+  automation;
+- per-workspace kernel-enforced project quotas on the initial host;
+- crash-atomic changes inside the pinned upstream Pi credential writer;
+- Pi Forge, ComfyUI Paint, arbitrary operator extensions, skills, MCP, or
+  user-installed extensions; and
+- exhaustive filesystem race, media bomb, provider-family, and channel-failure
+  certification beyond the bounded paths used by the MVP.

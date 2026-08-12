@@ -1,5 +1,7 @@
 # Architecture
 
+Status: implementation architecture for the trusted-personal MVP
+
 ## Design rule
 
 Hitch owns IM identity, sessions, scheduling, media, and delivery. Pi owns agent
@@ -21,7 +23,7 @@ Telegram long poll              WeChat iLink
                        |
         trusted Pi RPC controller
         native ModelRuntime + auth
-        allowlisted operator extensions
+        no optional extensions initially
         mandatory hitch-sandbox extension
                        |
              sandbox backend
@@ -62,18 +64,21 @@ event bus, plugin marketplace, or transport-neutral remote protocol.
 
 Configuration maps exact channel tuples to one Hitch user:
 
-```yaml
-users:
-  alice:
-    workspace: /srv/hitch/workspaces/alice
-    extensions: [review-loop]
-    telegram:
-      bot_account: primary
-      user_id: "123"
-      private_chat_id: "123"
-    wechat:
-      account: primary
-      user_id: wxid_alice
+```json
+{
+  "users": [
+    {
+      "id": "alice",
+      "workspace": "/srv/hitch/workspaces/alice",
+      "telegram": {
+        "account": "primary",
+        "userId": "123",
+        "privateChatId": "123"
+      },
+      "wechat": { "account": "primary", "userId": "wxid_alice" }
+    }
+  ]
+}
 ```
 
 Accepted evidence is:
@@ -91,20 +96,17 @@ references only; their identity/media assumptions must be adapted.
 Each endpoint stores its selected session. Every lookup and mutation includes
 the authenticated `user_id` in the same database operation.
 
-## Minimal persistence
+## MVP persistence
 
-| Table | Purpose |
-| --- | --- |
-| `users` | Published users, workspace identity, enabled state |
-| `channel_endpoints` | Exact private tuple and selected session |
-| `extension_profiles` | Immutable allowed extension manifest digest |
-| `sessions` | Owner, Pi identity, selected model/thinking, lifecycle |
-| `turns` | Admission, FIFO ordinal, state, result, idempotency |
-| `artifacts` | Owner-namespaced immutable inbound/outbound objects |
-| `turn_artifacts` | Turn, direction, role, display metadata |
-| `interactions` | Expiring extension UI request/reply state |
-| `outbox` | Text/artifact deliveries and bounded attempts |
-| `audit` | Content-free security/lifecycle metadata |
+| Table | Phase | Purpose |
+| --- | --- | --- |
+| `users` | 1 | Published users, workspace identity, enabled state |
+| `channel_endpoints` | 1 | Exact private tuple and selected session |
+| `sessions` | 1 | Owner, Pi identity, selected model/thinking, lifecycle |
+| `turns` | 1 | Admission, FIFO ordinal, state, result, idempotency |
+| `outbox` | 1 | Text/artifact deliveries and bounded attempts |
+| `artifacts` | 4 | Owner-namespaced immutable inbound/outbound objects |
+| `turn_artifacts` | 4 | Turn, direction, role, display metadata |
 
 Prompt and final assistant text are retained for product recovery. Provider or
 channel credentials, raw extension UI secrets, absolute paths, and raw tool
@@ -114,7 +116,6 @@ arguments/results are never stored in SQLite/audit.
 Turn: queued -> starting -> running -> terminal
 Outcome: succeeded | failed | cancelled | timed-out | unknown
 Session: active | stopped | quarantined
-Interaction: pending -> answered | cancelled | expired
 Outbox: pending -> sending -> sent | retryable | failed | expired
 ```
 
@@ -132,18 +133,29 @@ directory, selected provider/model/thinking, fixed workspace, and extension
 profile digest. Each Turn launches a fresh Pi 0.84.1 RPC controller against
 that state. Only one Turn per user may touch Pi state.
 
+On first use, the transcript path is provisional: Pi does not create its JSONL
+file until the first assistant message. Hitch's SQLite session row remains the
+source of ownership and requested model/thinking before that boundary. After
+creation, every fresh controller opens the exact private transcript path; it
+does not use `--session-id` lookup. Two processes may otherwise append valid
+JSONL sibling branches to one session while only one Turn remains on the
+selected leaf, so the global controller gate also prohibits concurrent opens
+of the same transcript.
+
 The controller uses an operator-managed, host-private Pi profile and native
 `ModelRuntime`. At service startup Hitch obtains `get_available_models`, checks
 static allowlists, and publishes a content-free catalog digest. Session changes
 use RPC `set_model` and `set_thinking_level`. Hitch does not parse provider
 requests or credentials.
 
-The MVP admits only one provider-owning Pi controller globally at a time until
-Phase 0 proves that independent Pi processes can safely share and atomically
-refresh the same `auth.json` across API-key and rotating OAuth providers. This
-is a throughput shortcut, not a multiuser identity shortcut: every user's
-queue/session remains independent. A later tested per-provider lock or
-credential service may raise concurrency without changing the IM model.
+The MVP admits only one provider-owning Pi controller globally at a time. The
+pinned Pi serializes rotating OAuth refresh with a file lock, but its in-place
+`auth.json` write is not crash-atomic: deterministic mid-write termination can
+leave invalid JSON. For this attended MVP, startup validates the profile and
+the operator keeps a private backup or logs in again after corruption. A
+durable upstream writer remains post-MVP hardening. The global gate also
+prevents concurrent transcript opens; every user's queue/session remains
+independent.
 
 Pi discovery is disabled and extensions are loaded explicitly from immutable
 manifests. The workspace cannot load `.pi/extensions`, settings, packages,
@@ -151,16 +163,19 @@ skills, prompts, themes, or context files. Operator extensions may contribute
 their own reviewed resources through Pi APIs.
 
 Pi RPC supplies progress, tools, final text, model/catalog operations,
-commands, cancellation, native image input, and extension UI. Select/confirm/
-input requests become owner-bound expiring IM interactions. Notifications and
-status are bounded/coalesced; editor/custom/TUI-only requests fail unless a
-defined text projection exists.
+cancellation, and native image input. Optional extension commands and UI are
+post-MVP work.
+
+RPC `prompt` success is only a preflight acceptance signal. The Turn remains
+active until Pi emits `agent_settled`; `turn_end` and `agent_end` can occur
+before tool/retry continuation has fully settled. Hitch never treats the
+prompt response itself as a flush or completion boundary.
 
 `!abort` and deadlines first request RPC cancellation. A session stays active
-only after Pi emits a proven terminal event, completes close/flush, durably
-synchronizes its transcript, and exits cleanly. Forced signals, ambiguous
-transport close, or unproven flush quarantine the session even if the Turn is
-reported `cancelled` or `timed-out`.
+only after Pi emits `agent_settled`, exits cleanly, and Hitch successfully
+`fsync`s the transcript file and its parent directory. Forced signals,
+ambiguous transport close, or failed/unproven sync quarantine the session even
+if the Turn is reported `cancelled` or `timed-out`.
 
 ## Extension boundary
 
@@ -171,16 +186,19 @@ starts with built-in tools disabled; the extension registers:
 read, write, edit, ls, grep, find, bash, hitch_publish
 ```
 
-It also overrides direct user/RPC bash. Initialization failure, missing tool,
-duplicate tool override, unexpected discovered extension, digest drift, or
+It also overrides direct user/RPC bash. The mandatory extension is loaded
+first, and startup attests the exact winning source path for every expected
+tool. The pinned Pi ResourceLoader's pre-RPC duplicate-registration rejection
+is a required security behavior and is tested with the conflicting extension
+in both load orders; `getAllTools()` is not treated as collision detection.
+Initialization failure, missing or wrong-source tool, duplicate registration,
+unexpected discovered extension, digest drift, later surface mutation, or
 sandbox backend failure aborts the Turn before prompting Pi.
 
-Optional operator extensions are pinned and loaded explicitly. They may use
-the full Pi API, including providers, commands, tools, events, and UI, and
-therefore execute in the provider-credential trust boundary. Their tools are
-host-capable unless the extension deliberately delegates to the Hitch sandbox
-client. Enabling an operator extension is equivalent to installing trusted
-service code; chat/workspace users cannot do it.
+Optional operator extensions are excluded from the initial build. A later
+phase may pin and load a specific extension explicitly, but doing so places it
+inside the provider-credential boundary. Chat/workspace users can never
+install or enable one.
 
 ## Sandbox extension and backend
 
@@ -231,8 +249,8 @@ Configuration publication is immutable for a data root. Startup fails on
 duplicate/reassigned endpoint tuples; duplicate, same-inode, nested, or
 overlapping workspaces; workspace path/inode drift with sessions; extension
 manifest drift; or overlap with service/session/channel/runtime/blob roots.
-Removal disables a published row; identities are never repurposed. Outbox and
-interaction replies recheck the original tuple and owner.
+Removal disables a published row; identities are never repurposed. Outbox
+delivery rechecks the original tuple and owner.
 
 | Resource | Compiled MVP maximum |
 | --- | --- |
@@ -245,18 +263,18 @@ interaction replies recheck the original tuple and owner.
 | Image side / decoded pixels / frames | 16,384 / 40 MP / 100 |
 | Outbound artifact / count / caption | 50 MiB / 8 / 1,024 bytes |
 | Final text / delivery chunks | 64 KiB / 16 |
-| Pending extension interactions per user | 1, expires after 10 minutes |
 | Tool output per call / Turn | 1 MiB / 8 MiB |
-| Audit storage | 8 files of 16 MiB |
-| Workspace quota per user | 10 GiB |
-| Blob plus Pi-session quota per user | 2 GiB |
-| Complete service data-root quota | 20 GiB |
+| Workspace monitored soft limit per user | 10 GiB |
+| Blob plus Pi-session enforced application limit per user | 2 GiB |
+| Complete service data-root free-space stop threshold | operator configured |
 
-Workspace and data roots require enforceable quotas. `EDQUOT`/`ENOSPC` fail
-without partial promotion. Turn/result and delivered artifacts retain 30 days;
-stopped/replaced transcripts 30 days; failed/expired outbox payloads 7 days;
-temps at most one hour. Active/quarantined sessions remain until explicit
-replacement/stop or whole disabled-user removal.
+Object, inbox, publication, temp, and output limits are enforced by Hitch.
+The initial filesystem does not provide per-workspace project quotas, so Hitch
+also checks free space before accepting work and reports the workspace limit as
+attended monitoring rather than hard isolation. `ENOSPC` fails without partial
+artifact promotion. Automated retention is post-MVP; the operator can remove
+stopped data with the documented maintenance command. Active/quarantined
+sessions remain until explicit replacement/stop or disabled-user removal.
 
 ## Delivery
 

@@ -1,0 +1,157 @@
+{
+  "schemaVersion": 1,
+  "type": "hitch.phase0.p0a-evidence",
+  "createdAt": "2026-08-12T15:30:23.015Z",
+  "inputs": {
+    "pi": "0.84.1",
+    "piPackageTreeSha256": "7298ead16e553a8ffc372ca6a5a17ccfd711ae0887830134255dcea08be55bba",
+    "node": "v24.14.0",
+    "npm": "11.9.0",
+    "kernel": "7.0.0-28-generic",
+    "probeSha256": "1351180048d4ffced956b89075bb2bfd31ba150ae171d77212af7c3fdbe51ec1",
+    "collisionFixtureSha256": "9493195d7119b2f8c341544a35b1637601f8b3055e8cb92c393a9ac4fc006d5f",
+    "attestorFixtureSha256": "e1704ec8da45ae05822d07bbc0c9fcae07b2f8eaee2d58b76c3a18b444d187bf",
+    "discoveryFixtureSha256": "8e344108cfa738fd1b5d1df60d2d79089ca4b1f2c59b4ae1b5820f7eaf55dc5d",
+    "profileAuthFixtureSha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+    "profileModelsFixtureSha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+    "runnerSha256": "ce4e94ea52d7bf0153a520c59b0d35d61ba5ddf99e84c08e70623257f290c112"
+  },
+  "controls": {
+    "credentialsUsed": false,
+    "providerCallsMade": false,
+    "offline": true,
+    "telemetry": false
+  },
+  "cases": {
+    "a1": {
+      "pass": true,
+      "explicitExtensionLoaded": true,
+      "exactCommands": [
+        "llama",
+        "p0a"
+      ],
+      "exactTools": [
+        "read",
+        "write",
+        "edit",
+        "ls",
+        "grep",
+        "find",
+        "bash"
+      ],
+      "exactActiveTools": [
+        "read",
+        "write",
+        "edit",
+        "ls",
+        "grep",
+        "find",
+        "bash"
+      ],
+      "allReplacementSources": "cli",
+      "allWinningPaths": "probe"
+    },
+    "a2a": {
+      "pass": true,
+      "projectApproved": true,
+      "discoveryDisabled": true,
+      "exactCommands": [
+        "llama"
+      ],
+      "exactTools": [
+        "bash",
+        "edit",
+        "find",
+        "grep",
+        "ls",
+        "read",
+        "write"
+      ],
+      "exactActiveTools": [],
+      "allToolSources": "builtin"
+    },
+    "a2b": {
+      "pass": true,
+      "projectApproved": true,
+      "positiveDiscoveryControl": true,
+      "exactCommands": [
+        "auto-discovered",
+        "llama"
+      ],
+      "exactTools": [
+        "bash",
+        "edit",
+        "find",
+        "grep",
+        "ls",
+        "read",
+        "write"
+      ],
+      "exactActiveTools": [],
+      "allToolSources": "builtin"
+    },
+    "b1": {
+      "pass": true,
+      "exactTools": [
+        "read",
+        "write",
+        "edit",
+        "ls",
+        "grep",
+        "find",
+        "bash"
+      ],
+      "exactActiveTools": [
+        "read",
+        "write",
+        "edit",
+        "ls",
+        "grep",
+        "find",
+        "bash"
+      ],
+      "omittedTool": "write",
+      "observedSource": "builtin"
+    },
+    "b2": {
+      "pass": true,
+      "cliToolsOmitted": true,
+      "exactTools": [
+        "read",
+        "write",
+        "edit",
+        "ls",
+        "grep",
+        "find",
+        "bash"
+      ],
+      "exactActiveTools": [
+        "read",
+        "write",
+        "edit",
+        "ls",
+        "grep",
+        "find",
+        "bash"
+      ],
+      "allReplacementSources": "cli"
+    },
+    "b3": {
+      "pass": true,
+      "rpcBashOutput": "extension-owned-sentinel"
+    },
+    "c1": {
+      "pass": true,
+      "collision": "write",
+      "rejectedBeforeRpc": true,
+      "explicitOrder": "probe-then-collision"
+    },
+    "c2": {
+      "pass": true,
+      "collision": "write",
+      "rejectedBeforeRpc": true,
+      "explicitOrder": "collision-then-probe"
+    }
+  },
+  "outcome": "pass"
+}
