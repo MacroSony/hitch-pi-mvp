@@ -262,7 +262,7 @@ delivery rechecks the original tuple and owner.
 | Display filename / MIME label | 128 UTF-8 / 127 ASCII bytes |
 | Image side / decoded pixels / frames | 16,384 / 40 MP / 100 |
 | Outbound artifact / count / caption | 50 MiB / 8 / 1,024 bytes |
-| Final text / delivery chunks | 64 KiB / 16 |
+| Final text / delivery chunks | 64,000 bytes / 16 |
 | Tool output per call / Turn | 1 MiB / 8 MiB |
 | Workspace monitored soft limit per user | 10 GiB |
 | Blob plus Pi-session enforced application limit per user | 2 GiB |

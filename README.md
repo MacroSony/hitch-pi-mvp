@@ -46,4 +46,13 @@ Copy `config.example.json`, create each configured workspace, Pi profile, and
 WeChat state directory with mode `0700`, and keep bot tokens only in the named
 environment variables. The current command validates and publishes the static
 configuration, initializes SQLite, reports content-free counts, and exits; the
-Telegram worker arrives in Phase 2.
+Telegram worker can now be exercised with the deterministic fake runtime:
+
+```text
+HITCH_TELEGRAM_PRIMARY_TOKEN=... \
+  npm start -- --config /absolute/path/config.json --fake-telegram
+```
+
+This mode uses the real Telegram Bot API but returns clearly labeled fake Pi
+responses. Native Pi and Bubblewrap are connected in Phase 3. Real tokens and
+live Telegram checks remain opt-in and never run in CI.
