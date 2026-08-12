@@ -23,10 +23,27 @@ runtime and does not inherit its generalized v2 domain model.
 - [Implementation plan](PLAN.md)
 - [Luna implementation handoff](LUNA_HANDOFF.md)
 
-The production service has not yet been scaffolded. Phase 0 evidence under
-`spikes/` found four real hardening gaps. The 2026-08-13 trusted-personal MVP
-reset accepts two as attended operational risks, excludes the two unsupported
-operator extensions, and moves live provider smoke to dogfooding. The smaller
-implementation sequence is now authorized in [PLAN.md](PLAN.md); the original
-findings remain recorded in
+The minimal service foundation is implemented; channel and Pi workers follow
+in later phases. Earlier Phase 0 evidence under `spikes/` found four real
+hardening gaps. The trusted-personal MVP reset accepts two as attended
+operational risks, excludes the two unsupported operator extensions, and moves
+live provider smoke to dogfooding. The smaller sequence is in
+[PLAN.md](PLAN.md); the original findings remain in
 [docs/phase-0-decisions.md](docs/phase-0-decisions.md).
+
+## Development
+
+Phase 1 provides the minimal durable foundation. It requires Node.js 24:
+
+```text
+npm ci
+npm run check
+npm run build
+npm start -- --config /absolute/path/config.json
+```
+
+Copy `config.example.json`, create each configured workspace, Pi profile, and
+WeChat state directory with mode `0700`, and keep bot tokens only in the named
+environment variables. The current command validates and publishes the static
+configuration, initializes SQLite, reports content-free counts, and exits; the
+Telegram worker arrives in Phase 2.

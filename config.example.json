@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "dataRoot": "/srv/hitch/data",
+  "piProfileDir": "/srv/hitch/pi-profile",
+  "minimumFreeBytes": 1073741824,
+  "telegramAccounts": [
+    {
+      "id": "primary",
+      "botTokenEnv": "HITCH_TELEGRAM_PRIMARY_TOKEN"
+    }
+  ],
+  "wechatAccounts": [
+    {
+      "id": "primary",
+      "stateDir": "/srv/hitch/wechat-primary"
+    }
+  ],
+  "users": [
+    {
+      "id": "alice",
+      "workspace": "/srv/hitch/workspaces/alice",
+      "telegram": {
+        "account": "primary",
+        "userId": "123",
+        "privateChatId": "123"
+      },
+      "wechat": {
+        "account": "primary",
+        "userId": "wxid_alice"
+      }
+    }
+  ]
+}
