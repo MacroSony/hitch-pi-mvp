@@ -23,8 +23,8 @@ runtime and does not inherit its generalized v2 domain model.
 - [Implementation plan](PLAN.md)
 - [Luna implementation handoff](LUNA_HANDOFF.md)
 
-The minimal service foundation is implemented; channel and Pi workers follow
-in later phases. Earlier Phase 0 evidence under `spikes/` found four real
+The durable foundation, Telegram text path, and native Pi/Bubblewrap runtime
+are implemented. Earlier Phase 0 evidence under `spikes/` found four real
 hardening gaps. The trusted-personal MVP reset accepts two as attended
 operational risks, excludes the two unsupported operator extensions, and moves
 live provider smoke to dogfooding. The smaller sequence is in
@@ -33,7 +33,9 @@ live provider smoke to dogfooding. The smaller sequence is in
 
 ## Development
 
-Phase 1 provides the minimal durable foundation. It requires Node.js 24:
+The MVP requires Node.js 24. Building the mandatory sandbox helper also needs
+`cc` and OpenSSL development headers; native operation needs Bubblewrap and a
+working systemd user manager:
 
 ```text
 npm ci
@@ -54,5 +56,39 @@ HITCH_TELEGRAM_PRIMARY_TOKEN=... \
 ```
 
 This mode uses the real Telegram Bot API but returns clearly labeled fake Pi
-responses. Native Pi and Bubblewrap are connected in Phase 3. Real tokens and
-live Telegram checks remain opt-in and never run in CI.
+responses.
+
+## Native Pi dogfood
+
+Authenticate Pi out of band into the dedicated private profile before starting
+Hitch. For example, run the pinned local Pi with
+`PI_CODING_AGENT_DIR=/srv/hitch/pi-profile`, use its interactive `/login`, exit,
+and confirm the profile and JSON files remain readable only by the service
+user. Do not use a personal ambient Pi profile and do not put provider keys in
+the Hitch service environment.
+
+Keep an offline, owner-private backup of `auth.json` while the service is
+stopped. If startup reports corrupt Pi profile JSON after a crash, restore that
+backup or repeat the attended Pi login; the MVP deliberately does not patch
+Pi's in-place credential writer.
+
+After `npm run build`, start the real vertical slice explicitly:
+
+```text
+HITCH_TELEGRAM_PRIMARY_TOKEN=... \
+  npm start -- --config /absolute/path/config.json --telegram
+```
+
+Startup pins and checks Pi `0.84.1` plus its dependency closure, validates the
+profile, compiles and pins the reviewed sandbox assets, obtains the native Pi
+model catalog, and requires a fresh mandatory-extension/Bubblewrap attestation.
+It exits if no authenticated model is available. `!models`, `!model`, and
+`!thinking` manage the session selection; normal text runs a native Pi Turn.
+
+Real provider and Telegram traffic is always opt-in and never runs in normal
+CI. The host-only sandbox check can be repeated with:
+
+```text
+HITCH_RUN_SANDBOX_TESTS=1 \
+  node --disable-warning=ExperimentalWarning --test dist/test/native-runtime.test.js
+```

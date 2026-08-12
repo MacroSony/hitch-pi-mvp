@@ -1,7 +1,7 @@
 # Implementation handoff
 
-Status: trusted-personal MVP reset approved; Phase 1 follows the reviewed plan
-baseline commit.
+Status: the trusted-personal reset, durable foundation, and Telegram text slice
+are committed. Phase 3 native Pi/Bubblewrap work is the current phase.
 
 ## Objective
 
@@ -20,16 +20,15 @@ marketplace, configuration graph, or public multi-tenant service.
 
 ## Current assignment
 
-After the MVP planning reset is independently reviewed and committed, implement
-only Phase 1 from `PLAN.md`:
+Complete only Phase 3 from `PLAN.md` before the next reviewed commit:
 
-- Node.js 24 and TypeScript project setup;
-- strict JSON configuration with environment secret references;
-- the minimal SQLite users/endpoints/sessions/turns/outbox schema;
-- static workspace publication and overlap checks; and
-- deterministic credential-free boot/restart tests.
+- promote the exact reviewed Phase 0 Bubblewrap assets;
+- pin and drive native Pi `0.84.1` through RPC with one global slot;
+- require fresh extension/tool attestation before prompting;
+- persist model, thinking, and transcript selection per session; and
+- keep real provider/Telegram dogfood opt-in.
 
-Do not build Telegram, Pi RPC, media, or WeChat inside the Phase 1 commit.
+Do not add media or WeChat inside the Phase 3 commit.
 
 ## Review and commit rule
 

@@ -20,6 +20,7 @@ export class HitchApplication {
   readonly #controllers = new Map<string, AbortController>();
   readonly #pumps = new Map<string, Promise<void>>();
   #started = false;
+  #stopping = false;
 
   public constructor(
     readonly store: HitchStore,
@@ -37,6 +38,8 @@ export class HitchApplication {
     let updateId: number | undefined;
     let replyPrivateChatId: string | undefined;
     try {
+      if (this.#stopping)
+        throw new AppError("busy", "Hitch is stopping; try again shortly");
       const ingress = classifyTelegramIdentity(update);
       updateId = ingress.updateId;
       const endpoint = this.store.resolveTelegramEndpoint(
@@ -62,7 +65,12 @@ export class HitchApplication {
         this.#schedule(admitted.userId);
         return { accepted: true, duplicate: admitted.duplicate, updateId };
       }
-      const result = this.store.executeCommand(identity, command, content.text);
+      const result = this.store.executeCommand(
+        identity,
+        command,
+        content.text,
+        this.runtime.models ?? [],
+      );
       if (result.abortTurnId !== null)
         this.#controllers.get(result.abortTurnId)?.abort();
       return { accepted: true, duplicate: result.duplicate, updateId };
@@ -89,7 +97,7 @@ export class HitchApplication {
   }
 
   #schedule(userId: string): void {
-    if (this.#pumps.has(userId)) return;
+    if (this.#stopping || this.#pumps.has(userId)) return;
     const pump = Promise.resolve()
       .then(() => this.#pumpUser(userId))
       .finally(() => {
@@ -102,6 +110,7 @@ export class HitchApplication {
 
   async #pumpUser(userId: string): Promise<void> {
     for (;;) {
+      if (this.#stopping) return;
       const turn = this.store.claimNextTurn(userId);
       if (turn === null) return;
       const controller = new AbortController();
@@ -128,5 +137,10 @@ export class HitchApplication {
 
   public activeTurnIds(): readonly string[] {
     return [...this.#controllers.keys()];
+  }
+
+  public stop(): void {
+    this.#stopping = true;
+    for (const controller of this.#controllers.values()) controller.abort();
   }
 }

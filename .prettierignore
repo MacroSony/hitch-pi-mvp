@@ -1,6 +1,7 @@
 dist/
 node_modules/
 spikes/
+packages/hitch-sandbox-extension/
 docs/
 *.md
 *.log

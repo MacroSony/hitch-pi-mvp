@@ -14,7 +14,7 @@ record the result in the commit message or phase handoff.
 Real credentials and live channel/provider checks are always opt-in. They never
 run in normal CI.
 
-## Phase 0 — MVP reset and retained evidence (current)
+## Phase 0 — MVP reset and retained evidence (completed)
 
 - Retain the deterministic runtime, extension, sandbox, and transport evidence
   under `spikes/` as design input.
@@ -35,7 +35,7 @@ Checkpoint: the required documents consistently authorize Phase 1 under the
 trusted-personal threat model, while preserving sandbox and credential
 separation.
 
-## Phase 1 — Minimal durable foundation (3–6 agent-hours)
+## Phase 1 — Minimal durable foundation (completed)
 
 - Add Node.js 24, TypeScript, a committed lockfile, format/typecheck/test/build
   commands, and CI.
@@ -50,7 +50,7 @@ separation.
 Checkpoint: the service boots and reopens a private data root with two fake
 users, and unsafe configuration fails before channel or Pi startup.
 
-## Phase 2 — Telegram text vertical slice (5–9 agent-hours)
+## Phase 2 — Telegram text vertical slice (completed)
 
 - Implement direct Bot API long polling with exact bot/private-chat/sender
   admission before content handling.
@@ -66,7 +66,7 @@ users, and unsafe configuration fails before channel or Pi startup.
 Checkpoint: two allowlisted Telegram fixtures can independently use durable
 text sessions through the fake runtime.
 
-## Phase 3 — Native Pi and Bubblewrap dogfood (5–10 agent-hours)
+## Phase 3 — Native Pi and Bubblewrap dogfood (current)
 
 - Promote the bounded Phase 0 mandatory extension and Bubblewrap backend into
   production modules.

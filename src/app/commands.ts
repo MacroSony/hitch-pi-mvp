@@ -8,6 +8,9 @@ export type Command =
   | { readonly kind: "abort" }
   | { readonly kind: "stop" }
   | { readonly kind: "recover" }
+  | { readonly kind: "models"; readonly filter?: string }
+  | { readonly kind: "model"; readonly selector: string }
+  | { readonly kind: "thinking"; readonly level: string }
   | { readonly kind: "unknown"; readonly name: string };
 
 function boundedArgument(value: string, label: string): string {
@@ -53,6 +56,22 @@ export function parseCommand(text: string): Command | null {
       return { kind: "stop" };
     case "recover":
       return { kind: "recover" };
+    case "models": {
+      const value = argument.trim();
+      return value.length === 0
+        ? { kind: "models" }
+        : { kind: "models", filter: boundedArgument(value, "model filter") };
+    }
+    case "model":
+      return {
+        kind: "model",
+        selector: boundedArgument(argument, "model selector"),
+      };
+    case "thinking":
+      return {
+        kind: "thinking",
+        level: boundedArgument(argument, "thinking level").toLowerCase(),
+      };
     default:
       return { kind: "unknown", name: name.slice(0, 64) };
   }

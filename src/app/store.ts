@@ -2,7 +2,12 @@ import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 
 import type { Clock, FoundationDatabase } from "../foundation/database.js";
-import type { RuntimeResult, RuntimeTurn } from "../runtime/runtime.js";
+import type {
+  RuntimeModel,
+  RuntimeResult,
+  RuntimeTurn,
+  ThinkingLevel,
+} from "../runtime/runtime.js";
 import type { Command } from "./commands.js";
 import { AppError } from "./errors.js";
 
@@ -15,7 +20,7 @@ export interface IdSource {
 }
 
 export const randomIds: IdSource = {
-  next: (kind) => `${kind}_${randomUUID()}`,
+  next: (kind) => (kind === "pi" ? randomUUID() : `${kind}_${randomUUID()}`),
 };
 
 export interface EndpointContext {
@@ -91,6 +96,8 @@ function outcomeText(result: RuntimeResult): string {
       return "Turn cancelled.";
     case "failed":
       return "agent-failed: the model Turn failed.";
+    case "timed-out":
+      return "agent-failed: the model Turn timed out.";
     case "unknown":
       return "session-quarantined: the model Turn ended in an uncertain state.";
   }
@@ -400,10 +407,26 @@ export class HitchStore {
     return rows[0];
   }
 
+  #rejectSelectionDuringActiveTurn(userId: string, sessionId: string): void {
+    const active = this.#database
+      .prepare(
+        `SELECT 1 FROM turns
+         WHERE user_id = ? AND session_id = ? AND state IN ('starting', 'running')
+         LIMIT 1`,
+      )
+      .get(userId, sessionId);
+    if (active !== undefined)
+      throw new AppError(
+        "busy",
+        "wait for the active Turn before changing model selection",
+      );
+  }
+
   public executeCommand(
     identity: MessageIdentity,
     command: Command,
     sourceText: string,
+    models: readonly RuntimeModel[] = [],
   ): CommandResult {
     return transaction(this.#database, () => {
       const existing = this.#existingMessage(identity);
@@ -463,7 +486,20 @@ export class HitchStore {
             active: bigint | null;
             queued: bigint | null;
           };
-          response = `Session ${session.name} (${session.state}); active ${Number(counts.active ?? 0n)}; queued ${Number(counts.queued ?? 0n)}.`;
+          const selection = this.#database
+            .prepare(
+              "SELECT model_provider, model_id, thinking_level FROM sessions WHERE id = ? AND user_id = ?",
+            )
+            .get(session.id, identity.endpoint.userId) as {
+            model_provider: string | null;
+            model_id: string | null;
+            thinking_level: string | null;
+          };
+          const model =
+            selection.model_provider === null || selection.model_id === null
+              ? "Pi default"
+              : `${selection.model_provider}/${selection.model_id}`;
+          response = `Session ${session.name} (${session.state}); model ${model}; thinking ${selection.thinking_level ?? "Pi default"}; active ${Number(counts.active ?? 0n)}; queued ${Number(counts.queued ?? 0n)}.`;
           break;
         }
         case "abort": {
@@ -524,6 +560,120 @@ export class HitchStore {
           response = `Recovered into ${session.name}; unknown work was not replayed.`;
           break;
         }
+        case "models": {
+          const filter = command.filter?.toLocaleLowerCase("en-US");
+          const matches = models
+            .filter((model) => {
+              if (filter === undefined) return true;
+              return `${model.provider}/${model.id} ${model.name}`
+                .toLocaleLowerCase("en-US")
+                .includes(filter);
+            })
+            .slice(0, 50);
+          if (matches.length === 0)
+            throw new AppError(
+              "model-unavailable",
+              "no available model matches that filter",
+            );
+          response = matches
+            .map(
+              (model) =>
+                `${model.provider}/${model.id}${model.reasoning ? " (reasoning)" : ""}`,
+            )
+            .join("\n");
+          break;
+        }
+        case "model": {
+          this.#rejectSelectionDuringActiveTurn(
+            identity.endpoint.userId,
+            session.id,
+          );
+          const separator = command.selector.indexOf("/");
+          if (separator <= 0 || separator === command.selector.length - 1) {
+            throw new AppError(
+              "rejected",
+              "model selector must be provider/model",
+            );
+          }
+          const provider = command.selector.slice(0, separator);
+          const modelId = command.selector.slice(separator + 1);
+          const model = models.find(
+            (candidate) =>
+              candidate.provider === provider && candidate.id === modelId,
+          );
+          if (model === undefined)
+            throw new AppError(
+              "model-unavailable",
+              "model is not in the current Pi catalog",
+            );
+          const changed = this.#database
+            .prepare(
+              `UPDATE sessions
+               SET model_provider = ?, model_id = ?, thinking_level = ?, updated_at = ?
+               WHERE id = ? AND user_id = ? AND state = 'active'`,
+            )
+            .run(
+              model.provider,
+              model.id,
+              model.thinkingLevels[0] ?? "off",
+              now,
+              session.id,
+              identity.endpoint.userId,
+            );
+          if (changed.changes !== 1n)
+            throw new AppError(
+              "session-quarantined",
+              "selected session is not active; use !recover or !new",
+            );
+          response = `Selected model ${model.provider}/${model.id}.`;
+          break;
+        }
+        case "thinking": {
+          this.#rejectSelectionDuringActiveTurn(
+            identity.endpoint.userId,
+            session.id,
+          );
+          const allowed: readonly ThinkingLevel[] = [
+            "off",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+          ];
+          if (!allowed.includes(command.level as ThinkingLevel))
+            throw new AppError("rejected", "thinking level is invalid");
+          const selected = this.#database
+            .prepare(
+              "SELECT model_provider, model_id FROM sessions WHERE id = ? AND user_id = ? AND state = 'active'",
+            )
+            .get(session.id, identity.endpoint.userId) as
+            | { model_provider: string | null; model_id: string | null }
+            | undefined;
+          const model = models.find(
+            (candidate) =>
+              candidate.provider === selected?.model_provider &&
+              candidate.id === selected?.model_id,
+          );
+          if (model === undefined)
+            throw new AppError(
+              "model-unavailable",
+              "select an available model before setting thinking",
+            );
+          if (!model.thinkingLevels.includes(command.level as ThinkingLevel))
+            throw new AppError(
+              "model-unavailable",
+              "thinking level is not supported by the selected model",
+            );
+          this.#database
+            .prepare(
+              "UPDATE sessions SET thinking_level = ?, updated_at = ? WHERE id = ? AND user_id = ? AND state = 'active'",
+            )
+            .run(command.level, now, session.id, identity.endpoint.userId);
+          response = `Selected thinking level ${command.level}.`;
+          break;
+        }
         case "unknown":
           response = `rejected: unknown command !${command.name}`;
           commandSucceeded = false;
@@ -577,8 +727,12 @@ export class HitchStore {
       if (active !== undefined) return null;
       const row = this.#database
         .prepare(
-          `SELECT t.id, t.user_id, t.session_id, t.endpoint_id, t.prompt_text
-           FROM turns t JOIN sessions s ON s.id = t.session_id AND s.user_id = t.user_id
+          `SELECT t.id, t.user_id, t.session_id, t.endpoint_id, t.prompt_text,
+                  u.workspace_path, s.pi_session_id, s.transcript_path,
+                  s.model_provider, s.model_id, s.thinking_level
+           FROM turns t
+           JOIN sessions s ON s.id = t.session_id AND s.user_id = t.user_id
+           JOIN users u ON u.id = t.user_id
            WHERE t.user_id = ? AND t.state = 'queued' AND s.state = 'active'
            ORDER BY t.ordinal LIMIT 1`,
         )
@@ -589,6 +743,12 @@ export class HitchStore {
             session_id: string;
             endpoint_id: string;
             prompt_text: string;
+            workspace_path: string;
+            pi_session_id: string;
+            transcript_path: string | null;
+            model_provider: string | null;
+            model_id: string | null;
+            thinking_level: ThinkingLevel | null;
           }
         | undefined;
       if (row === undefined) return null;
@@ -604,6 +764,18 @@ export class HitchStore {
         sessionId: row.session_id,
         endpointId: row.endpoint_id,
         prompt: row.prompt_text,
+        workspace: row.workspace_path,
+        piSessionId: row.pi_session_id,
+        ...(row.transcript_path === null
+          ? {}
+          : { transcriptPath: row.transcript_path }),
+        ...(row.model_provider === null
+          ? {}
+          : { modelProvider: row.model_provider }),
+        ...(row.model_id === null ? {} : { modelId: row.model_id }),
+        ...(row.thinking_level === null
+          ? {}
+          : { thinkingLevel: row.thinking_level }),
       };
     });
   }
@@ -654,6 +826,27 @@ export class HitchStore {
             "UPDATE sessions SET state = 'quarantined', updated_at = ? WHERE id = ? AND user_id = ?",
           )
           .run(now, turn.sessionId, turn.userId);
+      }
+      if (result.sessionReusable) {
+        this.#database
+          .prepare(
+            `UPDATE sessions
+             SET transcript_path = coalesce(?, transcript_path),
+                 model_provider = coalesce(?, model_provider),
+                 model_id = coalesce(?, model_id),
+                 thinking_level = coalesce(?, thinking_level),
+                 updated_at = ?
+             WHERE id = ? AND user_id = ?`,
+          )
+          .run(
+            result.transcriptPath ?? null,
+            result.modelProvider ?? null,
+            result.modelId ?? null,
+            result.thinkingLevel ?? null,
+            now,
+            turn.sessionId,
+            turn.userId,
+          );
       }
       this.#insertOutbox(turn.userId, turn.endpointId, turn.turnId, text);
     });

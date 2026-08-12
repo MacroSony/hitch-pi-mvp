@@ -3,15 +3,49 @@ export interface RuntimeTurn {
   readonly userId: string;
   readonly sessionId: string;
   readonly prompt: string;
+  readonly workspace?: string;
+  readonly piSessionId?: string;
+  readonly transcriptPath?: string;
+  readonly modelProvider?: string;
+  readonly modelId?: string;
+  readonly thinkingLevel?: ThinkingLevel;
+}
+
+export type ThinkingLevel =
+  | "off"
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh"
+  | "max";
+
+export interface RuntimeModel {
+  readonly provider: string;
+  readonly id: string;
+  readonly name: string;
+  readonly reasoning: boolean;
+  readonly input: readonly ("text" | "image")[];
+  readonly thinkingLevels: readonly ThinkingLevel[];
 }
 
 export interface RuntimeResult {
-  readonly outcome: "succeeded" | "failed" | "cancelled" | "unknown";
+  readonly outcome:
+    | "succeeded"
+    | "failed"
+    | "cancelled"
+    | "timed-out"
+    | "unknown";
   readonly text: string;
   readonly sessionReusable: boolean;
+  readonly transcriptPath?: string;
+  readonly modelProvider?: string;
+  readonly modelId?: string;
+  readonly thinkingLevel?: ThinkingLevel;
 }
 
 export interface AgentRuntime {
+  readonly models?: readonly RuntimeModel[];
   run(turn: RuntimeTurn, signal: AbortSignal): Promise<RuntimeResult>;
 }
 
@@ -23,7 +57,10 @@ export type FakeRuntimeHandler = (
 export class FakeAgentRuntime implements AgentRuntime {
   readonly #handler: FakeRuntimeHandler;
 
-  public constructor(handler?: FakeRuntimeHandler) {
+  public constructor(
+    handler?: FakeRuntimeHandler,
+    readonly models: readonly RuntimeModel[] = [],
+  ) {
     this.#handler =
       handler ??
       ((turn) => ({

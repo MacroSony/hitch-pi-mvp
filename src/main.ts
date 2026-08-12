@@ -3,11 +3,12 @@ import { HitchStore } from "./app/store.js";
 import { TelegramBotClient, TelegramWorker } from "./channels/telegram.js";
 import { loadConfig, readRequiredSecret } from "./config/config.js";
 import { bootstrapFoundation } from "./foundation/bootstrap.js";
-import { FakeAgentRuntime } from "./runtime/runtime.js";
+import { NativePiRuntime } from "./pi/native-runtime.js";
+import { FakeAgentRuntime, type AgentRuntime } from "./runtime/runtime.js";
 
 interface CliOptions {
   readonly configPath: string;
-  readonly mode: "check" | "fake-telegram";
+  readonly mode: "check" | "fake-telegram" | "telegram";
 }
 
 function options(arguments_: readonly string[]): CliOptions {
@@ -15,23 +16,33 @@ function options(arguments_: readonly string[]): CliOptions {
   const configPath =
     configIndex === -1 ? undefined : arguments_[configIndex + 1];
   const fakeTelegram = arguments_.includes("--fake-telegram");
-  const expectedLength = fakeTelegram ? 3 : 2;
+  const nativeTelegram = arguments_.includes("--telegram");
+  const expectedLength = fakeTelegram || nativeTelegram ? 3 : 2;
   if (
     configIndex === -1 ||
     configPath === undefined ||
+    (fakeTelegram && nativeTelegram) ||
     arguments_.length !== expectedLength ||
     arguments_.some(
       (argument, index) =>
         index !== configIndex &&
         index !== configIndex + 1 &&
-        argument !== "--fake-telegram",
+        argument !== "--fake-telegram" &&
+        argument !== "--telegram",
     )
   ) {
     throw new Error(
-      "usage: hitch-pi-mvp --config /absolute/path/config.json [--fake-telegram]",
+      "usage: hitch-pi-mvp --config /absolute/path/config.json [--telegram | --fake-telegram]",
     );
   }
-  return { configPath, mode: fakeTelegram ? "fake-telegram" : "check" };
+  return {
+    configPath,
+    mode: fakeTelegram
+      ? "fake-telegram"
+      : nativeTelegram
+        ? "telegram"
+        : "check",
+  };
 }
 
 async function main(): Promise<void> {
@@ -57,11 +68,16 @@ async function main(): Promise<void> {
     }
 
     if (config.telegramAccounts.length === 0)
-      throw new Error(
-        "fake Telegram mode requires a configured Telegram account",
-      );
+      throw new Error("Telegram mode requires a configured Telegram account");
+    const runtime: AgentRuntime =
+      cli.mode === "fake-telegram"
+        ? new FakeAgentRuntime()
+        : await NativePiRuntime.create({
+            dataRoot: foundation.topology.dataRoot.path,
+            piProfileDir: foundation.topology.piProfileDir.path,
+          });
     const store = new HitchStore(foundation.database);
-    const application = new HitchApplication(store, new FakeAgentRuntime());
+    const application = new HitchApplication(store, runtime);
     application.start();
     const workers = config.telegramAccounts.map(
       (account) =>
@@ -73,14 +89,20 @@ async function main(): Promise<void> {
         ),
     );
     const shutdown = new AbortController();
-    const stop = (): void => shutdown.abort();
+    const stop = (): void => {
+      shutdown.abort();
+      application.stop();
+    };
     process.once("SIGINT", stop);
     process.once("SIGTERM", stop);
     try {
       process.stdout.write(
         `${JSON.stringify({
           status: "running",
-          runtime: "fake",
+          runtime: cli.mode === "fake-telegram" ? "fake" : "native-pi",
+          ...(runtime instanceof NativePiRuntime
+            ? { catalogDigest: runtime.catalogDigest }
+            : {}),
           users: foundation.topology.users.length,
           telegramAccounts: workers.length,
         })}\n`,

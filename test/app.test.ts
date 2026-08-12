@@ -21,6 +21,7 @@ import type { Clock } from "../src/foundation/database.js";
 import {
   FakeAgentRuntime,
   type AgentRuntime,
+  type RuntimeModel,
   type RuntimeResult,
   type RuntimeTurn,
 } from "../src/runtime/runtime.js";
@@ -222,6 +223,127 @@ test("session commands are durable, idempotent, and owner scoped", () => {
     true,
   );
   assert.equal(environment.store.pendingTelegramOutbox("primary").length, 7);
+  environment.foundation.close();
+});
+
+test("model and thinking commands persist a catalog-validated session selection", async () => {
+  const environment = setup();
+  const models: readonly RuntimeModel[] = [
+    {
+      provider: "fixture",
+      id: "plain",
+      name: "Fixture Plain",
+      reasoning: false,
+      input: ["text"],
+      thinkingLevels: ["off"],
+    },
+    {
+      provider: "fixture",
+      id: "reasoner",
+      name: "Fixture Reasoner",
+      reasoning: true,
+      input: ["text"],
+      thinkingLevels: ["off", "low", "high"],
+    },
+  ];
+  const calls: RuntimeTurn[] = [];
+  const transcript = join(environment.paths.alice, "synthetic-session.jsonl");
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const runtime = new FakeAgentRuntime(async (turn) => {
+    calls.push(turn);
+    await gate;
+    return {
+      outcome: "succeeded",
+      text: "selected response",
+      sessionReusable: true,
+      transcriptPath: transcript,
+      ...(turn.modelProvider === undefined
+        ? {}
+        : { modelProvider: turn.modelProvider }),
+      ...(turn.modelId === undefined ? {} : { modelId: turn.modelId }),
+      ...(turn.thinkingLevel === undefined
+        ? {}
+        : { thinkingLevel: turn.thinkingLevel }),
+    };
+  }, models);
+  const app = new HitchApplication(environment.store, runtime);
+  app.start();
+
+  assert.equal(
+    app.receiveTelegram("primary", update(18, "101", "!models reason"))
+      .accepted,
+    true,
+  );
+  assert.equal(
+    app.receiveTelegram("primary", update(19, "101", "!model fixture/reasoner"))
+      .accepted,
+    true,
+  );
+  assert.equal(
+    app.receiveTelegram("primary", update(20, "101", "!thinking high"))
+      .accepted,
+    true,
+  );
+  const unsupported = app.receiveTelegram(
+    "primary",
+    update(21, "101", "!thinking minimal"),
+  );
+  assert.equal(unsupported.accepted, false);
+  assert.equal(unsupported.category, "model-unavailable");
+  assert.equal(
+    app.receiveTelegram("primary", update(22, "101", "use selection")).accepted,
+    true,
+  );
+  while (app.activeTurnIds().length === 0)
+    await new Promise((resolve) => setImmediate(resolve));
+  const activeSelection = app.receiveTelegram(
+    "primary",
+    update(23, "101", "!model fixture/plain"),
+  );
+  assert.equal(activeSelection.accepted, false);
+  assert.equal(activeSelection.category, "busy");
+  release();
+  await app.drain();
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.modelProvider, "fixture");
+  assert.equal(calls[0]?.modelId, "reasoner");
+  assert.equal(calls[0]?.thinkingLevel, "high");
+  assert.equal(calls[0]?.workspace, environment.paths.alice);
+  const session = environment.foundation.database.connection
+    .prepare(
+      `SELECT transcript_path, model_provider, model_id, thinking_level
+       FROM sessions WHERE user_id = ?`,
+    )
+    .get("alice") as {
+    transcript_path: string;
+    model_provider: string;
+    model_id: string;
+    thinking_level: string;
+  };
+  assert.deepEqual(
+    { ...session },
+    {
+      transcript_path: transcript,
+      model_provider: "fixture",
+      model_id: "reasoner",
+      thinking_level: "high",
+    },
+  );
+  assert.equal(environment.store.count("sessions", "bob"), 0);
+  assert.equal(
+    app.receiveTelegram("primary", update(24, "101", "!stop")).accepted,
+    true,
+  );
+  const stoppedSelection = app.receiveTelegram(
+    "primary",
+    update(25, "101", "!model fixture/plain"),
+  );
+  assert.equal(stoppedSelection.accepted, false);
+  assert.equal(stoppedSelection.category, "session-quarantined");
   environment.foundation.close();
 });
 
