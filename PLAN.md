@@ -66,7 +66,7 @@ users, and unsafe configuration fails before channel or Pi startup.
 Checkpoint: two allowlisted Telegram fixtures can independently use durable
 text sessions through the fake runtime.
 
-## Phase 3 — Native Pi and Bubblewrap dogfood (current)
+## Phase 3 — Native Pi and Bubblewrap dogfood (completed)
 
 - Promote the bounded Phase 0 mandatory extension and Bubblewrap backend into
   production modules.
@@ -84,7 +84,7 @@ text sessions through the fake runtime.
 Checkpoint: one trusted user can perform useful Pi coding turns over Telegram,
 with shell/file operations confined to the configured workspace sandbox.
 
-## Phase 4 — Basic images and files (4–8 agent-hours)
+## Phase 4 — Basic images and files (completed)
 
 - Stream inbound objects to owner-private temporary files with configured byte
   and count limits, hashing, generated storage names, and atomic promotion.
@@ -97,7 +97,7 @@ with shell/file operations confined to the configured workspace sandbox.
 Checkpoint: Telegram text, common images, and ordinary files work in both
 directions without cross-user paths or credentials entering the sandbox.
 
-## Phase 5 — WeChat private-peer support (4–8 agent-hours)
+## Phase 5 — WeChat private-peer support (current)
 
 - Use the pinned WeChat client only at its raw API boundary; Hitch owns cursor
   persistence and admission order.

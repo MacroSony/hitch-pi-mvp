@@ -4,6 +4,7 @@ import type { DatabaseSync } from "node:sqlite";
 import type { Clock, FoundationDatabase } from "../foundation/database.js";
 import type {
   RuntimeModel,
+  RuntimeArtifact,
   RuntimeResult,
   RuntimeTurn,
   ThinkingLevel,
@@ -14,6 +15,8 @@ import { AppError } from "./errors.js";
 const MAX_SESSIONS_PER_USER = 32;
 const MAX_ACTIVE_AND_QUEUED = 4;
 const MAX_RESULT_BYTES = 64_000;
+const ARTIFACT_ID_PATTERN =
+  /^artifact_([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/iu;
 
 export interface IdSource {
   next(kind: "session" | "pi" | "turn" | "outbox"): string;
@@ -56,7 +59,9 @@ export interface OutboxDelivery {
   readonly userId: string;
   readonly accountId: string;
   readonly privateChatId: string;
-  readonly text: string;
+  readonly kind: "text" | "artifact";
+  readonly text?: string;
+  readonly artifact?: RuntimeArtifact;
 }
 
 interface SessionRow {
@@ -103,6 +108,29 @@ function outcomeText(result: RuntimeResult): string {
   }
 }
 
+function validArtifact(
+  artifact: RuntimeArtifact,
+  maximumBytes: number,
+): boolean {
+  const match = ARTIFACT_ID_PATTERN.exec(artifact.id);
+  return (
+    match?.[1] !== undefined &&
+    artifact.storageKey === `${artifact.userId}/${match[1]}.blob` &&
+    /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(artifact.userId) &&
+    /^[a-f0-9]{64}$/u.test(artifact.sha256) &&
+    Number.isSafeInteger(artifact.bytes) &&
+    artifact.bytes >= 0 &&
+    artifact.bytes <= maximumBytes &&
+    (artifact.mediaKind === "image" || artifact.mediaKind === "file") &&
+    Buffer.byteLength(artifact.mimeType, "utf8") >= 1 &&
+    Buffer.byteLength(artifact.mimeType, "utf8") <= 127 &&
+    /^[\x21-\x7e]+\/[\x21-\x7e]+$/u.test(artifact.mimeType) &&
+    Buffer.byteLength(artifact.displayName, "utf8") >= 1 &&
+    Buffer.byteLength(artifact.displayName, "utf8") <= 128 &&
+    !/[\u0000-\u001f\u007f/\\]/u.test(artifact.displayName)
+  );
+}
+
 export class HitchStore {
   readonly #database: DatabaseSync;
 
@@ -110,6 +138,7 @@ export class HitchStore {
     foundation: FoundationDatabase,
     readonly ids: IdSource = randomIds,
     readonly clock: Clock = { now: () => Date.now() },
+    readonly admissionGuard: (userId: string) => void = () => undefined,
   ) {
     this.#database = foundation.connection;
   }
@@ -156,6 +185,13 @@ export class HitchStore {
     if (!Number.isSafeInteger(value) || value < 0)
       throw new AppError("internal-error", "stored Telegram cursor is invalid");
     return value;
+  }
+
+  public artifactStorageKeys(): ReadonlySet<string> {
+    const rows = this.#database
+      .prepare("SELECT storage_key FROM artifacts")
+      .all() as unknown as Array<{ storage_key: string }>;
+    return new Set(rows.map(({ storage_key }) => storage_key));
   }
 
   public setTelegramOffset(accountId: string, offset: number): void {
@@ -302,10 +338,12 @@ export class HitchStore {
   public admitPrompt(
     identity: MessageIdentity,
     prompt: string,
+    artifacts: readonly RuntimeArtifact[] = [],
   ): AdmissionResult {
     return transaction(this.#database, () => {
       const existing = this.#existingMessage(identity);
       if (existing !== null) return { ...existing, duplicate: true };
+      this.admissionGuard(identity.endpoint.userId);
       const session = this.#ensurePromptSession(
         identity.endpoint.id,
         identity.endpoint.userId,
@@ -322,6 +360,20 @@ export class HitchStore {
         );
       const turnId = this.ids.next("turn");
       const now = this.clock.now();
+      if (
+        artifacts.length > 8 ||
+        artifacts.reduce((total, artifact) => total + artifact.bytes, 0) >
+          40 * 1024 * 1024 ||
+        new Set(artifacts.map(({ id }) => id)).size !== artifacts.length ||
+        artifacts.some(
+          (artifact) =>
+            artifact.userId !== identity.endpoint.userId ||
+            artifact.bytes < 1 ||
+            !validArtifact(artifact, 20 * 1024 * 1024),
+        )
+      ) {
+        throw new AppError("media-invalid", "Turn media bounds are invalid");
+      }
       this.#database
         .prepare(
           `INSERT INTO turns(
@@ -341,8 +393,37 @@ export class HitchStore {
           now,
           now,
         );
+      for (const [ordinal, artifact] of artifacts.entries()) {
+        this.#insertArtifact(artifact, now);
+        this.#database
+          .prepare(
+            `INSERT INTO turn_artifacts(turn_id, user_id, artifact_id, direction, ordinal)
+             VALUES (?, ?, ?, 'inbound', ?)`,
+          )
+          .run(turnId, identity.endpoint.userId, artifact.id, ordinal);
+      }
       return { turnId, userId: identity.endpoint.userId, duplicate: false };
     });
+  }
+
+  #insertArtifact(artifact: RuntimeArtifact, now: number): void {
+    this.#database
+      .prepare(
+        `INSERT INTO artifacts(
+           id, user_id, storage_key, sha256, bytes, media_kind, mime_type, display_name, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        artifact.id,
+        artifact.userId,
+        artifact.storageKey,
+        artifact.sha256,
+        artifact.bytes,
+        artifact.mediaKind,
+        artifact.mimeType,
+        artifact.displayName,
+        now,
+      );
   }
 
   #insertOutbox(
@@ -364,6 +445,31 @@ export class HitchStore {
         endpointId,
         turnId,
         boundedText(text),
+        now,
+        now,
+      );
+  }
+
+  #insertArtifactOutbox(
+    userId: string,
+    endpointId: string,
+    turnId: string,
+    artifactId: string,
+  ): void {
+    const now = this.clock.now();
+    this.#database
+      .prepare(
+        `INSERT INTO outbox(
+           id, user_id, endpoint_id, turn_id, artifact_id, kind, payload_text,
+           state, attempts, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, 'artifact', NULL, 'pending', 0, ?, ?)`,
+      )
+      .run(
+        this.ids.next("outbox"),
+        userId,
+        endpointId,
+        turnId,
+        artifactId,
         now,
         now,
       );
@@ -674,6 +780,51 @@ export class HitchStore {
           response = `Selected thinking level ${command.level}.`;
           break;
         }
+        case "send": {
+          if (session.state !== "active")
+            throw new AppError(
+              "session-quarantined",
+              "selected session is not active; use !recover or !new",
+            );
+          this.admissionGuard(identity.endpoint.userId);
+          const capacity = this.#database
+            .prepare(
+              "SELECT count(*) AS count FROM turns WHERE user_id = ? AND state IN ('queued', 'starting', 'running')",
+            )
+            .get(identity.endpoint.userId) as { count: bigint };
+          if (Number(capacity.count) >= MAX_ACTIVE_AND_QUEUED)
+            throw new AppError(
+              "busy",
+              "one Turn is active and three are already queued",
+            );
+          const turnId = this.ids.next("turn");
+          this.#database
+            .prepare(
+              `INSERT INTO turns(
+                 id, user_id, session_id, endpoint_id, idempotency_key, content_digest,
+                 prompt_text, operation_kind, publish_path, ordinal, state, created_at, updated_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, 'publish', ?, ?, 'queued', ?, ?)`,
+            )
+            .run(
+              turnId,
+              identity.endpoint.userId,
+              session.id,
+              identity.endpoint.id,
+              identity.idempotencyKey,
+              identity.contentDigest,
+              sourceText,
+              command.path,
+              this.#nextOrdinal(identity.endpoint.userId),
+              now,
+              now,
+            );
+          return {
+            turnId,
+            userId: identity.endpoint.userId,
+            duplicate: false,
+            abortTurnId: null,
+          };
+        }
         case "unknown":
           response = `rejected: unknown command !${command.name}`;
           commandSucceeded = false;
@@ -728,6 +879,7 @@ export class HitchStore {
       const row = this.#database
         .prepare(
           `SELECT t.id, t.user_id, t.session_id, t.endpoint_id, t.prompt_text,
+                  t.operation_kind, t.publish_path,
                   u.workspace_path, s.pi_session_id, s.transcript_path,
                   s.model_provider, s.model_id, s.thinking_level
            FROM turns t
@@ -743,6 +895,8 @@ export class HitchStore {
             session_id: string;
             endpoint_id: string;
             prompt_text: string;
+            operation_kind: "prompt" | "publish";
+            publish_path: string | null;
             workspace_path: string;
             pi_session_id: string;
             transcript_path: string | null;
@@ -752,6 +906,23 @@ export class HitchStore {
           }
         | undefined;
       if (row === undefined) return null;
+      const artifacts = this.#database
+        .prepare(
+          `SELECT a.id, a.user_id AS userId, a.storage_key AS storageKey,
+                  a.sha256, a.bytes, a.media_kind AS mediaKind,
+                  a.mime_type AS mimeType, a.display_name AS displayName
+           FROM turn_artifacts ta
+           JOIN artifacts a ON a.id = ta.artifact_id AND a.user_id = ta.user_id
+           WHERE ta.turn_id = ? AND ta.user_id = ? AND ta.direction = 'inbound'
+           ORDER BY ta.ordinal`,
+        )
+        .all(row.id, userId)
+        .map((value) => {
+          const artifact = value as Omit<RuntimeArtifact, "bytes"> & {
+            bytes: bigint;
+          };
+          return { ...artifact, bytes: Number(artifact.bytes) };
+        });
       const changed = this.#database
         .prepare(
           "UPDATE turns SET state = 'running', updated_at = ? WHERE id = ? AND user_id = ? AND state = 'queued'",
@@ -776,6 +947,10 @@ export class HitchStore {
         ...(row.thinking_level === null
           ? {}
           : { thinkingLevel: row.thinking_level }),
+        ...(artifacts.length === 0 ? {} : { artifacts }),
+        ...(row.operation_kind === "publish" && row.publish_path !== null
+          ? { publishPath: row.publish_path }
+          : {}),
       };
     });
   }
@@ -849,6 +1024,36 @@ export class HitchStore {
           );
       }
       this.#insertOutbox(turn.userId, turn.endpointId, turn.turnId, text);
+      const artifacts = result.artifacts ?? [];
+      if (
+        artifacts.length > 8 ||
+        new Set(artifacts.map(({ id }) => id)).size !== artifacts.length ||
+        artifacts.some(
+          (artifact) =>
+            artifact.userId !== turn.userId ||
+            !validArtifact(artifact, 50 * 1024 * 1024),
+        )
+      ) {
+        throw new AppError(
+          "internal-error",
+          "runtime publication bounds are invalid",
+        );
+      }
+      for (const [ordinal, artifact] of artifacts.entries()) {
+        this.#insertArtifact(artifact, now);
+        this.#database
+          .prepare(
+            `INSERT INTO turn_artifacts(turn_id, user_id, artifact_id, direction, ordinal)
+             VALUES (?, ?, ?, 'outbound', ?)`,
+          )
+          .run(turn.turnId, turn.userId, artifact.id, ordinal);
+        this.#insertArtifactOutbox(
+          turn.userId,
+          turn.endpointId,
+          turn.turnId,
+          artifact.id,
+        );
+      }
     });
   }
 
@@ -904,15 +1109,75 @@ export class HitchStore {
     return this.#database
       .prepare(
         `SELECT o.id, o.user_id AS userId, e.account_id AS accountId,
-                e.private_chat_id AS privateChatId, o.payload_text AS text
+                e.private_chat_id AS privateChatId, o.kind, o.payload_text AS text,
+                a.id AS artifactId, a.storage_key AS storageKey, a.sha256,
+                a.bytes, a.media_kind AS mediaKind, a.mime_type AS mimeType,
+                a.display_name AS displayName
          FROM outbox o
          JOIN channel_endpoints e ON e.id = o.endpoint_id AND e.user_id = o.user_id
          JOIN users u ON u.id = o.user_id
+         LEFT JOIN artifacts a ON a.id = o.artifact_id AND a.user_id = o.user_id
          WHERE e.kind = 'telegram' AND e.account_id = ? AND e.enabled = 1 AND u.enabled = 1
-           AND o.kind = 'text' AND o.state IN ('pending', 'retryable') AND o.attempts < 5
+           AND o.state IN ('pending', 'retryable') AND o.attempts < 5
          ORDER BY o.created_at, o.id LIMIT ?`,
       )
-      .all(accountId, limit) as unknown as OutboxDelivery[];
+      .all(accountId, limit)
+      .map((value) => {
+        const row = value as {
+          id: string;
+          userId: string;
+          accountId: string;
+          privateChatId: string;
+          kind: "text" | "artifact";
+          text: string | null;
+          artifactId: string | null;
+          storageKey: string | null;
+          sha256: string | null;
+          bytes: bigint | null;
+          mediaKind: "image" | "file" | null;
+          mimeType: string | null;
+          displayName: string | null;
+        };
+        const common = {
+          id: row.id,
+          userId: row.userId,
+          accountId: row.accountId,
+          privateChatId: row.privateChatId,
+          kind: row.kind,
+        };
+        if (row.kind === "text") {
+          if (row.text === null)
+            throw new AppError("internal-error", "text outbox row is invalid");
+          return { ...common, text: row.text };
+        }
+        if (
+          row.artifactId === null ||
+          row.storageKey === null ||
+          row.sha256 === null ||
+          row.bytes === null ||
+          row.mediaKind === null ||
+          row.mimeType === null ||
+          row.displayName === null
+        ) {
+          throw new AppError(
+            "internal-error",
+            "artifact outbox row is invalid",
+          );
+        }
+        return {
+          ...common,
+          artifact: {
+            id: row.artifactId,
+            userId: row.userId,
+            storageKey: row.storageKey,
+            sha256: row.sha256,
+            bytes: Number(row.bytes),
+            mediaKind: row.mediaKind,
+            mimeType: row.mimeType,
+            displayName: row.displayName,
+          },
+        };
+      });
   }
 
   public claimOutbox(delivery: OutboxDelivery): boolean {
@@ -943,7 +1208,7 @@ export class HitchStore {
   }
 
   public count(
-    table: "sessions" | "turns" | "outbox",
+    table: "sessions" | "turns" | "outbox" | "artifacts",
     userId?: string,
   ): number {
     const row =

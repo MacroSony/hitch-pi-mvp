@@ -409,7 +409,151 @@ test("database composite foreign keys prevent cross-owner state links", () => {
       ),
     /FOREIGN KEY constraint failed/u,
   );
+  database
+    .prepare(
+      `INSERT INTO artifacts(
+         id, user_id, storage_key, sha256, bytes, media_kind, mime_type,
+         display_name, created_at
+       ) VALUES (?, ?, ?, ?, ?, 'file', 'text/plain', 'note.txt', ?)`,
+    )
+    .run("artifact-bob", "bob", "bob/object.blob", "0".repeat(64), 4, 1);
+  assert.throws(
+    () =>
+      database
+        .prepare(
+          `INSERT INTO turn_artifacts(turn_id, user_id, artifact_id, direction, ordinal)
+           VALUES ('turn-alice', 'alice', 'artifact-bob', 'inbound', 0)`,
+        )
+        .run(),
+    /FOREIGN KEY constraint failed/u,
+  );
+  assert.throws(
+    () =>
+      database
+        .prepare(
+          `INSERT INTO outbox(
+             id, user_id, endpoint_id, turn_id, artifact_id, kind, payload_text,
+             state, attempts, created_at, updated_at
+           ) VALUES ('outbox-cross-artifact', 'alice', ?, 'turn-alice',
+                     'artifact-bob', 'artifact', NULL, 'pending', 0, 1, 1)`,
+        )
+        .run(aliceEndpoint.id),
+    /FOREIGN KEY constraint failed/u,
+  );
   foundation.close();
+});
+
+test("schema 1 state migrates to media schema 2 without losing Turns or outbox", () => {
+  const setup = fixture();
+  privateDirectory(setup.dataRoot);
+  const path = join(setup.dataRoot, "hitch.sqlite");
+  writeFileSync(path, "", { mode: 0o600 });
+  const legacy = new DatabaseSync(path);
+  legacy.exec(`
+    CREATE TABLE app_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
+    CREATE TABLE users (
+      id TEXT PRIMARY KEY, workspace_path TEXT NOT NULL UNIQUE,
+      workspace_device TEXT NOT NULL, workspace_inode TEXT NOT NULL,
+      enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+      published_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+      UNIQUE (workspace_device, workspace_inode)
+    ) STRICT;
+    CREATE TABLE sessions (
+      id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id),
+      name TEXT NOT NULL, pi_session_id TEXT NOT NULL, transcript_path TEXT,
+      model_provider TEXT, model_id TEXT, thinking_level TEXT,
+      state TEXT NOT NULL CHECK (state IN ('active', 'stopped', 'quarantined')),
+      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+      UNIQUE (user_id, name), UNIQUE (user_id, pi_session_id),
+      UNIQUE (transcript_path), UNIQUE (id, user_id)
+    ) STRICT;
+    CREATE TABLE channel_endpoints (
+      id TEXT PRIMARY KEY, tuple_key TEXT NOT NULL UNIQUE,
+      user_id TEXT NOT NULL REFERENCES users(id),
+      kind TEXT NOT NULL CHECK (kind IN ('telegram', 'wechat')),
+      account_id TEXT NOT NULL, platform_user_id TEXT NOT NULL,
+      private_chat_id TEXT, selected_session_id TEXT,
+      enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+      published_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+      UNIQUE (id, user_id),
+      FOREIGN KEY (selected_session_id, user_id) REFERENCES sessions(id, user_id),
+      CHECK ((kind = 'telegram' AND private_chat_id IS NOT NULL) OR
+             (kind = 'wechat' AND private_chat_id IS NULL))
+    ) STRICT;
+    CREATE TABLE turns (
+      id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id),
+      session_id TEXT NOT NULL, endpoint_id TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL, content_digest TEXT NOT NULL,
+      prompt_text TEXT NOT NULL, ordinal INTEGER NOT NULL,
+      state TEXT NOT NULL CHECK (state IN ('queued', 'starting', 'running', 'terminal')),
+      outcome TEXT CHECK (outcome IN ('succeeded', 'failed', 'cancelled', 'timed-out', 'unknown')),
+      result_text TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+      UNIQUE (endpoint_id, idempotency_key), UNIQUE (user_id, ordinal),
+      UNIQUE (id, user_id), UNIQUE (id, endpoint_id, user_id),
+      FOREIGN KEY (session_id, user_id) REFERENCES sessions(id, user_id),
+      FOREIGN KEY (endpoint_id, user_id) REFERENCES channel_endpoints(id, user_id)
+    ) STRICT;
+    CREATE TABLE outbox (
+      id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id),
+      endpoint_id TEXT NOT NULL, turn_id TEXT,
+      kind TEXT NOT NULL CHECK (kind IN ('text', 'artifact')), payload_text TEXT,
+      state TEXT NOT NULL CHECK (state IN ('pending', 'sending', 'sent', 'retryable', 'failed', 'expired')),
+      attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+      FOREIGN KEY (endpoint_id, user_id) REFERENCES channel_endpoints(id, user_id),
+      FOREIGN KEY (turn_id, endpoint_id, user_id) REFERENCES turns(id, endpoint_id, user_id)
+    ) STRICT;
+    CREATE INDEX turns_user_state_ordinal ON turns(user_id, state, ordinal);
+    CREATE INDEX outbox_endpoint_state ON outbox(endpoint_id, state, created_at);
+    INSERT INTO app_meta VALUES ('schema_id', 'hitch-pi-mvp-schema-1');
+    INSERT INTO users VALUES ('alice', '/workspace', '1', '2', 1, 1, 1);
+    INSERT INTO sessions(id, user_id, name, pi_session_id, state, created_at, updated_at)
+      VALUES ('session', 'alice', 'main', 'pi', 'active', 1, 1);
+    INSERT INTO channel_endpoints(
+      id, tuple_key, user_id, kind, account_id, platform_user_id,
+      private_chat_id, selected_session_id, enabled, published_at, updated_at
+    ) VALUES ('endpoint', 'tuple', 'alice', 'telegram', 'primary', '101',
+              '101', 'session', 1, 1, 1);
+    INSERT INTO turns(
+      id, user_id, session_id, endpoint_id, idempotency_key, content_digest,
+      prompt_text, ordinal, state, outcome, result_text, created_at, updated_at
+    ) VALUES ('turn', 'alice', 'session', 'endpoint', 'message', 'digest',
+              'hello', 1, 'terminal', 'succeeded', 'world', 1, 1);
+    INSERT INTO outbox VALUES (
+      'outbox', 'alice', 'endpoint', 'turn', 'text', 'world', 'pending', 0, 1, 1
+    );
+    PRAGMA user_version = 1;
+  `);
+  legacy.close();
+
+  const migrated = openFoundationDatabase(setup.dataRoot);
+  const version = migrated.connection.prepare("PRAGMA user_version").get() as {
+    user_version: bigint;
+  };
+  assert.equal(version.user_version, 2n);
+  const turn = migrated.connection
+    .prepare("SELECT operation_kind, publish_path FROM turns WHERE id = 'turn'")
+    .get() as { operation_kind: string; publish_path: string | null };
+  assert.deepEqual(
+    { ...turn },
+    { operation_kind: "prompt", publish_path: null },
+  );
+  const outbox = migrated.connection
+    .prepare(
+      "SELECT kind, payload_text, artifact_id FROM outbox WHERE id = 'outbox'",
+    )
+    .get() as {
+    kind: string;
+    payload_text: string;
+    artifact_id: string | null;
+  };
+  assert.deepEqual(
+    { ...outbox },
+    { kind: "text", payload_text: "world", artifact_id: null },
+  );
+  assert.equal(rowCount(migrated.connection, "artifacts"), 0);
+  assert.equal(rowCount(migrated.connection, "turn_artifacts"), 0);
+  migrated.close();
 });
 
 test("non-private database files are rejected", () => {

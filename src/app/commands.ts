@@ -11,6 +11,7 @@ export type Command =
   | { readonly kind: "models"; readonly filter?: string }
   | { readonly kind: "model"; readonly selector: string }
   | { readonly kind: "thinking"; readonly level: string }
+  | { readonly kind: "send"; readonly path: string }
   | { readonly kind: "unknown"; readonly name: string };
 
 function boundedArgument(value: string, label: string): string {
@@ -22,6 +23,18 @@ function boundedArgument(value: string, label: string): string {
     /[\u0000-\u001f\u007f]/u.test(trimmed)
   ) {
     throw new AppError("rejected", `${label} is invalid`);
+  }
+  return trimmed;
+}
+
+function boundedPath(value: string): string {
+  const trimmed = value.trim();
+  if (
+    trimmed.length === 0 ||
+    Buffer.byteLength(trimmed, "utf8") > 4096 ||
+    /[\u0000-\u001f\u007f]/u.test(trimmed)
+  ) {
+    throw new AppError("rejected", "workspace relative path is invalid");
   }
   return trimmed;
 }
@@ -72,6 +85,8 @@ export function parseCommand(text: string): Command | null {
         kind: "thinking",
         level: boundedArgument(argument, "thinking level").toLowerCase(),
       };
+    case "send":
+      return { kind: "send", path: boundedPath(argument) };
     default:
       return { kind: "unknown", name: name.slice(0, 64) };
   }

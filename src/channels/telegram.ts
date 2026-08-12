@@ -1,5 +1,14 @@
+import { openAsBlob } from "node:fs";
+
+import { AppError } from "../app/errors.js";
 import type { HitchApplication } from "../app/application.js";
 import type { HitchStore, OutboxDelivery } from "../app/store.js";
+import {
+  classifyTelegramIdentity,
+  readTelegramMediaDescriptor,
+} from "./telegram-ingress.js";
+import { MediaStore } from "../media/media-store.js";
+import type { RuntimeArtifact } from "../runtime/runtime.js";
 
 const TELEGRAM_TEXT_CHUNK = 4_000;
 
@@ -25,7 +34,7 @@ export class TelegramBotClient {
   }
 
   async #call(
-    method: "getUpdates" | "sendMessage",
+    method: "getUpdates" | "sendMessage" | "getFile",
     body: Record<string, unknown>,
     signal?: AbortSignal,
   ): Promise<unknown> {
@@ -90,6 +99,101 @@ export class TelegramBotClient {
       );
     }
   }
+
+  public async getFile(
+    fileId: string,
+    signal?: AbortSignal,
+  ): Promise<{ path: string; bytes?: number }> {
+    const result = await this.#call("getFile", { file_id: fileId }, signal);
+    if (result === null || typeof result !== "object" || Array.isArray(result))
+      throw new TelegramError("Telegram file response is invalid");
+    const value = result as Record<string, unknown>;
+    if (
+      typeof value.file_path !== "string" ||
+      value.file_path.length === 0 ||
+      value.file_path.length > 512 ||
+      value.file_path.startsWith("/") ||
+      value.file_path
+        .split("/")
+        .some((part) => part === "" || part === "." || part === "..") ||
+      /[\u0000-\u001f\u007f]/u.test(value.file_path)
+    ) {
+      throw new TelegramError("Telegram file path is invalid");
+    }
+    if (
+      value.file_size !== undefined &&
+      (!Number.isSafeInteger(value.file_size) || Number(value.file_size) < 0)
+    ) {
+      throw new TelegramError("Telegram file size is invalid");
+    }
+    return {
+      path: value.file_path,
+      ...(value.file_size === undefined
+        ? {}
+        : { bytes: Number(value.file_size) }),
+    };
+  }
+
+  public async downloadFile(
+    path: string,
+    signal?: AbortSignal,
+  ): Promise<Response> {
+    let response: Response;
+    try {
+      response = await this.fetcher(
+        `https://api.telegram.org/file/bot${this.token}/${path}`,
+        signal === undefined ? {} : { signal },
+      );
+    } catch {
+      throw new TelegramError("Telegram file transport failed");
+    }
+    if (!response.ok || response.body === null)
+      throw new TelegramError("Telegram file download failed");
+    return response;
+  }
+
+  public async sendArtifact(
+    privateChatId: string,
+    artifact: RuntimeArtifact,
+    media: MediaStore,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const field = artifact.mediaKind === "image" ? "photo" : "document";
+    const method =
+      artifact.mediaKind === "image" ? "sendPhoto" : "sendDocument";
+    const form = new FormData();
+    form.set("chat_id", privateChatId);
+    form.set(
+      field,
+      await openAsBlob(media.verifiedObjectPath(artifact), {
+        type: artifact.mimeType,
+      }),
+      artifact.displayName,
+    );
+    let response: Response;
+    try {
+      response = await this.fetcher(
+        `https://api.telegram.org/bot${this.token}/${method}`,
+        {
+          method: "POST",
+          body: form,
+          ...(signal === undefined ? {} : { signal }),
+        },
+      );
+    } catch {
+      throw new TelegramError("Telegram artifact transport failed");
+    }
+    if (!response.ok)
+      throw new TelegramError("Telegram artifact request failed");
+    let envelope: TelegramEnvelope;
+    try {
+      envelope = (await response.json()) as TelegramEnvelope;
+    } catch {
+      throw new TelegramError("Telegram returned an invalid artifact response");
+    }
+    if (envelope.ok !== true)
+      throw new TelegramError("Telegram rejected the artifact");
+  }
 }
 
 function stableUpdateId(update: unknown): number | null {
@@ -107,7 +211,76 @@ export class TelegramWorker {
     readonly bot: TelegramBotClient,
     readonly application: HitchApplication,
     readonly store: HitchStore,
+    readonly media?: MediaStore,
   ) {}
+
+  async #receive(
+    update: unknown,
+    signal?: AbortSignal,
+  ): Promise<ReturnType<HitchApplication["receiveTelegram"]>> {
+    const identity = classifyTelegramIdentity(update);
+    const endpoint = this.store.resolveTelegramEndpoint(
+      this.accountId,
+      identity.platformUserId,
+      identity.privateChatId,
+    );
+    if (endpoint === null)
+      return this.application.receiveTelegram(this.accountId, update);
+    const artifacts: RuntimeArtifact[] = [];
+    try {
+      const descriptor = readTelegramMediaDescriptor(identity);
+      if (descriptor === null)
+        return this.application.receiveTelegram(this.accountId, update);
+      if (this.media === undefined)
+        throw new AppError("media-invalid", "media storage is unavailable");
+      const remote = await this.bot.getFile(descriptor.fileId, signal);
+      if (
+        descriptor.advertisedBytes !== undefined &&
+        remote.bytes !== undefined &&
+        descriptor.advertisedBytes !== remote.bytes
+      ) {
+        throw new AppError("media-invalid", "Telegram media size changed");
+      }
+      const response = await this.bot.downloadFile(remote.path, signal);
+      const artifact = await this.media.ingest(
+        endpoint.userId,
+        response.body as ReadableStream<Uint8Array> & AsyncIterable<Uint8Array>,
+        {
+          ...((descriptor.advertisedBytes ?? remote.bytes) === undefined
+            ? {}
+            : {
+                advertisedBytes: descriptor.advertisedBytes ?? remote.bytes,
+              }),
+          ...(descriptor.advertisedMime === undefined
+            ? {}
+            : { advertisedMime: descriptor.advertisedMime }),
+          displayName: descriptor.displayName,
+          expectImage: descriptor.expectImage,
+        },
+      );
+      artifacts.push(artifact);
+      const result = this.application.receiveTelegram(
+        this.accountId,
+        update,
+        artifacts,
+      );
+      if (!result.accepted || result.duplicate)
+        for (const value of artifacts) this.media.discard(value);
+      return result;
+    } catch (error) {
+      for (const value of artifacts) this.media?.discard(value);
+      if (error instanceof AppError)
+        return {
+          accepted: false,
+          duplicate: false,
+          category: error.category,
+          message: error.message,
+          updateId: identity.updateId,
+          replyPrivateChatId: endpoint.privateChatId,
+        };
+      throw error;
+    }
+  }
 
   public async pollOnce(signal?: AbortSignal): Promise<number> {
     let offset = this.store.getTelegramOffset(this.accountId);
@@ -116,7 +289,22 @@ export class TelegramWorker {
     for (const update of updates) {
       const updateId = stableUpdateId(update);
       if (updateId === null || updateId < offset) continue;
-      const result = this.application.receiveTelegram(this.accountId, update);
+      let result: ReturnType<HitchApplication["receiveTelegram"]>;
+      try {
+        result = await this.#receive(update, signal);
+      } catch (error) {
+        if (error instanceof AppError) {
+          result = {
+            accepted: false,
+            duplicate: false,
+            category: error.category,
+            message: error.message,
+            updateId,
+          };
+        } else {
+          throw error;
+        }
+      }
       offset = updateId + 1;
       this.store.setTelegramOffset(this.accountId, offset);
       handled += 1;
@@ -139,7 +327,22 @@ export class TelegramWorker {
   ): Promise<void> {
     if (!this.store.claimOutbox(delivery)) return;
     try {
-      await this.bot.sendText(delivery.privateChatId, delivery.text, signal);
+      if (delivery.kind === "text" && delivery.text !== undefined) {
+        await this.bot.sendText(delivery.privateChatId, delivery.text, signal);
+      } else if (
+        delivery.kind === "artifact" &&
+        delivery.artifact !== undefined &&
+        this.media !== undefined
+      ) {
+        await this.bot.sendArtifact(
+          delivery.privateChatId,
+          delivery.artifact,
+          this.media,
+          signal,
+        );
+      } else {
+        throw new TelegramError("artifact delivery is unavailable");
+      }
       this.store.markOutboxSent(delivery);
     } catch (error) {
       this.store.markOutboxRetryable(delivery);

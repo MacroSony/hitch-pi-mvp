@@ -23,8 +23,9 @@ runtime and does not inherit its generalized v2 domain model.
 - [Implementation plan](PLAN.md)
 - [Luna implementation handoff](LUNA_HANDOFF.md)
 
-The durable foundation, Telegram text path, and native Pi/Bubblewrap runtime
-are implemented. Earlier Phase 0 evidence under `spikes/` found four real
+The durable foundation, Telegram text/media path, native Pi/Bubblewrap
+runtime, and bounded artifact outbox are implemented. Earlier Phase 0 evidence
+under `spikes/` found four real
 hardening gaps. The trusted-personal MVP reset accepts two as attended
 operational risks, excludes the two unsupported operator extensions, and moves
 live provider smoke to dogfooding. The smaller sequence is in
@@ -83,7 +84,11 @@ Startup pins and checks Pi `0.84.1` plus its dependency closure, validates the
 profile, compiles and pins the reviewed sandbox assets, obtains the native Pi
 model catalog, and requires a fresh mandatory-extension/Bubblewrap attestation.
 It exits if no authenticated model is available. `!models`, `!model`, and
-`!thinking` manage the session selection; normal text runs a native Pi Turn.
+`!thinking` manage the session selection; normal text and supported Telegram
+images/files run a native Pi Turn. JPEG, PNG, GIF, and WebP become native Pi
+image blocks, while other files are exposed read-only under `/inbox`.
+`!send <relative-path>` and Pi's `hitch_publish` create immutable bounded
+snapshots and deliver them through Telegram's native file methods.
 
 Real provider and Telegram traffic is always opt-in and never runs in normal
 CI. The host-only sandbox check can be repeated with:

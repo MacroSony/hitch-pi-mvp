@@ -9,9 +9,19 @@ import {
   type ValidatedTopology,
 } from "./filesystem.js";
 
-const SCHEMA_VERSION = 1;
-const SCHEMA_ID = "hitch-pi-mvp-schema-1";
+const SCHEMA_VERSION = 2;
+const SCHEMA_ID = "hitch-pi-mvp-schema-2";
 const EXPECTED_TABLES = [
+  "app_meta",
+  "artifacts",
+  "channel_endpoints",
+  "outbox",
+  "sessions",
+  "turn_artifacts",
+  "turns",
+  "users",
+];
+const SCHEMA_1_TABLES = [
   "app_meta",
   "channel_endpoints",
   "outbox",
@@ -83,6 +93,8 @@ CREATE TABLE turns (
   idempotency_key TEXT NOT NULL,
   content_digest TEXT NOT NULL,
   prompt_text TEXT NOT NULL,
+  operation_kind TEXT NOT NULL DEFAULT 'prompt' CHECK (operation_kind IN ('prompt', 'publish')),
+  publish_path TEXT,
   ordinal INTEGER NOT NULL,
   state TEXT NOT NULL CHECK (state IN ('queued', 'starting', 'running', 'terminal')),
   outcome TEXT CHECK (outcome IN ('succeeded', 'failed', 'cancelled', 'timed-out', 'unknown')),
@@ -94,7 +106,24 @@ CREATE TABLE turns (
   UNIQUE (id, user_id),
   UNIQUE (id, endpoint_id, user_id),
   FOREIGN KEY (session_id, user_id) REFERENCES sessions(id, user_id),
-  FOREIGN KEY (endpoint_id, user_id) REFERENCES channel_endpoints(id, user_id)
+  FOREIGN KEY (endpoint_id, user_id) REFERENCES channel_endpoints(id, user_id),
+  CHECK (
+    (operation_kind = 'prompt' AND publish_path IS NULL) OR
+    (operation_kind = 'publish' AND publish_path IS NOT NULL)
+  )
+) STRICT;
+
+CREATE TABLE artifacts (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id),
+  storage_key TEXT NOT NULL UNIQUE,
+  sha256 TEXT NOT NULL CHECK (length(sha256) = 64 AND sha256 NOT GLOB '*[^0-9a-f]*'),
+  bytes INTEGER NOT NULL CHECK (bytes >= 0 AND bytes <= 52428800),
+  media_kind TEXT NOT NULL CHECK (media_kind IN ('image', 'file')),
+  mime_type TEXT NOT NULL CHECK (length(CAST(mime_type AS BLOB)) BETWEEN 1 AND 127),
+  display_name TEXT NOT NULL CHECK (length(CAST(display_name AS BLOB)) BETWEEN 1 AND 128),
+  created_at INTEGER NOT NULL,
+  UNIQUE (id, user_id)
 ) STRICT;
 
 CREATE TABLE outbox (
@@ -102,6 +131,7 @@ CREATE TABLE outbox (
   user_id TEXT NOT NULL REFERENCES users(id),
   endpoint_id TEXT NOT NULL,
   turn_id TEXT,
+  artifact_id TEXT,
   kind TEXT NOT NULL CHECK (kind IN ('text', 'artifact')),
   payload_text TEXT,
   state TEXT NOT NULL CHECK (state IN ('pending', 'sending', 'sent', 'retryable', 'failed', 'expired')),
@@ -109,11 +139,95 @@ CREATE TABLE outbox (
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   FOREIGN KEY (endpoint_id, user_id) REFERENCES channel_endpoints(id, user_id),
-  FOREIGN KEY (turn_id, endpoint_id, user_id) REFERENCES turns(id, endpoint_id, user_id)
+  FOREIGN KEY (turn_id, endpoint_id, user_id) REFERENCES turns(id, endpoint_id, user_id),
+  FOREIGN KEY (artifact_id, user_id) REFERENCES artifacts(id, user_id),
+  CHECK (
+    (kind = 'text' AND payload_text IS NOT NULL AND artifact_id IS NULL) OR
+    (kind = 'artifact' AND artifact_id IS NOT NULL AND payload_text IS NULL)
+  )
+) STRICT;
+
+CREATE TABLE turn_artifacts (
+  turn_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  artifact_id TEXT NOT NULL,
+  direction TEXT NOT NULL CHECK (direction IN ('inbound', 'outbound')),
+  ordinal INTEGER NOT NULL CHECK (ordinal >= 0 AND ordinal < 8),
+  PRIMARY KEY (turn_id, direction, ordinal),
+  UNIQUE (turn_id, artifact_id),
+  FOREIGN KEY (turn_id, user_id) REFERENCES turns(id, user_id),
+  FOREIGN KEY (artifact_id, user_id) REFERENCES artifacts(id, user_id)
 ) STRICT;
 
 CREATE INDEX turns_user_state_ordinal ON turns(user_id, state, ordinal);
 CREATE INDEX outbox_endpoint_state ON outbox(endpoint_id, state, created_at);
+CREATE INDEX artifacts_user_created ON artifacts(user_id, created_at);
+`;
+
+const MIGRATE_1_TO_2 = `
+ALTER TABLE turns ADD COLUMN operation_kind TEXT NOT NULL DEFAULT 'prompt'
+  CHECK (operation_kind IN ('prompt', 'publish'));
+ALTER TABLE turns ADD COLUMN publish_path TEXT
+  CHECK ((operation_kind = 'prompt' AND publish_path IS NULL) OR
+         (operation_kind = 'publish' AND publish_path IS NOT NULL));
+
+CREATE TABLE artifacts (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id),
+  storage_key TEXT NOT NULL UNIQUE,
+  sha256 TEXT NOT NULL CHECK (length(sha256) = 64 AND sha256 NOT GLOB '*[^0-9a-f]*'),
+  bytes INTEGER NOT NULL CHECK (bytes >= 0 AND bytes <= 52428800),
+  media_kind TEXT NOT NULL CHECK (media_kind IN ('image', 'file')),
+  mime_type TEXT NOT NULL CHECK (length(CAST(mime_type AS BLOB)) BETWEEN 1 AND 127),
+  display_name TEXT NOT NULL CHECK (length(CAST(display_name AS BLOB)) BETWEEN 1 AND 128),
+  created_at INTEGER NOT NULL,
+  UNIQUE (id, user_id)
+) STRICT;
+
+CREATE TABLE turn_artifacts (
+  turn_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  artifact_id TEXT NOT NULL,
+  direction TEXT NOT NULL CHECK (direction IN ('inbound', 'outbound')),
+  ordinal INTEGER NOT NULL CHECK (ordinal >= 0 AND ordinal < 8),
+  PRIMARY KEY (turn_id, direction, ordinal),
+  UNIQUE (turn_id, artifact_id),
+  FOREIGN KEY (turn_id, user_id) REFERENCES turns(id, user_id),
+  FOREIGN KEY (artifact_id, user_id) REFERENCES artifacts(id, user_id)
+) STRICT;
+
+DROP INDEX outbox_endpoint_state;
+ALTER TABLE outbox RENAME TO outbox_schema_1;
+CREATE TABLE outbox (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id),
+  endpoint_id TEXT NOT NULL,
+  turn_id TEXT,
+  artifact_id TEXT,
+  kind TEXT NOT NULL CHECK (kind IN ('text', 'artifact')),
+  payload_text TEXT,
+  state TEXT NOT NULL CHECK (state IN ('pending', 'sending', 'sent', 'retryable', 'failed', 'expired')),
+  attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  FOREIGN KEY (endpoint_id, user_id) REFERENCES channel_endpoints(id, user_id),
+  FOREIGN KEY (turn_id, endpoint_id, user_id) REFERENCES turns(id, endpoint_id, user_id),
+  FOREIGN KEY (artifact_id, user_id) REFERENCES artifacts(id, user_id),
+  CHECK (
+    (kind = 'text' AND payload_text IS NOT NULL AND artifact_id IS NULL) OR
+    (kind = 'artifact' AND artifact_id IS NOT NULL AND payload_text IS NULL)
+  )
+) STRICT;
+INSERT INTO outbox(
+  id, user_id, endpoint_id, turn_id, artifact_id, kind, payload_text,
+  state, attempts, created_at, updated_at
+)
+SELECT id, user_id, endpoint_id, turn_id, NULL, kind, payload_text,
+       state, attempts, created_at, updated_at
+FROM outbox_schema_1;
+DROP TABLE outbox_schema_1;
+CREATE INDEX outbox_endpoint_state ON outbox(endpoint_id, state, created_at);
+CREATE INDEX artifacts_user_created ON artifacts(user_id, created_at);
 `;
 
 export interface Clock {
@@ -169,6 +283,15 @@ function scalarNumber(value: unknown, label: string): number {
   throw new FoundationError(`database returned an invalid ${label}`);
 }
 
+function tableNames(connection: DatabaseSync): unknown[] {
+  return connection
+    .prepare(
+      "SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+    )
+    .all()
+    .map((entry) => (entry as { name: unknown }).name);
+}
+
 function verifySchema(connection: DatabaseSync): void {
   const row = connection.prepare("PRAGMA user_version").get() as
     | { user_version?: unknown }
@@ -187,6 +310,29 @@ function verifySchema(connection: DatabaseSync): void {
       connection.exec("ROLLBACK");
       throw error;
     }
+  } else if (version === 1) {
+    connection.exec("BEGIN IMMEDIATE");
+    try {
+      const meta = connection
+        .prepare("SELECT value FROM app_meta WHERE key = ?")
+        .get("schema_id") as { value?: unknown } | undefined;
+      if (meta?.value !== "hitch-pi-mvp-schema-1")
+        throw new FoundationError("database schema 1 identity is unknown");
+      if (
+        JSON.stringify(tableNames(connection)) !==
+        JSON.stringify(SCHEMA_1_TABLES)
+      )
+        throw new FoundationError("database table set is unknown");
+      connection.exec(MIGRATE_1_TO_2);
+      connection
+        .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
+        .run(SCHEMA_ID, "schema_id");
+      connection.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+      connection.exec("COMMIT");
+    } catch (error) {
+      connection.exec("ROLLBACK");
+      throw error;
+    }
   } else if (version !== SCHEMA_VERSION) {
     throw new FoundationError(
       `unsupported database schema version: ${version}`,
@@ -198,12 +344,7 @@ function verifySchema(connection: DatabaseSync): void {
     .get("schema_id") as { value?: unknown } | undefined;
   if (meta?.value !== SCHEMA_ID)
     throw new FoundationError("database schema identity is missing or unknown");
-  const tables = connection
-    .prepare(
-      "SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
-    )
-    .all()
-    .map((entry) => (entry as { name: unknown }).name);
+  const tables = tableNames(connection);
   if (JSON.stringify(tables) !== JSON.stringify(EXPECTED_TABLES)) {
     throw new FoundationError("database table set is unknown");
   }

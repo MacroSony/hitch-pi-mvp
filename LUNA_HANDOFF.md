@@ -1,7 +1,8 @@
 # Implementation handoff
 
-Status: the trusted-personal reset, durable foundation, and Telegram text slice
-are committed. Phase 3 native Pi/Bubblewrap work is the current phase.
+Status: the trusted-personal reset, durable foundation, Telegram text, native
+Pi/Bubblewrap, and Telegram media slices are implemented through Phase 4.
+Phase 5 WeChat private-peer support is the current phase.
 
 ## Objective
 
@@ -20,15 +21,16 @@ marketplace, configuration graph, or public multi-tenant service.
 
 ## Current assignment
 
-Complete only Phase 3 from `PLAN.md` before the next reviewed commit:
+Complete only Phase 5 from `PLAN.md` before the next reviewed commit:
 
-- promote the exact reviewed Phase 0 Bubblewrap assets;
-- pin and drive native Pi `0.84.1` through RPC with one global slot;
-- require fresh extension/tool attestation before prompting;
-- persist model, thinking, and transcript selection per session; and
-- keep real provider/Telegram dogfood opt-in.
+- use the pinned WeChat client only at its raw API boundary;
+- admit exact configured account/private-peer tuples before content/media;
+- reuse the existing sessions, queue, media, sandbox, and outbox path;
+- keep WeChat state and context tokens outside workspaces and owner-bound; and
+- keep real QR/login and channel acceptance opt-in.
 
-Do not add media or WeChat inside the Phase 3 commit.
+Do not add Phase 6 packaging or generalized connector abstractions inside the
+Phase 5 commit.
 
 ## Review and commit rule
 

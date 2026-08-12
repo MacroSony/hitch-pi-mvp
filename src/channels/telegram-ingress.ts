@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { AppError } from "../app/errors.js";
+import type { RuntimeArtifact } from "../runtime/runtime.js";
 
 const MAX_PROMPT_BYTES = 32 * 1024;
 const CONTROL_PATTERN = /[\u0000-\u001f\u007f]/u;
@@ -17,6 +18,14 @@ export interface TelegramIdentity {
 export interface TelegramContent {
   readonly text: string;
   readonly contentDigest: string;
+}
+
+export interface TelegramMediaDescriptor {
+  readonly fileId: string;
+  readonly advertisedBytes?: number;
+  readonly advertisedMime?: string;
+  readonly displayName: string;
+  readonly expectImage: boolean;
 }
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -93,21 +102,111 @@ export function classifyTelegramIdentity(value: unknown): TelegramIdentity {
 
 export function readTelegramContent(
   identity: TelegramIdentity,
+  artifacts: readonly RuntimeArtifact[] = [],
 ): TelegramContent {
-  if (
-    typeof identity.message.text !== "string" ||
-    identity.message.text.length === 0
-  ) {
+  const raw =
+    typeof identity.message.text === "string"
+      ? identity.message.text
+      : typeof identity.message.caption === "string"
+        ? identity.message.caption
+        : artifacts.length > 0
+          ? "Please inspect the attached media."
+          : undefined;
+  if (raw === undefined || raw.length === 0) {
     throw new AppError(
       "rejected",
-      "only non-empty Telegram text messages are supported",
+      "only non-empty Telegram text or media messages are supported",
     );
   }
-  const text = identity.message.text.normalize("NFC");
+  if (
+    typeof identity.message.text === "string" &&
+    (Object.hasOwn(identity.message, "photo") ||
+      Object.hasOwn(identity.message, "document"))
+  ) {
+    throw new AppError("rejected", "Telegram message fields are contradictory");
+  }
+  const text = raw.normalize("NFC");
   if (Buffer.byteLength(text, "utf8") > MAX_PROMPT_BYTES)
     throw new AppError("rejected", "Telegram text is too large");
   const contentDigest = createHash("sha256")
-    .update(JSON.stringify({ text }))
+    .update(
+      JSON.stringify(
+        artifacts.length === 0
+          ? { text }
+          : {
+              text,
+              artifacts: artifacts.map(
+                ({ sha256, bytes, mediaKind, mimeType }) => ({
+                  sha256,
+                  bytes,
+                  mediaKind,
+                  mimeType,
+                }),
+              ),
+            },
+      ),
+    )
     .digest("hex");
   return { text, contentDigest };
+}
+
+function advertisedBytes(value: unknown): number | undefined {
+  if (value === undefined) return undefined;
+  if (!Number.isSafeInteger(value) || Number(value) < 0)
+    throw new AppError("media-invalid", "Telegram media size is invalid");
+  return Number(value);
+}
+
+export function readTelegramMediaDescriptor(
+  identity: TelegramIdentity,
+): TelegramMediaDescriptor | null {
+  const photo = identity.message.photo;
+  const document = record(identity.message.document);
+  if (photo !== undefined && document !== null)
+    throw new AppError("rejected", "Telegram media fields are contradictory");
+  if (photo !== undefined) {
+    if (!Array.isArray(photo) || photo.length === 0)
+      throw new AppError("media-invalid", "Telegram photo metadata is invalid");
+    const choices = photo.map((value) => {
+      const item = record(value);
+      if (item === null)
+        throw new AppError(
+          "media-invalid",
+          "Telegram photo metadata is invalid",
+        );
+      return {
+        fileId: remoteId(item.file_id, "photo file id"),
+        bytes: advertisedBytes(item.file_size),
+      };
+    });
+    const selected = choices.reduce((left, right) =>
+      (right.bytes ?? 0) >= (left.bytes ?? 0) ? right : left,
+    );
+    return {
+      fileId: selected.fileId,
+      ...(selected.bytes === undefined
+        ? {}
+        : { advertisedBytes: selected.bytes }),
+      advertisedMime: "image/jpeg",
+      displayName: `telegram-photo-${identity.messageId}.jpg`,
+      expectImage: true,
+    };
+  }
+  if (document !== null) {
+    const fileName =
+      typeof document.file_name === "string"
+        ? document.file_name
+        : `telegram-file-${identity.messageId}`;
+    const size = advertisedBytes(document.file_size);
+    return {
+      fileId: remoteId(document.file_id, "document file id"),
+      ...(size === undefined ? {} : { advertisedBytes: size }),
+      ...(typeof document.mime_type === "string"
+        ? { advertisedMime: document.mime_type }
+        : {}),
+      displayName: fileName,
+      expectImage: false,
+    };
+  }
+  return null;
 }

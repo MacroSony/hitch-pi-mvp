@@ -20,11 +20,20 @@ import {
   rmSync,
   statSync,
 } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import {
+  basename,
+  dirname,
+  isAbsolute,
+  join,
+  relative,
+  resolve,
+} from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { MediaStore, MAX_OUTBOUND_ARTIFACTS } from "../media/media-store.js";
 import type {
   AgentRuntime,
+  RuntimeArtifact,
   RuntimeModel,
   RuntimeResult,
   RuntimeTurn,
@@ -75,6 +84,7 @@ export interface NativePiRuntimeOptions {
   readonly dataRoot: string;
   readonly piProfileDir: string;
   readonly turnTimeoutMs?: number;
+  readonly mediaStore?: MediaStore;
 }
 
 interface ControllerContext {
@@ -95,6 +105,14 @@ interface ClosedProcess {
 interface AssistantSnapshot {
   readonly text: string;
   readonly stopReason: string;
+}
+
+interface SandboxBackend {
+  executeSandboxRequest(
+    input: Record<string, unknown>,
+    request: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<unknown>;
 }
 
 function record(value: unknown): JsonRecord | null {
@@ -739,6 +757,7 @@ export class NativePiRuntime implements AgentRuntime {
   readonly #cli: string;
   readonly #assets: string;
   readonly #turnTimeoutMs: number;
+  readonly #media: MediaStore;
   #gate: Promise<void> = Promise.resolve();
   #poisoned = false;
 
@@ -754,6 +773,7 @@ export class NativePiRuntime implements AgentRuntime {
     this.#cli = piCliPath();
     this.#assets = assetRoot();
     this.#turnTimeoutMs = options.turnTimeoutMs ?? 10 * 60 * 1000;
+    this.#media = options.mediaStore ?? new MediaStore(options.dataRoot);
   }
 
   public static async create(
@@ -866,6 +886,89 @@ export class NativePiRuntime implements AgentRuntime {
     }
   }
 
+  async #publishOnly(
+    turn: RuntimeTurn,
+    context: ControllerContext,
+    signal: AbortSignal,
+  ): Promise<RuntimeResult> {
+    const publishPath = turn.publishPath;
+    const artifactId = randomBytes(16).toString("hex");
+    try {
+      if (publishPath === undefined)
+        throw new Error("publication path is missing");
+      validateSandboxAssets(this.#assets);
+      const backend = (await import(
+        pathToFileURL(join(this.#assets, "sandbox-backend.mjs")).href
+      )) as SandboxBackend;
+      const result = record(
+        await backend.executeSandboxRequest(
+          {
+            workspace: context.workspace,
+            inbox: context.inbox,
+            publishRoot: context.publishRoot,
+            worker: join(this.#assets, "sandbox-worker.mjs"),
+            helper: join(this.#assets, "secure-bwrap-helper"),
+            log: context.log,
+            turnHandle: context.turnHandle,
+            workerSha256: SANDBOX_ASSET_SHA256["sandbox-worker.mjs"],
+            helperSha256: SANDBOX_ASSET_SHA256["secure-bwrap-helper"],
+            temporaryBytes: 4 * 1024 * 1024,
+            memoryBytes: 256 * 1024 * 1024,
+            maximumProcesses: 32,
+            wallMilliseconds: 8_000,
+          },
+          {
+            operation: "hitch_publish",
+            input: { path: publishPath, artifactId },
+          },
+          signal,
+        ),
+      );
+      if (
+        result === null ||
+        result.artifactId !== artifactId ||
+        !Number.isSafeInteger(result.bytes) ||
+        Number(result.bytes) < 0 ||
+        Number(result.bytes) > 50 * 1024 * 1024 ||
+        typeof result.sha256 !== "string" ||
+        !/^[a-f0-9]{64}$/u.test(result.sha256)
+      ) {
+        throw new Error("publication helper returned invalid metadata");
+      }
+      const artifact = this.#media.promotePublished(
+        turn.userId,
+        join(context.publishRoot, `${artifactId}.blob`),
+        basename(publishPath),
+      );
+      if (
+        artifact.bytes !== Number(result.bytes) ||
+        artifact.sha256 !== result.sha256
+      ) {
+        this.#media.discard(artifact);
+        throw new Error("publication helper metadata did not match snapshot");
+      }
+      return {
+        outcome: "succeeded",
+        text: `Published ${artifact.displayName}.`,
+        sessionReusable: true,
+        artifacts: [artifact],
+      };
+    } catch {
+      return {
+        outcome: signal.aborted ? "cancelled" : "failed",
+        text: "",
+        sessionReusable: true,
+      };
+    } finally {
+      const cleaned = await cleanupSandboxUnits();
+      if (!cleaned) {
+        this.#poisoned = true;
+        throw new Error("sandbox process-tree cleanup could not be confirmed");
+      }
+      rmSync(context.root, { recursive: true, force: true });
+    }
+  }
+
   public async run(
     turn: RuntimeTurn,
     signal: AbortSignal,
@@ -927,11 +1030,72 @@ export class NativePiRuntime implements AgentRuntime {
       safeSegment(turn.turnId, "runtime Turn id"),
       turn.workspace,
     );
+    const inputArtifacts = turn.artifacts ?? [];
+    if (
+      inputArtifacts.length > 8 ||
+      inputArtifacts.some((artifact) => artifact.userId !== turn.userId) ||
+      inputArtifacts.reduce((total, artifact) => total + artifact.bytes, 0) >
+        40 * 1024 * 1024
+    ) {
+      rmSync(context.root, { recursive: true, force: true });
+      return { outcome: "unknown", text: "", sessionReusable: false };
+    }
+    const images: Array<{
+      type: "image";
+      data: string;
+      mimeType: string;
+    }> = [];
+    const inboxLines: string[] = [];
+    try {
+      for (const [ordinal, artifact] of inputArtifacts.entries()) {
+        if (artifact.mediaKind === "image") {
+          images.push({
+            type: "image",
+            data: this.#media.imageData(artifact),
+            mimeType: artifact.mimeType,
+          });
+        } else {
+          const path = this.#media.materializeInbox(
+            artifact,
+            context.inbox,
+            ordinal,
+          );
+          inboxLines.push(
+            `${path} (${artifact.displayName}; ${artifact.mimeType}; ${artifact.bytes} bytes)`,
+          );
+        }
+      }
+    } catch {
+      rmSync(context.root, { recursive: true, force: true });
+      return { outcome: "unknown", text: "", sessionReusable: false };
+    }
+    const prompt =
+      inboxLines.length === 0
+        ? turn.prompt
+        : `${turn.prompt}\n\nHitch attached these opaque read-only files for this Turn:\n${inboxLines.join("\n")}`;
+    if (turn.publishPath !== undefined)
+      return await this.#publishOnly(turn, context, signal);
+    const selectedModel =
+      turn.modelProvider === undefined && turn.modelId === undefined
+        ? this.models[0]
+        : this.models.find(
+            (model) =>
+              model.provider === turn.modelProvider &&
+              model.id === turn.modelId,
+          );
+    if (
+      images.length > 0 &&
+      (selectedModel === undefined || !selectedModel.input.includes("image"))
+    ) {
+      rmSync(context.root, { recursive: true, force: true });
+      return { outcome: "failed", text: "", sessionReusable: true };
+    }
     const controller = this.#controller(context, session);
     let timedOut = false;
     let promptSubmitted = false;
     let timer: NodeJS.Timeout | undefined;
     let forcedKill: NodeJS.Timeout | undefined;
+    const promoted: RuntimeArtifact[] = [];
     const abort = (): void => {
       if (!promptSubmitted || controller.exited) return;
       void controller.send({ type: "abort" }, 5_000).catch(() => undefined);
@@ -941,14 +1105,6 @@ export class NativePiRuntime implements AgentRuntime {
     signal.addEventListener("abort", onExternalAbort, { once: true });
     try {
       await waitForAttestation(controller, context);
-      const selectedModel =
-        turn.modelProvider === undefined && turn.modelId === undefined
-          ? this.models[0]
-          : this.models.find(
-              (model) =>
-                model.provider === turn.modelProvider &&
-                model.id === turn.modelId,
-            );
       if (selectedModel === undefined)
         throw new Error("stored model is not in the current Pi catalog");
       if (turn.modelProvider !== undefined || turn.modelId !== undefined) {
@@ -992,7 +1148,11 @@ export class NativePiRuntime implements AgentRuntime {
         abort();
       }, this.#turnTimeoutMs);
       await controller.send(
-        { type: "prompt", message: turn.prompt },
+        {
+          type: "prompt",
+          message: prompt,
+          ...(images.length === 0 ? {} : { images }),
+        },
         Math.min(this.#turnTimeoutMs, 30_000),
       );
       await settled;
@@ -1031,6 +1191,20 @@ export class NativePiRuntime implements AgentRuntime {
       ) {
         throw new Error("Pi transcript durability could not be proven");
       }
+      const publicationEntries = readdirSync(context.publishRoot).sort();
+      if (
+        publicationEntries.length > MAX_OUTBOUND_ARTIFACTS ||
+        publicationEntries.some((name) => !/^[a-f0-9]{32}\.blob$/u.test(name))
+      ) {
+        throw new Error("Pi publication output is invalid");
+      }
+      for (const name of publicationEntries)
+        promoted.push(
+          this.#media.promotePublished(
+            turn.userId,
+            join(context.publishRoot, name),
+          ),
+        );
       return {
         outcome,
         text: outcome === "succeeded" ? (assistant?.text ?? "") : "",
@@ -1039,12 +1213,14 @@ export class NativePiRuntime implements AgentRuntime {
         ...(modelProvider === undefined ? {} : { modelProvider }),
         ...(modelId === undefined ? {} : { modelId }),
         thinkingLevel: thinking as ThinkingLevel,
+        ...(promoted.length === 0 ? {} : { artifacts: promoted }),
       };
     } catch {
       if (timer !== undefined) clearTimeout(timer);
       if (forcedKill !== undefined) clearTimeout(forcedKill);
       controller.kill();
       await controller.waitClosed();
+      for (const artifact of promoted) this.#media.discard(artifact);
       return { outcome: "unknown", text: "", sessionReusable: false };
     } finally {
       signal.removeEventListener("abort", onExternalAbort);

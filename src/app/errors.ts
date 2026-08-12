@@ -1,6 +1,7 @@
 export type FailureCategory =
   | "rejected"
   | "busy"
+  | "media-invalid"
   | "session-quarantined"
   | "model-unavailable"
   | "sandbox-failed"

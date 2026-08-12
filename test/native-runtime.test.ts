@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
+import { createHash, randomBytes } from "node:crypto";
 import {
   chmodSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
@@ -11,6 +13,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { pathToFileURL } from "node:url";
 
 import {
   NativePiRuntime,
@@ -92,5 +95,70 @@ test(
         }),
       /no authenticated available model/u,
     );
+  },
+);
+
+test(
+  "opt-in publication snapshot uses the production descriptor-confined helper",
+  { skip: process.env.HITCH_RUN_SANDBOX_TESTS !== "1" },
+  async () => {
+    const repository = resolve(
+      dirname(fileURLToPath(import.meta.url)),
+      "../..",
+    );
+    const assets = join(repository, "dist", "sandbox");
+    const root = mkdtempSync(join(tmpdir(), "hitch-publish-test-"));
+    chmodSync(root, 0o700);
+    const workspace = join(root, "workspace");
+    const inbox = join(root, "inbox");
+    const publishRoot = join(root, "publish");
+    for (const path of [workspace, inbox, publishRoot]) privateDirectory(path);
+    writeFileSync(join(workspace, "result.txt"), "publication-check", {
+      mode: 0o600,
+    });
+    const worker = join(assets, "sandbox-worker.mjs");
+    const helper = join(assets, "secure-bwrap-helper");
+    const sha256 = (path: string): string =>
+      createHash("sha256").update(readFileSync(path)).digest("hex");
+    const artifactId = randomBytes(16).toString("hex");
+    try {
+      const backend = (await import(
+        pathToFileURL(join(assets, "sandbox-backend.mjs")).href
+      )) as {
+        executeSandboxRequest(
+          input: Record<string, unknown>,
+          request: Record<string, unknown>,
+        ): Promise<unknown>;
+        activeSandboxUnitCount(): number;
+      };
+      const result = (await backend.executeSandboxRequest(
+        {
+          workspace,
+          inbox,
+          publishRoot,
+          worker,
+          helper,
+          log: join(root, "sandbox.log"),
+          turnHandle: randomBytes(16).toString("hex"),
+          workerSha256: sha256(worker),
+          helperSha256: sha256(helper),
+          temporaryBytes: 4 * 1024 * 1024,
+          memoryBytes: 256 * 1024 * 1024,
+          maximumProcesses: 32,
+          wallMilliseconds: 8_000,
+        },
+        {
+          operation: "hitch_publish",
+          input: { path: "result.txt", artifactId },
+        },
+      )) as { bytes: number; sha256: string };
+      const artifact = join(publishRoot, `${artifactId}.blob`);
+      assert.equal(result.bytes, 17);
+      assert.equal(result.sha256, sha256(artifact));
+      assert.equal(readFileSync(artifact, "utf8"), "publication-check");
+      assert.equal(backend.activeSandboxUnitCount(), 0);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   },
 );

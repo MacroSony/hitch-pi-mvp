@@ -1,4 +1,8 @@
-import type { AgentRuntime, RuntimeResult } from "../runtime/runtime.js";
+import type {
+  AgentRuntime,
+  RuntimeArtifact,
+  RuntimeResult,
+} from "../runtime/runtime.js";
 import {
   classifyTelegramIdentity,
   readTelegramContent,
@@ -34,7 +38,11 @@ export class HitchApplication {
       this.#schedule(userId);
   }
 
-  public receiveTelegram(accountId: string, update: unknown): IngressResult {
+  public receiveTelegram(
+    accountId: string,
+    update: unknown,
+    artifacts: readonly RuntimeArtifact[] = [],
+  ): IngressResult {
     let updateId: number | undefined;
     let replyPrivateChatId: string | undefined;
     try {
@@ -53,7 +61,9 @@ export class HitchApplication {
           "Telegram private endpoint is not configured",
         );
       replyPrivateChatId = endpoint.privateChatId;
-      const content = readTelegramContent(ingress);
+      if (artifacts.some((artifact) => artifact.userId !== endpoint.userId))
+        throw new AppError("rejected", "Telegram media owner does not match");
+      const content = readTelegramContent(ingress, artifacts);
       const identity: MessageIdentity = {
         endpoint,
         idempotencyKey: ingress.idempotencyKey,
@@ -61,10 +71,16 @@ export class HitchApplication {
       };
       const command = parseCommand(content.text);
       if (command === null) {
-        const admitted = this.store.admitPrompt(identity, content.text);
+        const admitted = this.store.admitPrompt(
+          identity,
+          content.text,
+          artifacts,
+        );
         this.#schedule(admitted.userId);
         return { accepted: true, duplicate: admitted.duplicate, updateId };
       }
+      if (artifacts.length > 0)
+        throw new AppError("rejected", "commands cannot include media");
       const result = this.store.executeCommand(
         identity,
         command,
@@ -73,6 +89,7 @@ export class HitchApplication {
       );
       if (result.abortTurnId !== null)
         this.#controllers.get(result.abortTurnId)?.abort();
+      this.#schedule(result.userId);
       return { accepted: true, duplicate: result.duplicate, updateId };
     } catch (error) {
       if (error instanceof AppError) {

@@ -9,6 +9,19 @@ export interface RuntimeTurn {
   readonly modelProvider?: string;
   readonly modelId?: string;
   readonly thinkingLevel?: ThinkingLevel;
+  readonly artifacts?: readonly RuntimeArtifact[];
+  readonly publishPath?: string;
+}
+
+export interface RuntimeArtifact {
+  readonly id: string;
+  readonly userId: string;
+  readonly storageKey: string;
+  readonly sha256: string;
+  readonly bytes: number;
+  readonly mediaKind: "image" | "file";
+  readonly mimeType: string;
+  readonly displayName: string;
 }
 
 export type ThinkingLevel =
@@ -42,6 +55,7 @@ export interface RuntimeResult {
   readonly modelProvider?: string;
   readonly modelId?: string;
   readonly thinkingLevel?: ThinkingLevel;
+  readonly artifacts?: readonly RuntimeArtifact[];
 }
 
 export interface AgentRuntime {

@@ -4,6 +4,7 @@ import { TelegramBotClient, TelegramWorker } from "./channels/telegram.js";
 import { loadConfig, readRequiredSecret } from "./config/config.js";
 import { bootstrapFoundation } from "./foundation/bootstrap.js";
 import { NativePiRuntime } from "./pi/native-runtime.js";
+import { MediaStore } from "./media/media-store.js";
 import { FakeAgentRuntime, type AgentRuntime } from "./runtime/runtime.js";
 
 interface CliOptions {
@@ -69,14 +70,25 @@ async function main(): Promise<void> {
 
     if (config.telegramAccounts.length === 0)
       throw new Error("Telegram mode requires a configured Telegram account");
+    const media = new MediaStore(
+      foundation.topology.dataRoot.path,
+      config.minimumFreeBytes,
+    );
     const runtime: AgentRuntime =
       cli.mode === "fake-telegram"
         ? new FakeAgentRuntime()
         : await NativePiRuntime.create({
             dataRoot: foundation.topology.dataRoot.path,
             piProfileDir: foundation.topology.piProfileDir.path,
+            mediaStore: media,
           });
-    const store = new HitchStore(foundation.database);
+    const store = new HitchStore(
+      foundation.database,
+      undefined,
+      undefined,
+      (userId) => media.assertAdmissionCapacity(userId),
+    );
+    media.cleanupUnreferenced(store.artifactStorageKeys());
     const application = new HitchApplication(store, runtime);
     application.start();
     const workers = config.telegramAccounts.map(
@@ -86,6 +98,7 @@ async function main(): Promise<void> {
           new TelegramBotClient(readRequiredSecret(account.botTokenEnv)),
           application,
           store,
+          media,
         ),
     );
     const shutdown = new AbortController();
