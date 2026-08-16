@@ -162,8 +162,13 @@ export function readTelegramMediaDescriptor(
 ): TelegramMediaDescriptor | null {
   const photo = identity.message.photo;
   const document = record(identity.message.document);
-  if (photo !== undefined && document !== null)
+  const video = record(identity.message.video);
+  if (
+    (photo !== undefined && (document !== null || video !== null)) ||
+    (document !== null && video !== null)
+  ) {
     throw new AppError("rejected", "Telegram media fields are contradictory");
+  }
   if (photo !== undefined) {
     if (!Array.isArray(photo) || photo.length === 0)
       throw new AppError("media-invalid", "Telegram photo metadata is invalid");
@@ -205,6 +210,18 @@ export function readTelegramMediaDescriptor(
         ? { advertisedMime: document.mime_type }
         : {}),
       displayName: fileName,
+      expectImage: false,
+    };
+  }
+  if (video !== null) {
+    const size = advertisedBytes(video.file_size);
+    return {
+      fileId: remoteId(video.file_id, "video file id"),
+      ...(size === undefined ? {} : { advertisedBytes: size }),
+      ...(typeof video.mime_type === "string"
+        ? { advertisedMime: video.mime_type }
+        : { advertisedMime: "video/mp4" }),
+      displayName: `telegram-video-${identity.messageId}.mp4`,
       expectImage: false,
     };
   }
