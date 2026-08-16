@@ -276,6 +276,54 @@ test("help lists commands and send validates workspace files before dispatch", (
   environment.foundation.close();
 });
 
+test("Telegram worker sends typing while a Turn is running", async () => {
+  const environment = setup();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const runtime = new FakeAgentRuntime(async () => {
+    await gate;
+    return { outcome: "succeeded", text: "done", sessionReusable: true };
+  });
+  const application = new HitchApplication(environment.store, runtime);
+  application.start();
+  application.receiveTelegram("primary", update(50, "101", "long work"));
+
+  const calls: string[] = [];
+  const fetcher: typeof fetch = async (input, init) => {
+    const url = String(input);
+    if (url.endsWith("/getUpdates"))
+      return Response.json({ ok: true, result: [] });
+    if (url.endsWith("/sendChatAction")) {
+      const body = JSON.parse(String(init?.body)) as { action: string };
+      calls.push(body.action);
+      return Response.json({ ok: true, result: true });
+    }
+    if (url.endsWith("/sendMessage"))
+      return Response.json({ ok: true, result: { message_id: 1 } });
+    throw new Error(`unexpected test URL: ${url}`);
+  };
+  const worker = new TelegramWorker(
+    "primary",
+    new TelegramBotClient("fixture-token", fetcher),
+    application,
+    environment.store,
+  );
+  const controller = new AbortController();
+  const running = worker.run(controller.signal);
+  await new Promise<void>((resolve) => setTimeout(resolve, 120));
+  assert.ok(
+    calls.includes("typing"),
+    "the worker must send a typing action while the Turn runs",
+  );
+  release();
+  await application.drain();
+  controller.abort();
+  await running;
+  environment.foundation.close();
+});
+
 test("model and thinking commands persist a catalog-validated session selection", async () => {
   const environment = setup();
   const models: readonly RuntimeModel[] = [

@@ -640,7 +640,18 @@ export class HitchStore {
             selection.model_provider === null || selection.model_id === null
               ? "Pi default"
               : `${selection.model_provider}/${selection.model_id}`;
-          response = `Session ${session.name} (${session.state}); model ${model}; thinking ${selection.thinking_level ?? "Pi default"}; active ${Number(counts.active ?? 0n)}; queued ${Number(counts.queued ?? 0n)}.`;
+          const running = this.#database
+            .prepare(
+              "SELECT updated_at FROM turns WHERE user_id = ? AND state = 'running' ORDER BY ordinal LIMIT 1",
+            )
+            .get(identity.endpoint.userId) as
+            | { updated_at: number }
+            | undefined;
+          const elapsed =
+            running === undefined
+              ? ""
+              : `; elapsed ${Math.max(0, now - running.updated_at) / 1000}s`;
+          response = `Session ${session.name} (${session.state}); model ${model}; thinking ${selection.thinking_level ?? "Pi default"}; active ${Number(counts.active ?? 0n)}; queued ${Number(counts.queued ?? 0n)}${elapsed}.`;
           break;
         }
         case "abort": {
@@ -1184,6 +1195,32 @@ export class HitchStore {
         .all() as unknown as Array<{ user_id: string }>;
       return queued.map(({ user_id }) => user_id);
     });
+  }
+
+  public runningTurnEndpoints(accountId: string): readonly {
+    turnId: string;
+    endpointId: string;
+    platformUserId: string;
+    privateChatId: string | null;
+    kind: "telegram" | "wechat";
+  }[] {
+    return this.#database
+      .prepare(
+        `SELECT t.id AS turnId, e.id AS endpointId,
+                e.platform_user_id AS platformUserId,
+                e.private_chat_id AS privateChatId, e.kind
+         FROM turns t
+         JOIN channel_endpoints e ON e.id = t.endpoint_id AND e.user_id = t.user_id
+         WHERE e.account_id = ? AND e.enabled = 1 AND t.state = 'running'
+         ORDER BY t.ordinal`,
+      )
+      .all(accountId) as unknown as {
+      turnId: string;
+      endpointId: string;
+      platformUserId: string;
+      privateChatId: string | null;
+      kind: "telegram" | "wechat";
+    }[];
   }
 
   public pendingTelegramOutbox(

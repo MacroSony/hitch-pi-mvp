@@ -34,7 +34,7 @@ export class TelegramBotClient {
   }
 
   async #call(
-    method: "getUpdates" | "sendMessage" | "getFile",
+    method: "getUpdates" | "sendMessage" | "getFile" | "sendChatAction",
     body: Record<string, unknown>,
     signal?: AbortSignal,
   ): Promise<unknown> {
@@ -134,6 +134,18 @@ export class TelegramBotClient {
     };
   }
 
+  public async sendChatAction(
+    privateChatId: string,
+    action: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    await this.#call(
+      "sendChatAction",
+      { chat_id: privateChatId, action },
+      signal,
+    );
+  }
+
   public async downloadFile(
     path: string,
     signal?: AbortSignal,
@@ -206,6 +218,8 @@ function stableUpdateId(update: unknown): number | null {
 }
 
 export class TelegramWorker {
+  readonly #typing = new Map<string, ReturnType<typeof setInterval>>();
+
   public constructor(
     readonly accountId: string,
     readonly bot: TelegramBotClient,
@@ -360,15 +374,45 @@ export class TelegramWorker {
     return sent;
   }
 
-  public async run(signal: AbortSignal): Promise<void> {
-    while (!signal.aborted) {
+  async #refreshTyping(signal?: AbortSignal): Promise<void> {
+    const running = this.store.runningTurnEndpoints(this.accountId);
+    const active = new Set(running.map(({ turnId }) => turnId));
+    for (const [turnId, timer] of this.#typing) {
+      if (active.has(turnId)) continue;
+      clearInterval(timer);
+      this.#typing.delete(turnId);
+    }
+    for (const row of running) {
+      if (row.kind !== "telegram" || row.privateChatId === null) continue;
+      if (this.#typing.has(row.turnId)) continue;
+      const chatId = row.privateChatId;
+      const send = (): void => {
+        void this.bot.sendChatAction(chatId, "typing").catch(() => undefined);
+      };
       try {
-        await this.pollOnce(signal);
-      } catch (error) {
-        if (signal.aborted) return;
-        await new Promise<void>((resolve) => setTimeout(resolve, 1_000));
-        if (!(error instanceof TelegramError)) throw error;
+        await this.bot.sendChatAction(chatId, "typing", signal);
+      } catch {
+        continue;
       }
+      this.#typing.set(row.turnId, setInterval(send, 5_000));
+    }
+  }
+
+  public async run(signal: AbortSignal): Promise<void> {
+    try {
+      while (!signal.aborted) {
+        try {
+          await this.pollOnce(signal);
+          await this.#refreshTyping(signal);
+        } catch (error) {
+          if (signal.aborted) return;
+          await new Promise<void>((resolve) => setTimeout(resolve, 1_000));
+          if (!(error instanceof TelegramError)) throw error;
+        }
+      }
+    } finally {
+      for (const timer of this.#typing.values()) clearInterval(timer);
+      this.#typing.clear();
     }
   }
 }
