@@ -12,6 +12,7 @@ export type Command =
   | { readonly kind: "model"; readonly selector: string }
   | { readonly kind: "thinking"; readonly level: string }
   | { readonly kind: "send"; readonly path: string }
+  | { readonly kind: "help" }
   | { readonly kind: "unknown"; readonly name: string };
 
 function boundedArgument(value: string, label: string): string {
@@ -87,6 +88,8 @@ export function parseCommand(text: string): Command | null {
       };
     case "send":
       return { kind: "send", path: boundedPath(argument) };
+    case "help":
+      return { kind: "help" };
     default:
       return { kind: "unknown", name: name.slice(0, 64) };
   }

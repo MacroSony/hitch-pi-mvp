@@ -315,6 +315,8 @@ test("cross-owner media is rejected and !send becomes a bounded publication Turn
     textBytes("snapshot"),
     { advertisedMime: "text/plain", displayName: "snapshot.txt" },
   );
+  mkdirSync(join(environment.workspace, "reports"), { mode: 0o700 });
+  writeFileSync(join(environment.workspace, "reports", "result.txt"), "result");
   const turns: RuntimeTurn[] = [];
   const application = new HitchApplication(
     environment.store,

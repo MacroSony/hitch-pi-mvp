@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -223,6 +223,56 @@ test("session commands are durable, idempotent, and owner scoped", () => {
     true,
   );
   assert.equal(environment.store.pendingTelegramOutbox("primary").length, 7);
+  environment.foundation.close();
+});
+
+test("help lists commands and send validates workspace files before dispatch", () => {
+  const environment = setup();
+  writeFileSync(join(environment.paths.alice, "hello.txt"), "hello");
+  mkdirSync(join(environment.paths.alice, "subdir"), { mode: 0o700 });
+  const app = new HitchApplication(environment.store, new FakeAgentRuntime());
+  app.start();
+
+  assert.equal(
+    app.receiveTelegram("primary", update(40, "101", "!help")).accepted,
+    true,
+  );
+  const help = environment.store
+    .pendingTelegramOutbox("primary")
+    .map(({ text }) => text)
+    .join("\n");
+  assert.match(help, /!send <relative-path>/u);
+  assert.match(help, /!recover/u);
+
+  assert.equal(
+    app.receiveTelegram("primary", update(41, "101", "!send hello.txt"))
+      .accepted,
+    true,
+  );
+  const missing = app.receiveTelegram(
+    "primary",
+    update(42, "101", "!send missing.txt"),
+  );
+  assert.equal(missing.accepted, false);
+  assert.equal(missing.category, "rejected");
+  assert.match(missing.message ?? "", /does not exist/u);
+
+  const escaping = app.receiveTelegram(
+    "primary",
+    update(43, "101", "!send ../outside.txt"),
+  );
+  assert.equal(escaping.accepted, false);
+  assert.equal(escaping.category, "rejected");
+  assert.match(escaping.message ?? "", /inside the workspace/u);
+
+  const directory = app.receiveTelegram(
+    "primary",
+    update(44, "101", "!send subdir"),
+  );
+  assert.equal(directory.accepted, false);
+  assert.equal(directory.category, "rejected");
+  assert.match(directory.message ?? "", /not a regular file/u);
+
   environment.foundation.close();
 });
 

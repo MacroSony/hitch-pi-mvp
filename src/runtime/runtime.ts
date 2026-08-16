@@ -50,6 +50,7 @@ export interface RuntimeResult {
     | "timed-out"
     | "unknown";
   readonly text: string;
+  readonly error?: string;
   readonly sessionReusable: boolean;
   readonly transcriptPath?: string;
   readonly modelProvider?: string;

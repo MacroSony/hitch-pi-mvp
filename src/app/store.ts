@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { statSync } from "node:fs";
+import { resolve, sep } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 
 import type { Clock, FoundationDatabase } from "../foundation/database.js";
@@ -100,7 +102,9 @@ function outcomeText(result: RuntimeResult): string {
     case "cancelled":
       return "Turn cancelled.";
     case "failed":
-      return "agent-failed: the model Turn failed.";
+      return result.error === undefined
+        ? "agent-failed: the model Turn failed."
+        : boundedText(result.error);
     case "timed-out":
       return "agent-failed: the model Turn timed out.";
     case "unknown":
@@ -817,7 +821,40 @@ export class HitchStore {
               "session-quarantined",
               "selected session is not active; use !recover or !new",
             );
+          const workspace = this.#database
+            .prepare(
+              "SELECT workspace_path FROM users WHERE id = ? AND enabled = 1",
+            )
+            .get(identity.endpoint.userId) as
+            | { workspace_path: string }
+            | undefined;
           this.admissionGuard(identity.endpoint.userId);
+          if (workspace === undefined)
+            throw new AppError("internal-error", "workspace is unavailable");
+          const target = resolve(workspace.workspace_path, command.path);
+          if (
+            target !== workspace.workspace_path &&
+            !target.startsWith(`${workspace.workspace_path}${sep}`)
+          ) {
+            throw new AppError(
+              "rejected",
+              "publish path must stay inside the workspace",
+            );
+          }
+          let metadata;
+          try {
+            metadata = statSync(target);
+          } catch {
+            throw new AppError(
+              "rejected",
+              "publish path does not exist in the workspace",
+            );
+          }
+          if (!metadata.isFile())
+            throw new AppError(
+              "rejected",
+              "publish path is not a regular file in the workspace",
+            );
           const capacity = this.#database
             .prepare(
               "SELECT count(*) AS count FROM turns WHERE user_id = ? AND state IN ('queued', 'starting', 'running')",
@@ -856,6 +893,22 @@ export class HitchStore {
             abortTurnId: null,
           };
         }
+        case "help":
+          response = [
+            "!new [name] - create and select a session",
+            "!sessions - list sessions",
+            "!switch <id-or-name> - select a session",
+            "!status - session, model, queue, and sandbox state",
+            "!abort - cancel the active Turn",
+            "!stop - stop the session and cancel queued Turns",
+            "!recover - replace a quarantined session",
+            "!models [filter] - list available models",
+            "!model <provider>/<id> - select a model",
+            "!thinking <level> - select a thinking level",
+            "!send <relative-path> - publish a workspace file",
+            "!help - show this list",
+          ].join("\n");
+          break;
         case "unknown":
           response = `rejected: unknown command !${command.name}`;
           commandSucceeded = false;

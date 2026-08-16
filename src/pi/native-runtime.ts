@@ -967,6 +967,12 @@ export class NativePiRuntime implements AgentRuntime {
       return {
         outcome: signal.aborted ? "cancelled" : "failed",
         text: "",
+        ...(signal.aborted
+          ? {}
+          : {
+              error:
+                "publication failed in the sandbox; the path must be a regular file inside the workspace",
+            }),
         sessionReusable: true,
       };
     } finally {
