@@ -21,6 +21,7 @@ import type { Clock } from "../src/foundation/database.js";
 import {
   FakeAgentRuntime,
   type AgentRuntime,
+  type RuntimeArtifact,
   type RuntimeModel,
   type RuntimeResult,
   type RuntimeTurn,
@@ -273,6 +274,192 @@ test("help lists commands and send validates workspace files before dispatch", (
   assert.equal(directory.category, "rejected");
   assert.match(directory.message ?? "", /not a regular file/u);
 
+  environment.foundation.close();
+});
+
+test("text-trigger stages media-only messages and merges them with the next text", async () => {
+  const environment = setup();
+  const artifact: RuntimeArtifact = {
+    id: "artifact_00000000-0000-4000-8000-000000000001",
+    userId: "alice",
+    storageKey: "alice/00000000-0000-4000-8000-000000000001.blob",
+    sha256: "a".repeat(64),
+    bytes: 10,
+    mediaKind: "file",
+    mimeType: "text/plain",
+    displayName: "notes.txt",
+  };
+  environment.foundation.database.connection
+    .prepare(
+      `INSERT INTO artifacts(
+         id, user_id, storage_key, sha256, bytes, media_kind, mime_type,
+         display_name, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      artifact.id,
+      artifact.userId,
+      artifact.storageKey,
+      artifact.sha256,
+      artifact.bytes,
+      artifact.mediaKind,
+      artifact.mimeType,
+      artifact.displayName,
+      1,
+    );
+  const turns: RuntimeTurn[] = [];
+  const runtime = new FakeAgentRuntime(async (turn) => {
+    turns.push(turn);
+    return { outcome: "succeeded", text: "done", sessionReusable: true };
+  });
+  const application = new HitchApplication(
+    environment.store,
+    runtime,
+    "text-trigger",
+  );
+  application.start();
+
+  const staged = application.receiveTelegram(
+    "primary",
+    {
+      update_id: 60,
+      message: {
+        message_id: 160,
+        chat: { id: "101", type: "private" },
+        from: { id: "101" },
+        document: {
+          file_id: "file-notes",
+          file_size: 10,
+          file_name: "notes.txt",
+          mime_type: "text/plain",
+        },
+      },
+    },
+    [artifact],
+  );
+  assert.equal(staged.accepted, true);
+  assert.equal(environment.store.count("turns", "alice"), 0);
+  assert.equal(environment.store.stagedArtifactCount("alice"), 1);
+  assert.match(
+    environment.store
+      .pendingTelegramOutbox("primary")
+      .map(({ text }) => text)
+      .join("\n"),
+    /Saved 1 attachment/u,
+  );
+
+  const combined = application.receiveTelegram(
+    "primary",
+    update(61, "101", "read it now"),
+  );
+  assert.equal(combined.accepted, true);
+  await application.drain();
+  assert.equal(turns.length, 1);
+  assert.equal(turns[0]?.artifacts?.length, 1);
+  assert.equal(turns[0]?.artifacts?.[0]?.id, artifact.id);
+  assert.equal(environment.store.stagedArtifactCount("alice"), 0);
+  environment.foundation.close();
+});
+
+test("staging enforces count, byte, and TTL bounds", () => {
+  const environment = setup();
+  const endpoint = environment.foundation.database.connection
+    .prepare(
+      "SELECT id FROM channel_endpoints WHERE user_id = ? AND kind = 'telegram'",
+    )
+    .get("alice") as { id: string };
+  const insert = environment.foundation.database.connection.prepare(
+    `INSERT INTO artifacts(
+       id, user_id, storage_key, sha256, bytes, media_kind, mime_type,
+       display_name, created_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  const makeArtifact = (index: number, bytes: number): RuntimeArtifact => ({
+    id: `artifact_00000000-0000-4000-8000-${String(index).padStart(12, "0")}`,
+    userId: "alice",
+    storageKey: `alice/${String(index).padStart(32, "0")}.blob`,
+    sha256: "b".repeat(64),
+    bytes,
+    mediaKind: "file",
+    mimeType: "text/plain",
+    displayName: `file-${index}.txt`,
+  });
+  const many: RuntimeArtifact[] = [];
+  for (let index = 1; index <= 8; index += 1) {
+    const artifact = makeArtifact(index, 1);
+    insert.run(
+      artifact.id,
+      artifact.userId,
+      artifact.storageKey,
+      artifact.sha256,
+      artifact.bytes,
+      artifact.mediaKind,
+      artifact.mimeType,
+      artifact.displayName,
+      1,
+    );
+    many.push(artifact);
+    environment.store.stageArtifacts("alice", endpoint.id, [artifact], 1_000);
+  }
+  assert.equal(environment.store.stagedArtifactCount("alice"), 8);
+  const ninth = makeArtifact(9, 1);
+  insert.run(
+    ninth.id,
+    ninth.userId,
+    ninth.storageKey,
+    ninth.sha256,
+    ninth.bytes,
+    ninth.mediaKind,
+    ninth.mimeType,
+    ninth.displayName,
+    1,
+  );
+  assert.throws(
+    () =>
+      environment.store.stageArtifacts("alice", endpoint.id, [ninth], 1_000),
+    /too many staged attachments/u,
+  );
+  const big = makeArtifact(10, 41 * 1024 * 1024);
+  insert.run(
+    big.id,
+    big.userId,
+    big.storageKey,
+    big.sha256,
+    big.bytes,
+    big.mediaKind,
+    big.mimeType,
+    big.displayName,
+    1,
+  );
+  assert.throws(
+    () => environment.store.stageArtifacts("alice", endpoint.id, [big], 1_000),
+    /staged attachments exceed MVP limits/u,
+  );
+
+  const takenExisting = environment.store.takeStagedArtifacts("alice", 2_000);
+  assert.equal(takenExisting.artifacts.length, 8);
+
+  const expired = makeArtifact(11, 1);
+  insert.run(
+    expired.id,
+    expired.userId,
+    expired.storageKey,
+    expired.sha256,
+    expired.bytes,
+    expired.mediaKind,
+    expired.mimeType,
+    expired.displayName,
+    1,
+  );
+  environment.store.stageArtifacts("alice", endpoint.id, [expired], 2_000);
+  const taken = environment.store.takeStagedArtifacts(
+    "alice",
+    2_000 + 10 * 60 * 1000 + 1,
+  );
+  assert.equal(taken.artifacts.length, 0);
+  assert.equal(taken.expired.length, 1);
+  assert.equal(taken.expired[0]?.id, expired.id);
+  assert.equal(environment.store.stagedArtifactCount("alice"), 0);
   environment.foundation.close();
 });
 

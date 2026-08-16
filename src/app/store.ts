@@ -16,6 +16,9 @@ import { AppError } from "./errors.js";
 
 const MAX_SESSIONS_PER_USER = 32;
 const MAX_ACTIVE_AND_QUEUED = 4;
+const MAX_STAGED_ARTIFACTS = 8;
+const MAX_STAGED_TOTAL_BYTES = 40 * 1024 * 1024;
+const STAGED_TTL_MS = 10 * 60 * 1000;
 const MAX_RESULT_BYTES = 64_000;
 const ARTIFACT_ID_PATTERN =
   /^artifact_([0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/iu;
@@ -444,7 +447,7 @@ export class HitchStore {
   #insertArtifact(artifact: RuntimeArtifact, now: number): void {
     this.#database
       .prepare(
-        `INSERT INTO artifacts(
+        `INSERT OR IGNORE INTO artifacts(
            id, user_id, storage_key, sha256, bytes, media_kind, mime_type, display_name, created_at
          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
@@ -464,7 +467,7 @@ export class HitchStore {
   #insertOutbox(
     userId: string,
     endpointId: string,
-    turnId: string,
+    turnId: string | null,
     text: string,
   ): void {
     const now = this.clock.now();
@@ -647,11 +650,12 @@ export class HitchStore {
             .get(identity.endpoint.userId) as
             | { updated_at: number }
             | undefined;
+          const staged = this.stagedArtifactCount(identity.endpoint.userId);
           const elapsed =
             running === undefined
               ? ""
               : `; elapsed ${Math.max(0, now - running.updated_at) / 1000}s`;
-          response = `Session ${session.name} (${session.state}); model ${model}; thinking ${selection.thinking_level ?? "Pi default"}; active ${Number(counts.active ?? 0n)}; queued ${Number(counts.queued ?? 0n)}${elapsed}.`;
+          response = `Session ${session.name} (${session.state}); model ${model}; thinking ${selection.thinking_level ?? "Pi default"}; active ${Number(counts.active ?? 0n)}; queued ${Number(counts.queued ?? 0n)}${elapsed}${staged === 0 ? "" : `; staged ${staged}`}.`;
           break;
         }
         case "abort": {
@@ -1195,6 +1199,139 @@ export class HitchStore {
         .all() as unknown as Array<{ user_id: string }>;
       return queued.map(({ user_id }) => user_id);
     });
+  }
+
+  public stageArtifacts(
+    userId: string,
+    endpointId: string,
+    artifacts: readonly RuntimeArtifact[],
+    now: number,
+  ): { expired: RuntimeArtifact[] } {
+    return transaction(this.#database, () => {
+      const expired = this.#expireStagedArtifacts(userId, now);
+      if (artifacts.length === 0) return { expired };
+      if (
+        artifacts.length > MAX_STAGED_ARTIFACTS ||
+        artifacts.some((artifact) => artifact.userId !== userId) ||
+        artifacts.reduce((total, artifact) => total + artifact.bytes, 0) >
+          MAX_STAGED_TOTAL_BYTES
+      ) {
+        throw new AppError(
+          "media-invalid",
+          "staged attachments exceed MVP limits",
+        );
+      }
+      const existing = this.#database
+        .prepare(
+          "SELECT count(*) AS count FROM staged_artifacts WHERE user_id = ?",
+        )
+        .get(userId) as { count: bigint };
+      if (Number(existing.count) + artifacts.length > MAX_STAGED_ARTIFACTS) {
+        throw new AppError(
+          "busy",
+          "too many staged attachments; send text to start a Turn",
+        );
+      }
+      const existingBytes = this.#database
+        .prepare(
+          "SELECT coalesce(sum(a.bytes), 0) AS bytes FROM staged_artifacts s JOIN artifacts a ON a.id = s.artifact_id AND a.user_id = s.user_id WHERE s.user_id = ?",
+        )
+        .get(userId) as { bytes: bigint };
+      if (
+        Number(existingBytes.bytes) +
+          artifacts.reduce((total, artifact) => total + artifact.bytes, 0) >
+        MAX_STAGED_TOTAL_BYTES
+      ) {
+        throw new AppError(
+          "busy",
+          "staged attachments would exceed the 40 MiB bound",
+        );
+      }
+      let ordinal = Number(existing.count);
+      for (const artifact of artifacts) {
+        this.#insertArtifact(artifact, now);
+        this.#database
+          .prepare(
+            `INSERT INTO staged_artifacts(user_id, artifact_id, ordinal, created_at)
+             VALUES (?, ?, ?, ?)`,
+          )
+          .run(userId, artifact.id, ordinal, now);
+        ordinal += 1;
+      }
+      this.#insertOutbox(
+        userId,
+        endpointId,
+        null,
+        `Saved ${artifacts.length} attachment(s); send text to start a Turn.`,
+      );
+      return { expired };
+    });
+  }
+
+  public takeStagedArtifacts(
+    userId: string,
+    now: number,
+  ): { artifacts: RuntimeArtifact[]; expired: RuntimeArtifact[] } {
+    return transaction(this.#database, () => {
+      const expired = this.#expireStagedArtifacts(userId, now);
+      const rows = this.#database
+        .prepare(
+          `SELECT a.id, a.user_id AS userId, a.storage_key AS storageKey,
+                  a.sha256, a.bytes, a.media_kind AS mediaKind,
+                  a.mime_type AS mimeType, a.display_name AS displayName
+           FROM staged_artifacts s
+           JOIN artifacts a ON a.id = s.artifact_id AND a.user_id = s.user_id
+           WHERE s.user_id = ?
+           ORDER BY s.ordinal`,
+        )
+        .all(userId)
+        .map((value) => {
+          const artifact = value as Omit<RuntimeArtifact, "bytes"> & {
+            bytes: bigint;
+          };
+          return { ...artifact, bytes: Number(artifact.bytes) };
+        });
+      this.#database
+        .prepare("DELETE FROM staged_artifacts WHERE user_id = ?")
+        .run(userId);
+      return { artifacts: rows, expired };
+    });
+  }
+
+  public stagedArtifactCount(userId: string): number {
+    const row = this.#database
+      .prepare(
+        "SELECT count(*) AS count FROM staged_artifacts WHERE user_id = ?",
+      )
+      .get(userId) as { count: bigint };
+    return Number(row.count);
+  }
+
+  #expireStagedArtifacts(userId: string, now: number): RuntimeArtifact[] {
+    const rows = this.#database
+      .prepare(
+        `SELECT a.id, a.user_id AS userId, a.storage_key AS storageKey,
+                a.sha256, a.bytes, a.media_kind AS mediaKind,
+                a.mime_type AS mimeType, a.display_name AS displayName
+         FROM staged_artifacts s
+         JOIN artifacts a ON a.id = s.artifact_id AND a.user_id = s.user_id
+         WHERE s.user_id = ? AND s.created_at < ?`,
+      )
+      .all(userId, now - STAGED_TTL_MS)
+      .map((value) => {
+        const artifact = value as Omit<RuntimeArtifact, "bytes"> & {
+          bytes: bigint;
+        };
+        return { ...artifact, bytes: Number(artifact.bytes) };
+      });
+    if (rows.length > 0) {
+      this.#database
+        .prepare(
+          "DELETE FROM staged_artifacts WHERE user_id = ? AND created_at < ?",
+        )
+        .run(userId, now - STAGED_TTL_MS);
+    }
+    return rows;
   }
 
   public runningTurnEndpoints(accountId: string): readonly {

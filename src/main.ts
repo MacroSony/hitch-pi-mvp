@@ -1,6 +1,14 @@
 import { HitchApplication } from "./app/application.js";
 import { HitchStore } from "./app/store.js";
+import { directFetcher } from "./channels/direct-fetch.js";
+import { proxyFetcher } from "./channels/proxy-fetch.js";
 import { TelegramBotClient, TelegramWorker } from "./channels/telegram.js";
+
+// The pinned WeChat client always uses the global fetch. Route it through
+// the direct HTTPS implementation: the WeChat API returns a content-length
+// value that undici rejects, and its CDN downloads should not be proxied.
+// Telegram gets its own explicit proxy fetch below.
+globalThis.fetch = directFetcher as typeof fetch;
 import { WeChatIlinkClient, WeChatWorker } from "./channels/wechat.js";
 import { WeChatStateStore } from "./channels/wechat-state.js";
 import { loadConfig, readRequiredSecret } from "./config/config.js";
@@ -85,9 +93,17 @@ async function main(): Promise<void> {
       foundation.topology.dataRoot.path,
       config.minimumFreeBytes,
     );
+    const telegramFetcher = proxyFetcher(
+      process.env.HITCH_TELEGRAM_PROXY ??
+        process.env.HTTPS_PROXY ??
+        process.env.https_proxy,
+    );
     const telegramClients = config.telegramAccounts.map((account) => ({
       account,
-      client: new TelegramBotClient(readRequiredSecret(account.botTokenEnv)),
+      client: new TelegramBotClient(
+        readRequiredSecret(account.botTokenEnv),
+        telegramFetcher,
+      ),
     }));
     const wechatStates = config.wechatAccounts.map((account) => ({
       account,
@@ -119,7 +135,12 @@ async function main(): Promise<void> {
       (userId) => media.assertAdmissionCapacity(userId),
     );
     media.cleanupUnreferenced(store.artifactStorageKeys());
-    const application = new HitchApplication(store, runtime);
+    const application = new HitchApplication(
+      store,
+      runtime,
+      config.mediaMode,
+      media,
+    );
     const telegramWorkers = telegramClients.map(
       ({ account, client }) =>
         new TelegramWorker(account.id, client, application, store, media),

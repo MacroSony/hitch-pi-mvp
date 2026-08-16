@@ -263,7 +263,7 @@ export function readWeChatMediaDescriptors(
 export function readWeChatContent(
   identity: WeChatIdentity,
   artifacts: readonly RuntimeArtifact[] = [],
-): { text: string; contentDigest: string } {
+): { text: string; contentDigest: string; textProvided: boolean } {
   const texts: string[] = [];
   let textBytes = 0;
   for (const item of messageItems(identity)) {
@@ -304,5 +304,5 @@ export function readWeChatContent(
       ),
     )
     .digest("hex");
-  return { text, contentDigest };
+  return { text, contentDigest, textProvided: texts.length > 0 };
 }

@@ -18,6 +18,7 @@ export interface TelegramIdentity {
 export interface TelegramContent {
   readonly text: string;
   readonly contentDigest: string;
+  readonly textProvided: boolean;
 }
 
 export interface TelegramMediaDescriptor {
@@ -104,14 +105,15 @@ export function readTelegramContent(
   identity: TelegramIdentity,
   artifacts: readonly RuntimeArtifact[] = [],
 ): TelegramContent {
-  const raw =
-    typeof identity.message.text === "string"
-      ? identity.message.text
-      : typeof identity.message.caption === "string"
-        ? identity.message.caption
-        : artifacts.length > 0
-          ? "Please inspect the attached media."
-          : undefined;
+  const hasText = typeof identity.message.text === "string";
+  const hasCaption = typeof identity.message.caption === "string";
+  const raw: string | undefined = hasText
+    ? (identity.message.text as string)
+    : hasCaption
+      ? (identity.message.caption as string)
+      : artifacts.length > 0
+        ? "Please inspect the attached media."
+        : undefined;
   if (raw === undefined || raw.length === 0) {
     throw new AppError(
       "rejected",
@@ -147,7 +149,7 @@ export function readTelegramContent(
       ),
     )
     .digest("hex");
-  return { text, contentDigest };
+  return { text, contentDigest, textProvided: hasText || hasCaption };
 }
 
 function advertisedBytes(value: unknown): number | undefined {

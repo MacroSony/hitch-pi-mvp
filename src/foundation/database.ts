@@ -9,14 +9,15 @@ import {
   type ValidatedTopology,
 } from "./filesystem.js";
 
-const SCHEMA_VERSION = 2;
-const SCHEMA_ID = "hitch-pi-mvp-schema-2";
+const SCHEMA_VERSION = 3;
+const SCHEMA_ID = "hitch-pi-mvp-schema-3";
 const EXPECTED_TABLES = [
   "app_meta",
   "artifacts",
   "channel_endpoints",
   "outbox",
   "sessions",
+  "staged_artifacts",
   "turn_artifacts",
   "turns",
   "users",
@@ -159,9 +160,35 @@ CREATE TABLE turn_artifacts (
   FOREIGN KEY (artifact_id, user_id) REFERENCES artifacts(id, user_id)
 ) STRICT;
 
+CREATE TABLE staged_artifacts (
+  user_id TEXT NOT NULL,
+  artifact_id TEXT NOT NULL,
+  ordinal INTEGER NOT NULL CHECK (ordinal >= 0 AND ordinal < 8),
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (user_id, ordinal),
+  UNIQUE (artifact_id),
+  FOREIGN KEY (user_id) REFERENCES users(id),
+  FOREIGN KEY (artifact_id, user_id) REFERENCES artifacts(id, user_id)
+) STRICT;
+
 CREATE INDEX turns_user_state_ordinal ON turns(user_id, state, ordinal);
 CREATE INDEX outbox_endpoint_state ON outbox(endpoint_id, state, created_at);
 CREATE INDEX artifacts_user_created ON artifacts(user_id, created_at);
+CREATE INDEX staged_artifacts_user_created ON staged_artifacts(user_id, created_at);
+`;
+
+const MIGRATE_2_TO_3 = `
+CREATE TABLE staged_artifacts (
+  user_id TEXT NOT NULL,
+  artifact_id TEXT NOT NULL,
+  ordinal INTEGER NOT NULL CHECK (ordinal >= 0 AND ordinal < 8),
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (user_id, ordinal),
+  UNIQUE (artifact_id),
+  FOREIGN KEY (user_id) REFERENCES users(id),
+  FOREIGN KEY (artifact_id, user_id) REFERENCES artifacts(id, user_id)
+) STRICT;
+CREATE INDEX staged_artifacts_user_created ON staged_artifacts(user_id, created_at);
 `;
 
 const MIGRATE_1_TO_2 = `
@@ -324,6 +351,25 @@ function verifySchema(connection: DatabaseSync): void {
       )
         throw new FoundationError("database table set is unknown");
       connection.exec(MIGRATE_1_TO_2);
+      connection.exec(MIGRATE_2_TO_3);
+      connection
+        .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
+        .run(SCHEMA_ID, "schema_id");
+      connection.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+      connection.exec("COMMIT");
+    } catch (error) {
+      connection.exec("ROLLBACK");
+      throw error;
+    }
+  } else if (version === 2) {
+    connection.exec("BEGIN IMMEDIATE");
+    try {
+      const meta = connection
+        .prepare("SELECT value FROM app_meta WHERE key = ?")
+        .get("schema_id") as { value?: unknown } | undefined;
+      if (meta?.value !== "hitch-pi-mvp-schema-2")
+        throw new FoundationError("database schema 2 identity is unknown");
+      connection.exec(MIGRATE_2_TO_3);
       connection
         .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
         .run(SCHEMA_ID, "schema_id");

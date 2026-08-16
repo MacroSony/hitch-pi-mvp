@@ -7,6 +7,8 @@ import {
   classifyTelegramIdentity,
   readTelegramContent,
 } from "../channels/telegram-ingress.js";
+import type { MediaMode } from "../config/config.js";
+import type { MediaStore } from "../media/media-store.js";
 import {
   classifyWeChatIdentity,
   readWeChatContent,
@@ -38,6 +40,8 @@ export class HitchApplication {
   public constructor(
     readonly store: HitchStore,
     readonly runtime: AgentRuntime,
+    readonly mediaMode: MediaMode = "always-trigger",
+    readonly media?: MediaStore,
   ) {}
 
   public start(): void {
@@ -72,14 +76,23 @@ export class HitchApplication {
       replyPrivateChatId = endpoint.privateChatId;
       if (artifacts.some((artifact) => artifact.userId !== endpoint.userId))
         throw new AppError("rejected", "Telegram media owner does not match");
-      const content = readTelegramContent(ingress, artifacts);
+      const effective = [...this.#takeStaged(endpoint.userId), ...artifacts];
+      const content = readTelegramContent(ingress, effective);
+      if (
+        this.mediaMode === "text-trigger" &&
+        effective.length > 0 &&
+        !content.textProvided
+      ) {
+        this.#stage(endpoint, effective);
+        return { accepted: true, duplicate: false, updateId };
+      }
       return {
         ...this.#receiveAuthorized(
           endpoint,
           ingress.idempotencyKey,
           content.text,
           content.contentDigest,
-          artifacts,
+          effective,
         ),
         updateId,
       };
@@ -94,6 +107,9 @@ export class HitchApplication {
           ...(replyPrivateChatId === undefined ? {} : { replyPrivateChatId }),
         };
       }
+      process.stderr.write(
+        `Telegram admission internal error: ${error instanceof Error ? error.message : "unknown"}\n`,
+      );
       return {
         accepted: false,
         duplicate: false,
@@ -128,14 +144,23 @@ export class HitchApplication {
       replyPeerId = endpoint.platformUserId;
       if (artifacts.some((artifact) => artifact.userId !== endpoint.userId))
         throw new AppError("rejected", "WeChat media owner does not match");
-      const content = readWeChatContent(ingress, artifacts);
+      const effective = [...this.#takeStaged(endpoint.userId), ...artifacts];
+      const content = readWeChatContent(ingress, effective);
+      if (
+        this.mediaMode === "text-trigger" &&
+        effective.length > 0 &&
+        !content.textProvided
+      ) {
+        this.#stage(endpoint, effective);
+        return { accepted: true, duplicate: false, replyPeerId };
+      }
       return {
         ...this.#receiveAuthorized(
           endpoint,
           ingress.idempotencyKey,
           content.text,
           content.contentDigest,
-          artifacts,
+          effective,
         ),
         replyPeerId,
       };
@@ -149,6 +174,9 @@ export class HitchApplication {
           ...(replyPeerId === undefined ? {} : { replyPeerId }),
         };
       }
+      process.stderr.write(
+        `WeChat admission internal error: ${error instanceof Error ? error.message : "unknown"}\n`,
+      );
       return {
         accepted: false,
         duplicate: false,
@@ -157,6 +185,29 @@ export class HitchApplication {
         ...(replyPeerId === undefined ? {} : { replyPeerId }),
       };
     }
+  }
+
+  #takeStaged(userId: string): RuntimeArtifact[] {
+    if (this.mediaMode !== "text-trigger") return [];
+    const { artifacts, expired } = this.store.takeStagedArtifacts(
+      userId,
+      this.store.clock.now(),
+    );
+    for (const artifact of expired) this.media?.discard(artifact);
+    return artifacts;
+  }
+
+  #stage(
+    endpoint: EndpointContext,
+    artifacts: readonly RuntimeArtifact[],
+  ): void {
+    const { expired } = this.store.stageArtifacts(
+      endpoint.userId,
+      endpoint.id,
+      artifacts,
+      this.store.clock.now(),
+    );
+    for (const artifact of expired) this.media?.discard(artifact);
   }
 
   #receiveAuthorized(

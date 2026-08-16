@@ -34,11 +34,14 @@ export interface UserConfig {
   readonly wechat?: WeChatEndpointConfig;
 }
 
+export type MediaMode = "always-trigger" | "text-trigger";
+
 export interface AppConfig {
   readonly schemaVersion: 1;
   readonly dataRoot: string;
   readonly piProfileDir: string;
   readonly minimumFreeBytes: number;
+  readonly mediaMode: MediaMode;
   readonly telegramAccounts: readonly TelegramAccountConfig[];
   readonly wechatAccounts: readonly WeChatAccountConfig[];
   readonly users: readonly UserConfig[];
@@ -215,7 +218,7 @@ export function parseConfig(value: unknown): AppConfig {
       "wechatAccounts",
       "users",
     ],
-    [],
+    ["mediaMode"],
     "config",
   );
   if (input.schemaVersion !== 1) fail("config.schemaVersion", "expected 1");
@@ -285,11 +288,20 @@ export function parseConfig(value: unknown): AppConfig {
   }
   unique(endpointKeys, "config.users endpoints");
 
+  const mediaMode =
+    input.mediaMode === undefined
+      ? ("always-trigger" as const)
+      : input.mediaMode === "always-trigger" ||
+          input.mediaMode === "text-trigger"
+        ? input.mediaMode
+        : fail("config.mediaMode", "expected always-trigger or text-trigger");
+
   return {
     schemaVersion: 1,
     dataRoot: absolutePath(input.dataRoot, "config.dataRoot"),
     piProfileDir: absolutePath(input.piProfileDir, "config.piProfileDir"),
     minimumFreeBytes: Number(input.minimumFreeBytes),
+    mediaMode,
     telegramAccounts,
     wechatAccounts,
     users,

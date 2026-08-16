@@ -437,9 +437,22 @@ export class MediaStore {
     options: InboundMediaOptions,
   ): RuntimeArtifact {
     const buffer = readFileSync(temporary);
-    const image = sniffImage(buffer);
+    let image: ImageInfo | null = null;
+    let incompleteImage = false;
+    try {
+      image = sniffImage(buffer);
+    } catch (error) {
+      if (
+        error instanceof AppError &&
+        error.message.endsWith(" is incomplete")
+      ) {
+        incompleteImage = true;
+      } else {
+        throw error;
+      }
+    }
     const advertisedMime = boundedMime(options.advertisedMime);
-    if (options.expectImage === true && image === null) {
+    if (options.expectImage === true && image === null && !incompleteImage) {
       throw new AppError(
         "media-invalid",
         "advertised image is invalid or unsupported",

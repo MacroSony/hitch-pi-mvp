@@ -155,10 +155,27 @@ test("media store streams immutable objects and rejects invalid image bounds", a
   );
   assert.equal(opaqueImage.mediaKind, "file");
   assert.equal(opaqueImage.mimeType, "image/svg+xml");
+  const incompleteJpeg = Buffer.concat([
+    Buffer.from([0xff, 0xd8]),
+    Buffer.from("partial jpeg data without the closing marker"),
+  ]);
+  const degraded = await environment.media.ingest(
+    "alice",
+    bytes(incompleteJpeg),
+    {
+      advertisedBytes: incompleteJpeg.length,
+      advertisedMime: "image/jpeg",
+      displayName: "broken.jpg",
+      expectImage: true,
+    },
+  );
+  assert.equal(degraded.mediaKind, "file");
+  assert.equal(degraded.mimeType, "image/jpeg");
+  assert.equal(degraded.displayName, "broken.jpg");
   const imagePath = environment.media.objectPath(image);
   assert.equal(
     environment.media.cleanupUnreferenced(new Set([ordinary.storageKey])),
-    2,
+    3,
   );
   assert.equal(existsSync(imagePath), false);
 
