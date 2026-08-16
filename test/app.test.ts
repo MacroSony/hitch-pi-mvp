@@ -1057,3 +1057,88 @@ test("ambiguous Telegram send becomes retryable without rerunning its command", 
   assert.equal(environment.store.count("turns", "alice"), 1);
   environment.foundation.close();
 });
+
+test("runtime progress merges deltas, flushes on schedule, and scopes to the origin endpoint", async () => {
+  const environment = setup();
+  const runtime = new FakeAgentRuntime(async (turn, _signal, onProgress) => {
+    if (turn.userId === "alice") {
+      onProgress("Hello ");
+      onProgress("from the sandbox");
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    return {
+      outcome: "succeeded",
+      text: `final for ${turn.userId}`,
+      sessionReusable: true,
+    };
+  });
+  const app = new HitchApplication(
+    environment.store,
+    runtime,
+    "always-trigger",
+    undefined,
+    5,
+  );
+  app.start();
+  assert.equal(
+    app.receiveTelegram("primary", update(900, "101", "alice prompt")).accepted,
+    true,
+  );
+  assert.equal(
+    app.receiveTelegram("primary", update(901, "202", "bob prompt")).accepted,
+    true,
+  );
+  await app.drain();
+
+  const texts = environment.store
+    .pendingTelegramOutbox("primary")
+    .map(({ text }) => text ?? "");
+  assert.ok(texts.includes("Hello from the sandbox"));
+  assert.ok(texts.includes("final for alice"));
+  assert.ok(texts.includes("final for bob"));
+  assert.ok(
+    !texts.some((text) => /sandbox/.test(text) && text.startsWith("final")),
+  );
+  environment.foundation.close();
+});
+
+test("runtime progress enforces per-message and per-Turn bounds", async () => {
+  const environment = setup();
+  const runtime = new FakeAgentRuntime(async (_turn, _signal, onProgress) => {
+    onProgress("x".repeat(5000));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    onProgress("y".repeat(70_000));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    return { outcome: "succeeded", text: "done", sessionReusable: true };
+  });
+  const app = new HitchApplication(
+    environment.store,
+    runtime,
+    "always-trigger",
+    undefined,
+    5,
+  );
+  app.start();
+  assert.equal(
+    app.receiveTelegram("primary", update(910, "101", "progress bounds"))
+      .accepted,
+    true,
+  );
+  await app.drain();
+
+  const texts = environment.store
+    .pendingTelegramOutbox("primary")
+    .map(({ text }) => text ?? "");
+  const first = texts.find((text) => text.startsWith("x"));
+  const second = texts.find((text) => text.startsWith("y"));
+  assert.ok(first !== undefined);
+  assert.equal(first.length, 4000);
+  assert.ok(second !== undefined);
+  assert.equal(second.length, 4000);
+  const progressBytes = texts
+    .filter((text) => text !== "done")
+    .reduce((total, text) => total + Buffer.byteLength(text, "utf8"), 0);
+  assert.ok(progressBytes <= 64 * 1024);
+  assert.ok(texts.includes("done"));
+  environment.foundation.close();
+});

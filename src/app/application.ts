@@ -17,9 +17,78 @@ import { parseCommand } from "./commands.js";
 import { AppError, type FailureCategory } from "./errors.js";
 import {
   HitchStore,
+  type ClaimedTurn,
   type EndpointContext,
   type MessageIdentity,
 } from "./store.js";
+
+const PROGRESS_FLUSH_MS = 30_000;
+const PROGRESS_MAX_CHARS_PER_MESSAGE = 4000;
+const PROGRESS_MAX_BYTES_PER_TURN = 64 * 1024;
+
+class TurnProgress {
+  readonly #store: HitchStore;
+  readonly #turn: ClaimedTurn;
+  readonly #flushMs: number;
+  #buffer = "";
+  #sentBytes = 0;
+  #closed = false;
+  #timer: NodeJS.Timeout | null = null;
+
+  public constructor(store: HitchStore, turn: ClaimedTurn, flushMs: number) {
+    this.#store = store;
+    this.#turn = turn;
+    this.#flushMs = flushMs;
+  }
+
+  public push(delta: string): void {
+    if (this.#closed || delta.length === 0) return;
+    this.#buffer += delta;
+    if (this.#timer === null) {
+      this.#timer = setTimeout(() => this.flush(), this.#flushMs);
+      this.#timer.unref?.();
+    }
+  }
+
+  public flush(): void {
+    if (this.#timer !== null) {
+      clearTimeout(this.#timer);
+      this.#timer = null;
+    }
+    if (this.#closed || this.#buffer.length === 0) return;
+    const characters = Array.from(this.#buffer);
+    const text =
+      characters.length <= PROGRESS_MAX_CHARS_PER_MESSAGE
+        ? this.#buffer
+        : characters.slice(0, PROGRESS_MAX_CHARS_PER_MESSAGE).join("");
+    this.#buffer = "";
+    const bytes = Buffer.byteLength(text, "utf8");
+    if (this.#sentBytes + bytes > PROGRESS_MAX_BYTES_PER_TURN) {
+      this.#closed = true;
+      return;
+    }
+    this.#sentBytes += bytes;
+    try {
+      this.#store.insertTurnProgress(this.#turn, text);
+    } catch (error) {
+      // Progress is best-effort: a failed progress row must never rerun or
+      // quarantine the Turn, so it stays out of the pump's error path.
+      process.stderr.write(
+        `Turn progress insert failed: ${error instanceof Error ? error.message : "unknown"}
+`,
+      );
+    }
+    if (this.#sentBytes >= PROGRESS_MAX_BYTES_PER_TURN) this.#closed = true;
+  }
+
+  public close(): void {
+    this.#closed = true;
+    if (this.#timer !== null) {
+      clearTimeout(this.#timer);
+      this.#timer = null;
+    }
+  }
+}
 
 export interface IngressResult {
   readonly accepted: boolean;
@@ -42,6 +111,7 @@ export class HitchApplication {
     readonly runtime: AgentRuntime,
     readonly mediaMode: MediaMode = "always-trigger",
     readonly media?: MediaStore,
+    readonly progressFlushMs: number = PROGRESS_FLUSH_MS,
   ) {}
 
   public start(): void {
@@ -261,9 +331,12 @@ export class HitchApplication {
       if (turn === null) return;
       const controller = new AbortController();
       this.#controllers.set(turn.turnId, controller);
+      const progress = new TurnProgress(this.store, turn, this.progressFlushMs);
       let result: RuntimeResult;
       try {
-        result = await this.runtime.run(turn, controller.signal);
+        result = await this.runtime.run(turn, controller.signal, (delta) =>
+          progress.push(delta),
+        );
       } catch {
         result = {
           outcome: "unknown",
@@ -271,6 +344,7 @@ export class HitchApplication {
           sessionReusable: false,
         };
       } finally {
+        progress.close();
         this.#controllers.delete(turn.turnId);
       }
       this.store.completeTurn(turn, result);

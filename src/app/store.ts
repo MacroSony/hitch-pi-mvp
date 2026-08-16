@@ -1071,6 +1071,18 @@ export class HitchStore {
     );
   }
 
+  public insertTurnProgress(turn: ClaimedTurn, text: string): void {
+    transaction(this.#database, () => {
+      const stillRunning = this.#database
+        .prepare(
+          "SELECT 1 FROM turns WHERE id = ? AND user_id = ? AND state = 'running'",
+        )
+        .get(turn.turnId, turn.userId);
+      if (stillRunning === undefined) return;
+      this.#insertOutbox(turn.userId, turn.endpointId, turn.turnId, text);
+    });
+  }
+
   public completeTurn(turn: ClaimedTurn, result: RuntimeResult): void {
     transaction(this.#database, () => {
       const now = this.clock.now();

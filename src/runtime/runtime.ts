@@ -59,14 +59,21 @@ export interface RuntimeResult {
   readonly artifacts?: readonly RuntimeArtifact[];
 }
 
+export type AgentProgressHandler = (delta: string) => void;
+
 export interface AgentRuntime {
   readonly models?: readonly RuntimeModel[];
-  run(turn: RuntimeTurn, signal: AbortSignal): Promise<RuntimeResult>;
+  run(
+    turn: RuntimeTurn,
+    signal: AbortSignal,
+    onProgress?: AgentProgressHandler,
+  ): Promise<RuntimeResult>;
 }
 
 export type FakeRuntimeHandler = (
   turn: RuntimeTurn,
   signal: AbortSignal,
+  onProgress: AgentProgressHandler,
 ) => Promise<RuntimeResult> | RuntimeResult;
 
 export class FakeAgentRuntime implements AgentRuntime {
@@ -85,7 +92,11 @@ export class FakeAgentRuntime implements AgentRuntime {
       }));
   }
 
-  public run(turn: RuntimeTurn, signal: AbortSignal): Promise<RuntimeResult> {
-    return Promise.resolve(this.#handler(turn, signal));
+  public run(
+    turn: RuntimeTurn,
+    signal: AbortSignal,
+    onProgress: AgentProgressHandler = () => undefined,
+  ): Promise<RuntimeResult> {
+    return Promise.resolve(this.#handler(turn, signal, onProgress));
   }
 }

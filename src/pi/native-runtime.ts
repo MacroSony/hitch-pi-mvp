@@ -394,6 +394,7 @@ class PiRpcProcess {
     arguments_: readonly string[],
     cwd: string,
     environment: NodeJS.ProcessEnv,
+    readonly onTextDelta?: (delta: string) => void,
   ) {
     this.#child = spawn(process.execPath, [cliPath, ...arguments_], {
       cwd,
@@ -489,6 +490,16 @@ class PiRpcProcess {
                 ? message.stopReason
                 : "unknown",
           };
+        }
+      }
+      if (event.type === "message_update") {
+        const update = record(event.assistantMessageEvent);
+        if (
+          update?.type === "text_delta" &&
+          typeof update.delta === "string" &&
+          update.delta.length > 0
+        ) {
+          this.onTextDelta?.(update.delta);
         }
       }
       if (event.type === "response" && typeof event.id === "string") {
@@ -838,6 +849,7 @@ export class NativePiRuntime implements AgentRuntime {
   #controller(
     context: ControllerContext,
     session: Parameters<typeof controllerArguments>[1],
+    onTextDelta?: (delta: string) => void,
   ): PiRpcProcess {
     validateSandboxAssets(this.#assets);
     const extension = join(this.#assets, "hitch-sandbox.ts");
@@ -870,6 +882,7 @@ export class NativePiRuntime implements AgentRuntime {
       controllerArguments(extension, session),
       context.workspace,
       environment,
+      onTextDelta,
     );
   }
 
@@ -988,6 +1001,7 @@ export class NativePiRuntime implements AgentRuntime {
   public async run(
     turn: RuntimeTurn,
     signal: AbortSignal,
+    onProgress?: (delta: string) => void,
   ): Promise<RuntimeResult> {
     let release!: () => void;
     const previous = this.#gate;
@@ -1005,7 +1019,7 @@ export class NativePiRuntime implements AgentRuntime {
           text: "",
           sessionReusable: true,
         };
-      return await this.#runExclusive(turn, signal);
+      return await this.#runExclusive(turn, signal, onProgress);
     } finally {
       release();
     }
@@ -1014,6 +1028,7 @@ export class NativePiRuntime implements AgentRuntime {
   async #runExclusive(
     turn: RuntimeTurn,
     signal: AbortSignal,
+    onProgress?: (delta: string) => void,
   ): Promise<RuntimeResult> {
     const piSessionId = turn.piSessionId?.startsWith("pi_")
       ? turn.piSessionId.slice(3)
@@ -1101,7 +1116,7 @@ export class NativePiRuntime implements AgentRuntime {
       inboxLines.length === 0
         ? turn.prompt
         : `${turn.prompt}\n\nHitch attached these opaque read-only files for this Turn:\n${inboxLines.join("\n")}`;
-    const controller = this.#controller(context, session);
+    const controller = this.#controller(context, session, onProgress);
     let timedOut = false;
     let promptSubmitted = false;
     let timer: NodeJS.Timeout | undefined;
