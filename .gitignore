@@ -10,3 +10,4 @@ tmp/
 *.sqlite-shm
 *.sqlite-wal
 *.log
+.pi/

@@ -50,9 +50,15 @@ function remoteId(value: unknown, label: string): string {
 }
 
 function parseMessageId(value: unknown): string {
-  if (!Number.isSafeInteger(value) || Number(value) < 0)
+  const parsed =
+    typeof value === "string" && /^[0-9]+$/u.test(value)
+      ? value
+      : typeof value === "number" && Number.isInteger(value) && value >= 0
+        ? String(value)
+        : "";
+  if (parsed.length === 0 || parsed.length > 64)
     throw new AppError("rejected", "WeChat message id is invalid");
-  return String(value);
+  return parsed;
 }
 
 function opaqueToken(value: unknown): string {
@@ -186,12 +192,10 @@ export function readWeChatMediaDescriptors(
             "media-invalid",
             "WeChat image metadata is invalid",
           );
+        plaintextBytes(image.hd_size ?? image.mid_size, "image size");
         descriptors.push({
           item,
-          transportBytes: encryptedBytes(
-            image.hd_size ?? image.mid_size,
-            "image size",
-          ),
+          transportBytes: Math.ceil((MAX_INPUT_ARTIFACT_BYTES + 1) / 16) * 16,
           advertisedMime: "image/jpeg",
           displayName: `wechat-image-${identity.messageId}.jpg`,
           expectImage: true,

@@ -692,7 +692,7 @@ export class MediaStore {
     ordinal: number,
   ): string {
     if (
-      artifact.mediaKind !== "file" ||
+      (artifact.mediaKind !== "file" && artifact.mediaKind !== "image") ||
       ordinal < 0 ||
       ordinal >= MAX_INPUT_ARTIFACTS
     )

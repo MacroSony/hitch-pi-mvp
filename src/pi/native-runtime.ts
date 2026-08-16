@@ -56,6 +56,7 @@ const SANDBOX_ASSET_SHA256 = {
     "9428f425beb6a544616920f66b74c6d7d4b2b92e9ccf3923a55f9796cf513027",
 } as const;
 const MAX_RPC_BYTES = 8 * 1024 * 1024;
+const MAX_RPC_COMMAND_BYTES = 32 * 1024 * 1024;
 const MAX_STDERR_BYTES = 64 * 1024;
 const MAX_PROFILE_JSON_BYTES = 1024 * 1024;
 const EXPECTED_TOOLS = [
@@ -382,6 +383,7 @@ class PiRpcProcess {
   #buffer = "";
   #stdoutBytes = 0;
   #stderrBytes = 0;
+  #stderrText = "";
   #nextId = 0;
   #fatal: Error | null = null;
   #closedState: ClosedProcess | null = null;
@@ -403,6 +405,7 @@ class PiRpcProcess {
     this.#child.stdout.on("data", (chunk: string) => this.#read(chunk));
     this.#child.stderr.on("data", (chunk: string) => {
       this.#stderrBytes += Buffer.byteLength(chunk, "utf8");
+      this.#stderrText = `${this.#stderrText}${chunk}`.slice(-4096);
       if (this.#stderrBytes > MAX_STDERR_BYTES)
         this.#fail(new Error("Pi stderr exceeded its bound"));
     });
@@ -412,8 +415,15 @@ class PiRpcProcess {
       );
       this.#child.once("close", (code, signal) => {
         this.#closedState = { code, signal };
+        const detail =
+          this.#stderrText.trim().length === 0
+            ? ""
+            : `; stderr: ${this.#stderrText.trim().slice(-2000)}`;
         const error =
-          this.#fatal ?? new Error("Pi controller closed before completion");
+          this.#fatal ??
+          new Error(
+            `Pi controller closed before completion (code=${code ?? "null"}, signal=${signal ?? "null"})${detail}`,
+          );
         for (const pending of this.#pending.values()) {
           clearTimeout(pending.timer);
           pending.reject(error);
@@ -504,7 +514,7 @@ class PiRpcProcess {
       return Promise.reject(new Error("Pi controller is unavailable"));
     const id = `hitch-${String(++this.#nextId)}`;
     const encoded = `${JSON.stringify({ ...command, id })}\n`;
-    if (Buffer.byteLength(encoded, "utf8") > 64 * 1024)
+    if (Buffer.byteLength(encoded, "utf8") > MAX_RPC_COMMAND_BYTES)
       return Promise.reject(new Error("Pi RPC command is too large"));
     return new Promise((resolveResponse, rejectResponse) => {
       const timer = setTimeout(() => {
@@ -1040,6 +1050,18 @@ export class NativePiRuntime implements AgentRuntime {
       rmSync(context.root, { recursive: true, force: true });
       return { outcome: "unknown", text: "", sessionReusable: false };
     }
+    if (turn.publishPath !== undefined)
+      return await this.#publishOnly(turn, context, signal);
+    const selectedModel =
+      turn.modelProvider === undefined && turn.modelId === undefined
+        ? this.models[0]
+        : this.models.find(
+            (model) =>
+              model.provider === turn.modelProvider &&
+              model.id === turn.modelId,
+          );
+    const nativeImages =
+      selectedModel !== undefined && selectedModel.input.includes("image");
     const images: Array<{
       type: "image";
       data: string;
@@ -1048,7 +1070,7 @@ export class NativePiRuntime implements AgentRuntime {
     const inboxLines: string[] = [];
     try {
       for (const [ordinal, artifact] of inputArtifacts.entries()) {
-        if (artifact.mediaKind === "image") {
+        if (nativeImages && artifact.mediaKind === "image") {
           images.push({
             type: "image",
             data: this.#media.imageData(artifact),
@@ -1073,23 +1095,6 @@ export class NativePiRuntime implements AgentRuntime {
       inboxLines.length === 0
         ? turn.prompt
         : `${turn.prompt}\n\nHitch attached these opaque read-only files for this Turn:\n${inboxLines.join("\n")}`;
-    if (turn.publishPath !== undefined)
-      return await this.#publishOnly(turn, context, signal);
-    const selectedModel =
-      turn.modelProvider === undefined && turn.modelId === undefined
-        ? this.models[0]
-        : this.models.find(
-            (model) =>
-              model.provider === turn.modelProvider &&
-              model.id === turn.modelId,
-          );
-    if (
-      images.length > 0 &&
-      (selectedModel === undefined || !selectedModel.input.includes("image"))
-    ) {
-      rmSync(context.root, { recursive: true, force: true });
-      return { outcome: "failed", text: "", sessionReusable: true };
-    }
     const controller = this.#controller(context, session);
     let timedOut = false;
     let promptSubmitted = false;
@@ -1141,6 +1146,7 @@ export class NativePiRuntime implements AgentRuntime {
         (event) => event.type === "agent_settled",
         this.#turnTimeoutMs + 6_000,
       );
+      void settled.catch(() => undefined);
       controller.clearAssistantSnapshot();
       promptSubmitted = true;
       timer = setTimeout(() => {

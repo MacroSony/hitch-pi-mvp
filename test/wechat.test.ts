@@ -173,10 +173,15 @@ test("WeChat identity rejects groups and unstable IDs before item access", () =>
     () =>
       classifyWeChatIdentity("bot-account", {
         ...message(2, "wx-alice", [textItem("hello")]),
-        message_id: "2",
+        message_id: "not-a-number",
       }),
     (error: unknown) => error instanceof AppError,
   );
+  const largeMessageIdentity = classifyWeChatIdentity(
+    "bot-account",
+    message(7494715186410976000, "wx-alice", [textItem("hello")]),
+  );
+  assert.equal(largeMessageIdentity.messageId, "7494715186410976000");
   assert.throws(
     () =>
       classifyWeChatIdentity("bot-account", {
@@ -188,15 +193,18 @@ test("WeChat identity rejects groups and unstable IDs before item access", () =>
   const imageIdentity = classifyWeChatIdentity(
     "bot-account",
     message(4, "wx-alice", [
-      { type: 2, image_item: { mid_size: 16 } },
+      { type: 2, image_item: { mid_size: 115895 } },
       { type: 5, video_item: { video_size: 32 } },
     ]),
   );
   assert.deepEqual(
     readWeChatMediaDescriptors(imageIdentity).map(
-      ({ transportBytes }) => transportBytes,
+      ({ transportBytes, plaintextBytes }) => [transportBytes, plaintextBytes],
     ),
-    [16, 32],
+    [
+      [20971536, undefined],
+      [32, undefined],
+    ],
   );
 });
 
