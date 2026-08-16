@@ -89,13 +89,29 @@ HITCH_TELEGRAM_PRIMARY_TOKEN=... \
 Startup pins and checks Pi `0.84.1` plus its dependency closure, validates the
 profile, compiles and pins the reviewed sandbox assets, obtains the native Pi
 model catalog, and requires a fresh mandatory-extension/Bubblewrap attestation.
-It exits if no authenticated model is available. `!models`, `!model`, and
-`!thinking` manage the session selection; normal text and supported Telegram
+It exits if no authenticated model is available. Normal text and supported
 images/files run a native Pi Turn. JPEG, PNG, GIF, and WebP become native Pi
 image blocks, while other files are exposed read-only under `/inbox`.
 `!send <relative-path>` and Pi's `hitch_publish` create immutable bounded
 snapshots and deliver them through the originating channel's native file
-methods. Authenticate a configured WeChat account with:
+methods.
+
+The post-MVP chat command surface is `!new [name]`, `!sessions`,
+`!switch <id-or-name>`, `!status`, `!abort`, `!stop`, `!recover`,
+`!models [filter]`, `!model <provider>/<id>`, `!thinking <level>`,
+`!send <relative-path>`, and `!help`. During longer native Turns, Hitch also
+sends merged intermediate agent progress to the originating chat: at most one
+message every 30 seconds, 4000 characters per message, and 64 KiB of progress
+per Turn.
+
+`config.example.json` documents `mediaMode`: `"always-trigger"` runs media-only
+messages immediately, while `"text-trigger"` stages attachments for up to 10
+minutes and merges them into the next text Turn. On hosts that need an HTTP
+proxy for `api.telegram.org`, set `HITCH_TELEGRAM_PROXY` in the service
+environment; Hitch proxies Telegram only, and WeChat API/CDN traffic stays
+direct. Do not set generic `HTTP_PROXY`/`HTTPS_PROXY` for the Hitch process.
+
+Authenticate a configured WeChat account with:
 
 ```text
 npm run wechat:login -- --state-dir /absolute/private/wechat-state

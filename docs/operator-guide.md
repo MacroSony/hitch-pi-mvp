@@ -101,6 +101,10 @@ Important fields:
 - Each user receives one non-overlapping workspace.
 - Remove an unused channel account and its user endpoint rather than leaving a
   placeholder.
+- `mediaMode` is `"always-trigger"` (default: a media-only message starts a
+  Turn immediately) or `"text-trigger"` (media-only messages stage attachments
+  for up to 10 minutes and the next text message merges them into one Turn).
+  Staged attachments survive service restarts.
 - `minimumFreeBytes` stops new work when the data filesystem falls below the
   configured reserve.
 
@@ -182,6 +186,13 @@ Copy the exact `userId` and `privateChatId` for the intended sender into
 and rerun the command. Do this while Hitch is stopped because its normal poller
 intentionally rejects and advances updates from endpoints not yet enrolled.
 
+To replace a compromised or rotated Telegram bot token, stop the service,
+rewrite `/srv/hitch/service.env` with the new value using the same `umask 077`
+procedure above, then start the service again. Only the token changes; Hitch
+keeps its durable Telegram update cursor and configured peer IDs, so chat
+enrollment does not need to be redone. Confirm delivery with `!status` in the
+private chat before resuming normal use.
+
 ### WeChat
 
 Build first, then run the attended QR flow for each configured state directory:
@@ -217,6 +228,22 @@ cannot be validated.
 `--fake-channels` is available for a clearly labeled fake-Pi exercise, but it
 still contacts real configured channels and advances their cursors. Use it only
 with disposable test channel accounts.
+
+### Telegram proxy
+
+If this host can only reach `api.telegram.org` through an HTTP proxy, set the
+single-purpose variable in `service.env`:
+
+```text
+HITCH_TELEGRAM_PROXY=http://proxy-host:port
+```
+
+Hitch applies that proxy to Telegram Bot API requests only. Do not set generic
+`HTTP_PROXY`/`HTTPS_PROXY` for the Hitch process: WeChat API and CDN traffic
+must stay on a direct path (a generic proxy has produced truncated WeChat media
+downloads during dogfood), and a generic proxy environment would also flow into
+Pi's provider and tool network behavior. A WeChat-only proxy path is not
+supported in this release.
 
 ## 6. User systemd service
 
@@ -269,7 +296,10 @@ channels rather than substituting a synthetic live result.
 5. Start a longer Turn, send `!abort`, and confirm it is cancelled. Check that
    no `hitch-p0-*.scope` remains with
    `systemctl --user list-units 'hitch-p0-*.scope' --all`.
-6. Restart the service and confirm sessions remain listed. Hitch quarantines
+6. When `mediaMode` is `"text-trigger"`, send a media-only message and confirm
+   the "Saved N attachment(s)" reply, then send text and confirm the staged
+   attachments merge into one Turn. `!status` reports the staged count.
+7. Restart the service and confirm sessions remain listed. Hitch quarantines
    any Turn that was ambiguous at restart and never replays it automatically.
 
 ## 8. Operations and recovery
@@ -319,6 +349,9 @@ Recovery rules:
 - Repeated channel delivery failure: correct the account/peer/credential and
   restart promptly. Delivery may duplicate after an ambiguous response and
   permanently failed rows have no MVP chat retry command.
+- Telegram bot token rotation: stop, rewrite only the token variable in
+  `service.env` (Section 4), and restart. Cursors and peer enrollment survive;
+  never edit the token file while the service is running.
 
 ## 9. Known MVP limits
 
@@ -329,6 +362,13 @@ Recovery rules:
 - Pi `auth.json` may require backup restore or re-login after a host crash.
 - Channel delivery can duplicate after an ambiguous response, but an agent
   Turn is never rerun for that reason.
+- WeChat large-image CDN downloads can be truncated by the WeChat service
+  (about 240 KiB observed during dogfood). Hitch validates JPEG completeness
+  and preserves a truncated image as an opaque inbox file so the message is
+  never silently dropped.
+- Intermediate agent progress is best-effort: at most one merged message every
+  30 seconds, at most 4000 characters per message and 64 KiB of progress per
+  Turn. A failed progress message never reruns or quarantines the Turn.
 - Automated retention, a failed-delivery retry UI, optional operator
   extensions, skills/MCP, a broad provider matrix, and hardened hostile-server
   handling are post-MVP.

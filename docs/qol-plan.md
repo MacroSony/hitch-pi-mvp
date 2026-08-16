@@ -1,6 +1,6 @@
 # Post-MVP QoL plan
 
-Status: planned after trusted-personal dogfood acceptance
+Status: QoL-1 through QoL-5 implemented and shipped to dogfood
 
 ## Scope
 

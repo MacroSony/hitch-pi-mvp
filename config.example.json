@@ -3,6 +3,7 @@
   "dataRoot": "/srv/hitch/data",
   "piProfileDir": "/srv/hitch/pi-profile",
   "minimumFreeBytes": 1073741824,
+  "mediaMode": "always-trigger",
   "telegramAccounts": [
     {
       "id": "primary",
