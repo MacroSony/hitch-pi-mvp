@@ -127,6 +127,7 @@ async function main(): Promise<void> {
             dataRoot: foundation.topology.dataRoot.path,
             piProfileDir: foundation.topology.piProfileDir.path,
             userIds: foundation.topology.users.map((user) => user.id),
+            maxConcurrentTurns: config.maxConcurrentTurns,
             mediaStore: media,
           });
     const store = new HitchStore(

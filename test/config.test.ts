@@ -33,6 +33,7 @@ function validConfig(): Record<string, unknown> {
 test("strict config accepts exact JSON and stores only secret references", () => {
   const config = parseConfig(validConfig());
   assert.equal(config.schemaVersion, 1);
+  assert.equal(config.maxConcurrentTurns, 2);
   assert.equal(config.telegramAccounts[0]?.botTokenEnv, "HITCH_TELEGRAM_TOKEN");
   assert.equal(
     readRequiredSecret("HITCH_TELEGRAM_TOKEN", {
@@ -72,6 +73,23 @@ test("strict config rejects unknown fields and unsafe identifiers", () => {
   const path = validConfig();
   path.dataRoot = "/srv/hitch/../data";
   assert.throws(() => parseConfig(path), /normalized absolute path/u);
+});
+
+test("config bounds maxConcurrentTurns and lets operators override the default", () => {
+  const defaulted = parseConfig(validConfig());
+  assert.equal(defaulted.maxConcurrentTurns, 2);
+
+  const raised = validConfig();
+  raised.maxConcurrentTurns = 4;
+  assert.equal(parseConfig(raised).maxConcurrentTurns, 4);
+
+  const tooLow = validConfig();
+  tooLow.maxConcurrentTurns = 0;
+  assert.throws(() => parseConfig(tooLow), /safe integer from 1 to 8/u);
+
+  const tooHigh = validConfig();
+  tooHigh.maxConcurrentTurns = 9;
+  assert.throws(() => parseConfig(tooHigh), /safe integer from 1 to 8/u);
 });
 
 test("config rejects duplicate tuples, missing endpoints, and unknown accounts", () => {

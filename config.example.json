@@ -4,6 +4,7 @@
   "piProfileDir": "/srv/hitch/pi-profile",
   "minimumFreeBytes": 1073741824,
   "mediaMode": "always-trigger",
+  "maxConcurrentTurns": 2,
   "telegramAccounts": [
     {
       "id": "primary",

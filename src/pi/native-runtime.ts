@@ -33,6 +33,7 @@ import {
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { MediaStore, MAX_OUTBOUND_ARTIFACTS } from "../media/media-store.js";
+import { AsyncSemaphore } from "./semaphore.js";
 import type {
   AgentRuntime,
   RuntimeArtifact,
@@ -58,6 +59,9 @@ const SANDBOX_ASSET_SHA256 = {
     "9428f425beb6a544616920f66b74c6d7d4b2b92e9ccf3923a55f9796cf513027",
 } as const;
 const PI_PROFILE_ROOT = "pi-profiles";
+const DEFAULT_MAX_CONCURRENT_TURNS = 2;
+const MIN_MAX_CONCURRENT_TURNS = 1;
+const MAX_MAX_CONCURRENT_TURNS = 8;
 const MAX_RPC_BYTES = 8 * 1024 * 1024;
 const MAX_RPC_COMMAND_BYTES = 32 * 1024 * 1024;
 const MAX_STDERR_BYTES = 64 * 1024;
@@ -88,6 +92,7 @@ export interface NativePiRuntimeOptions {
   readonly dataRoot: string;
   readonly piProfileDir: string;
   readonly userIds?: readonly string[];
+  readonly maxConcurrentTurns?: number;
   readonly turnTimeoutMs?: number;
   readonly mediaStore?: MediaStore;
 }
@@ -819,7 +824,7 @@ export class NativePiRuntime implements AgentRuntime {
   readonly #assets: string;
   readonly #turnTimeoutMs: number;
   readonly #media: MediaStore;
-  #gate: Promise<void> = Promise.resolve();
+  readonly #semaphore: AsyncSemaphore;
   #poisoned = false;
 
   private constructor(
@@ -838,6 +843,9 @@ export class NativePiRuntime implements AgentRuntime {
     this.#assets = assetRoot();
     this.#turnTimeoutMs = options.turnTimeoutMs ?? 10 * 60 * 1000;
     this.#media = options.mediaStore ?? new MediaStore(options.dataRoot);
+    this.#semaphore = new AsyncSemaphore(
+      options.maxConcurrentTurns ?? DEFAULT_MAX_CONCURRENT_TURNS,
+    );
   }
 
   public static async create(
@@ -850,6 +858,16 @@ export class NativePiRuntime implements AgentRuntime {
         options.turnTimeoutMs > 30 * 60 * 1000)
     ) {
       throw new Error("native Pi Turn timeout is invalid");
+    }
+    if (
+      options.maxConcurrentTurns !== undefined &&
+      (!Number.isSafeInteger(options.maxConcurrentTurns) ||
+        options.maxConcurrentTurns < MIN_MAX_CONCURRENT_TURNS ||
+        options.maxConcurrentTurns > MAX_MAX_CONCURRENT_TURNS)
+    ) {
+      throw new Error(
+        `native Pi concurrency limit must be from ${MIN_MAX_CONCURRENT_TURNS} to ${MAX_MAX_CONCURRENT_TURNS}`,
+      );
     }
     validatePiProfile(options.piProfileDir);
     const cli = piCliPath();
@@ -1090,13 +1108,7 @@ export class NativePiRuntime implements AgentRuntime {
     signal: AbortSignal,
     onProgress?: (delta: string) => void,
   ): Promise<RuntimeResult> {
-    let release!: () => void;
-    const previous = this.#gate;
-    const current = new Promise<void>((resolveGate) => {
-      release = resolveGate;
-    });
-    this.#gate = previous.then(() => current);
-    await previous;
+    const releaseSlot = await this.#semaphore.acquire();
     try {
       if (this.#poisoned)
         return { outcome: "unknown", text: "", sessionReusable: false };
@@ -1108,7 +1120,7 @@ export class NativePiRuntime implements AgentRuntime {
         };
       return await this.#runExclusive(turn, signal, onProgress);
     } finally {
-      release();
+      releaseSlot();
     }
   }
 

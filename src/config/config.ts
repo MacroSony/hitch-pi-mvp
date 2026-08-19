@@ -5,6 +5,9 @@ const MAX_CONFIG_BYTES = 1024 * 1024;
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
 const ENV_PATTERN = /^[A-Z][A-Z0-9_]{0,127}$/u;
 const CONTROL_PATTERN = /[\u0000-\u001f\u007f]/u;
+const DEFAULT_MAX_CONCURRENT_TURNS = 2;
+const MIN_MAX_CONCURRENT_TURNS = 1;
+const MAX_MAX_CONCURRENT_TURNS = 8;
 
 export interface TelegramAccountConfig {
   readonly id: string;
@@ -42,6 +45,7 @@ export interface AppConfig {
   readonly piProfileDir: string;
   readonly minimumFreeBytes: number;
   readonly mediaMode: MediaMode;
+  readonly maxConcurrentTurns: number;
   readonly telegramAccounts: readonly TelegramAccountConfig[];
   readonly wechatAccounts: readonly WeChatAccountConfig[];
   readonly users: readonly UserConfig[];
@@ -218,7 +222,7 @@ export function parseConfig(value: unknown): AppConfig {
       "wechatAccounts",
       "users",
     ],
-    ["mediaMode"],
+    ["mediaMode", "maxConcurrentTurns"],
     "config",
   );
   if (input.schemaVersion !== 1) fail("config.schemaVersion", "expected 1");
@@ -295,6 +299,22 @@ export function parseConfig(value: unknown): AppConfig {
           input.mediaMode === "text-trigger"
         ? input.mediaMode
         : fail("config.mediaMode", "expected always-trigger or text-trigger");
+  const maxConcurrentTurnsValue: unknown = input.maxConcurrentTurns;
+  const maxConcurrentTurns =
+    maxConcurrentTurnsValue === undefined
+      ? DEFAULT_MAX_CONCURRENT_TURNS
+      : maxConcurrentTurnsValue;
+  if (
+    typeof maxConcurrentTurns !== "number" ||
+    !Number.isSafeInteger(maxConcurrentTurns) ||
+    maxConcurrentTurns < MIN_MAX_CONCURRENT_TURNS ||
+    maxConcurrentTurns > MAX_MAX_CONCURRENT_TURNS
+  ) {
+    fail(
+      "config.maxConcurrentTurns",
+      `expected a safe integer from ${MIN_MAX_CONCURRENT_TURNS} to ${MAX_MAX_CONCURRENT_TURNS}`,
+    );
+  }
 
   return {
     schemaVersion: 1,
@@ -302,6 +322,7 @@ export function parseConfig(value: unknown): AppConfig {
     piProfileDir: absolutePath(input.piProfileDir, "config.piProfileDir"),
     minimumFreeBytes: Number(input.minimumFreeBytes),
     mediaMode,
+    maxConcurrentTurns,
     telegramAccounts,
     wechatAccounts,
     users,
