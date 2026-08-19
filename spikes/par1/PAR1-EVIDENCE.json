@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "type": "hitch.par1.concurrent-profile-evidence",
+  "createdAt": "2026-08-19T04:05:10.794Z",
+  "inputs": {
+    "node": "v24.14.0",
+    "pi": "@earendil-works/pi-coding-agent@0.84.1",
+    "piPackageTreeSha256": "7298ead16e553a8ffc372ca6a5a17ccfd711ae0887830134255dcea08be55bba",
+    "piDependencyClosureSha256": "6d2055eaeef6823fd4b6edc062314e383fc6e233a4634a13e868a86eaebbcec4",
+    "providerFixtureSha256": "b352d57a05bedd7c4f704c528ede76aeee9f12ba72e0adcdedfa9cc4770bf270",
+    "runnerSha256": "f2401cb5958bf2e08e4e82e6a1386cc0df7097d555b6698790a11e7928b7c07f",
+    "sourceProfileProvided": false,
+    "realProviderCallsEnabled": false
+  },
+  "controls": {
+    "realProviderCallsMade": false,
+    "realCredentialsCopied": false,
+    "offline": true,
+    "telemetry": false,
+    "ambientHomeUsed": false,
+    "concurrencyBarrier": "both-controllers-ready-before-prompt",
+    "streamDelayMs": 800
+  },
+  "cases": {
+    "controllerA": {
+      "pass": true,
+      "model": "hitch-par1/par1-text",
+      "sessionFileCreated": true,
+      "profileValidated": true,
+      "overlap": true
+    },
+    "controllerB": {
+      "pass": true,
+      "model": "hitch-par1/par1-text",
+      "sessionFileCreated": true,
+      "profileValidated": true,
+      "overlap": true
+    },
+    "profileIsolation": {
+      "pass": true,
+      "profileAValidAfterRun": true,
+      "profileBValidAfterRun": true,
+      "markerIsolation": true,
+      "pathSetsIdentical": true
+    },
+    "concurrentOverlap": {
+      "pass": true,
+      "streamAStartedAt": 1787112309532,
+      "streamACompletedAt": 1787112310333,
+      "streamBStartedAt": 1787112309532,
+      "streamBCompletedAt": 1787112310333,
+      "overlapped": true
+    }
+  },
+  "decision": {
+    "piProfileDirectoryIsolation": "safe-for-two-independent-controllers",
+    "nativeRuntimeGateBypassed": "spike-spawns-two-direct-Pi-RPC-controllers",
+    "productionBlockersOutsidePiProfiles": [
+      "NativePiRuntime cleanupSandboxUnits() still kills all hitch-p0-*.scope units globally; simply removing the promise gate is not sufficient without per-runtime sandbox-unit ownership."
+    ],
+    "outcome": "deterministic-fake-provider-concurrency-passed"
+  }
+}
