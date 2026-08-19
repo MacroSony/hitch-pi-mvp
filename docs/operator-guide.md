@@ -107,6 +107,9 @@ Important fields:
   Staged attachments survive service restarts.
 - `minimumFreeBytes` stops new work when the data filesystem falls below the
   configured reserve.
+- `maxConcurrentTurns` (optional, default 2, valid 1–8) bounds how many native
+  Pi controllers run at once across users. One user's Turns stay serialized;
+  this setting only controls cross-user parallelism.
 
 Validate and publish the topology without starting a channel or Pi:
 
@@ -132,9 +135,11 @@ sudo -iu hitch bash -lc \
 ```
 
 Never use a personal ambient Pi profile and never put provider keys in
-`service.env`. Hitch validates this profile before native startup. While the
-service is stopped, keep an owner-private offline copy of `auth.json`; the
-pinned Pi writer is not crash-atomic.
+`service.env`. Hitch validates this source profile, then clones it into
+owner-only per-user directories under `dataRoot/pi-profiles` and validates each
+clone before native startup. While the service is stopped, keep an
+owner-private offline copy of `auth.json`; the pinned Pi writer is not
+crash-atomic.
 
 ### Telegram
 

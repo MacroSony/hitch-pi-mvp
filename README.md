@@ -87,8 +87,9 @@ HITCH_TELEGRAM_PRIMARY_TOKEN=... \
 ```
 
 Startup pins and checks Pi `0.84.1` plus its dependency closure, validates the
-profile, compiles and pins the reviewed sandbox assets, obtains the native Pi
-model catalog, and requires a fresh mandatory-extension/Bubblewrap attestation.
+operator profile, clones it into owner-only per-user directories, compiles and
+pins the reviewed sandbox assets, obtains the native Pi model catalog, and
+requires a fresh mandatory-extension/Bubblewrap attestation.
 It exits if no authenticated model is available. Normal text and supported
 images/files run a native Pi Turn. JPEG, PNG, GIF, and WebP become native Pi
 image blocks, while other files are exposed read-only under `/inbox`.
@@ -106,7 +107,9 @@ per Turn.
 
 `config.example.json` documents `mediaMode`: `"always-trigger"` runs media-only
 messages immediately, while `"text-trigger"` stages attachments for up to 10
-minutes and merges them into the next text Turn. On hosts that need an HTTP
+minutes and merges them into the next text Turn. `maxConcurrentTurns`
+(default 2, range 1–8) bounds how many native Pi controllers run at once across
+users; each user's Turns remain serially queued. On hosts that need an HTTP
 proxy for `api.telegram.org`, set `HITCH_TELEGRAM_PROXY` in the service
 environment; Hitch proxies Telegram only, and WeChat API/CDN traffic stays
 direct. Do not set generic `HTTP_PROXY`/`HTTPS_PROXY` for the Hitch process.

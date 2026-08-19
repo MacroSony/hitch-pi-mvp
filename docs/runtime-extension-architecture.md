@@ -47,19 +47,24 @@ Telegram / WeChat
 
 Each Hitch session keeps Pi's private transcript and selected provider/model.
 Each Turn starts a fresh Pi RPC controller against that session. Only one Turn
-per user runs at once, and one global controller gate remains because Pi auth
-state is shared. After first flush, Hitch reopens the exact private transcript
-path; `--session-id` is not a safe lookup/persistence boundary. A crash or
-forced close still quarantines the session unless Pi emits `agent_settled`,
-exits cleanly, and Hitch fsyncs the transcript plus its parent directory. RPC
-prompt success, `turn_end`, and `agent_end` are not that boundary.
+per user runs at once (per-user pump); across users the service allows up to
+`maxConcurrentTurns` controllers (default 2). At startup the operator profile
+is cloned into a private per-user directory, so controllers no longer share
+`auth.json`/`settings.json`. After first flush, Hitch reopens the exact private
+transcript path; `--session-id` is not a safe lookup/persistence boundary. A
+crash or forced close still quarantines the session unless Pi emits
+`agent_settled`, exits cleanly, and Hitch fsyncs the transcript plus its parent
+directory. RPC prompt success, `turn_end`, and `agent_end` are not that
+boundary.
 
 ## Provider and model behavior
 
-Hitch points Pi at one operator-managed, host-private Pi profile. On startup it
-asks Pi for the models whose providers are registered and authenticated. The
-snapshot is filtered only by an optional static operator allowlist, recorded by
-digest, and exposed through:
+Hitch keeps one operator-managed, host-private source Pi profile and clones it
+into per-user private directories under the data root. Runtime controllers use
+their user's clone, and a dedicated clone serves the startup model catalog. On
+startup it asks Pi for the models whose providers are registered and
+authenticated. The snapshot is filtered only by an optional static operator
+allowlist, recorded by digest, and exposed through:
 
 - `!models [filter]`;
 - `!model <provider>/<model-id>`;

@@ -139,23 +139,30 @@ source of ownership and requested model/thinking before that boundary. After
 creation, every fresh controller opens the exact private transcript path; it
 does not use `--session-id` lookup. Two processes may otherwise append valid
 JSONL sibling branches to one session while only one Turn remains on the
-selected leaf, so the global controller gate also prohibits concurrent opens
-of the same transcript.
+selected leaf, so the per-user pump plus per-user profile/session isolation
+still prohibits concurrent opens of the same transcript.
 
-The controller uses an operator-managed, host-private Pi profile and native
-`ModelRuntime`. At service startup Hitch obtains `get_available_models`, checks
-static allowlists, and publishes a content-free catalog digest. Session changes
-use RPC `set_model` and `set_thinking_level`. Hitch does not parse provider
-requests or credentials.
+The controller uses an operator-managed, host-private Pi profile that is cloned
+into a private per-user directory at startup (`dataRoot/pi-profiles/<user>`).
+Every clone is normalized to owner-only modes and passes `validatePiProfile`
+before use; runtime picks the clone by `userId`, never the shared operator
+source. `NativePiRuntime` uses native `ModelRuntime`. At service startup Hitch
+obtains `get_available_models` from a dedicated clone, checks static allowlists,
+and publishes a content-free catalog digest. Session changes use RPC
+`set_model` and `set_thinking_level`. Hitch does not parse provider requests or
+credentials.
 
-The MVP admits only one provider-owning Pi controller globally at a time. The
+The MVP admits at most `maxConcurrentTurns` provider-owning Pi controllers
+globally (config, default 2, validated 1–8). The per-user pump still serializes
+Turns for one user; the semaphore only bounds cross-user parallelism. The
 pinned Pi serializes rotating OAuth refresh with a file lock, but its in-place
 `auth.json` write is not crash-atomic: deterministic mid-write termination can
-leave invalid JSON. For this attended MVP, startup validates the profile and
-the operator keeps a private backup or logs in again after corruption. A
-durable upstream writer remains post-MVP hardening. The global gate also
-prevents concurrent transcript opens; every user's queue/session remains
-independent.
+leave invalid JSON. For this attended MVP, startup validates each per-user
+profile clone and the operator keeps a private backup or logs in again after
+corruption. A durable upstream writer remains post-MVP hardening. Sandbox
+scopes are namespaced to the owning runtime, so one runtime's cleanup cannot
+kill another runtime's active units; a global sweep only runs at startup when
+no Turn is active.
 
 Pi discovery is disabled and extensions are loaded explicitly from immutable
 manifests. The workspace cannot load `.pi/extensions`, settings, packages,
@@ -257,7 +264,7 @@ delivery rechecks the original tuple and owner.
 | Prompt text | 32 KiB UTF-8 |
 | Session name / sessions per user | 64 UTF-8 bytes / 32 |
 | Active / pending Turns per user | 1 / 3 |
-| Active provider-owning Pi controllers | 1 globally until auth concurrency is proven |
+| Active provider-owning Pi controllers | `maxConcurrentTurns` (default 2, range 1–8); per-user pump keeps one Turn per user |
 | Input artifacts / one / total | 8 / 20 MiB / 40 MiB |
 | Display filename / MIME label | 128 UTF-8 / 127 ASCII bytes |
 | Image side / decoded pixels / frames | 16,384 / 40 MP / 100 |

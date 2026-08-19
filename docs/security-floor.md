@@ -34,7 +34,8 @@ without pretending the MVP is hardened for adversarial users.
 ### Pi and extensions
 
 - Pin Pi and the mandatory Hitch extension. Use a dedicated, host-private Pi
-  profile that is never mounted into the tool sandbox.
+  source profile that is cloned into owner-only per-user directories at
+  startup and is never mounted into the tool sandbox.
 - Disable Pi project/global discovery, context files, workspace settings,
   packages, project extensions, skills, prompts, and themes.
 - Disable Pi built-in tools. Before each prompt, attest that `read`, `write`,
@@ -56,7 +57,8 @@ without pretending the MVP is hardened for adversarial users.
 - Enforce practical wall-time, memory, process-count, temporary-storage, and
   combined-output limits using the proven systemd/Bubblewrap backend.
 - Cancellation and timeout terminate the sandbox scope and confirm it is empty
-  before releasing the single controller slot.
+  before releasing the controller slot. Sandbox units are namespaced to the
+  owning runtime so cleanup never kills another runtime's active units.
 - Wait for Pi `agent_settled`. A forced or ambiguous controller close marks the
   Turn unknown and quarantines the session instead of replaying it.
 
@@ -69,7 +71,9 @@ without pretending the MVP is hardened for adversarial users.
   files, tool results, workspace, or inbox.
 - Provider login/logout is an attended host-operator action, never an IM
   command.
-- Run at most one provider-owning Pi controller globally.
+- Run at most `maxConcurrentTurns` provider-owning Pi controllers globally
+  (default 2, range 1–8), with per-user Turn serialization preserved by the
+  pump.
 - Validate that Pi profile JSON is readable before startup and provide clear
   backup/re-login recovery if the pinned Pi writer is interrupted.
 - Resolve model changes only against Pi's current reported model catalog and
