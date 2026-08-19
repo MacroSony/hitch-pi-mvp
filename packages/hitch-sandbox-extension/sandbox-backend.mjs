@@ -119,7 +119,8 @@ function configuration(input, publish) {
 		!Number.isSafeInteger(memoryBytes) || memoryBytes < 64 * 1024 * 1024 || memoryBytes > 1024 * 1024 * 1024 ||
 		!Number.isSafeInteger(maximumProcesses) || maximumProcesses < 16 || maximumProcesses > 128 ||
 		!Number.isSafeInteger(wallMilliseconds) || wallMilliseconds < 250 || wallMilliseconds > 30_000 ||
-		typeof input.turnHandle !== "string" || !/^[a-f0-9]{32}$/.test(input.turnHandle)
+		typeof input.turnHandle !== "string" || !/^[a-f0-9]{32}$/.test(input.turnHandle) ||
+		typeof input.unitPrefix !== "string" || !/^[a-f0-9]{16}$/.test(input.unitPrefix)
 	) fail();
 	return {
 		...input,
@@ -129,6 +130,7 @@ function configuration(input, publish) {
 		worker,
 		helper,
 		log,
+		unitPrefix: input.unitPrefix,
 		temporaryBytes,
 		memoryBytes,
 		maximumProcesses,
@@ -356,7 +358,7 @@ export async function executeSandboxRequest(input, request, signal) {
 	if (signal?.aborted) fail();
 	const nonce = randomBytes(32).toString("hex");
 	const unitDigest = sha256Bytes(`${config.turnHandle}:${invocationCounter++}:${nonce}`).slice(0, 24);
-	const unitBase = `hitch-p0-${unitDigest}`;
+	const unitBase = `hitch-p0-${config.unitPrefix}-${unitDigest}`;
 	const unitName = `${unitBase}.scope`;
 	const description = `Hitch P0 ${nonce}`;
 	const args = [

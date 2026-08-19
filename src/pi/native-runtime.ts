@@ -50,9 +50,9 @@ const PI_DEPENDENCY_CLOSURE_SHA256 =
   "6d2055eaeef6823fd4b6edc062314e383fc6e233a4634a13e868a86eaebbcec4";
 const SANDBOX_ASSET_SHA256 = {
   "hitch-sandbox.ts":
-    "9cc0929c921c47632c2ba53701c95dd5fd195712e1671779931bdaf7c59bf1d8",
+    "8a51722009388b8c79e93d0a8c5508d34acae45b10be76f94eed074a77adff07",
   "sandbox-backend.mjs":
-    "72d9d2e11012a77dda0491253cc346c5417cfd7a67a0e7042dd79ea7cb91a2c1",
+    "44a694871cf8396e9db3b8775b0adbb48381a92b2de3e90c8caa47a108c8ac73",
   "sandbox-worker.mjs":
     "7c591aeaa72ca63ddb09db42ee0562505ea3f416264f64870e69e9d8970f2cd9",
   "secure-bwrap-helper":
@@ -85,6 +85,11 @@ const THINKING_LEVELS: readonly ThinkingLevel[] = [
   "xhigh",
   "max",
 ];
+const SANDBOX_OWNER_PATTERN = /^[a-f0-9]{16}$/u;
+const SANDBOX_UNIT_PATTERN =
+  /^hitch-p0-(?:[a-f0-9]{24}|[a-f0-9]{16}-[a-f0-9]{24})\.scope$/u;
+
+let activeRunCount = 0;
 
 type JsonRecord = Record<string, unknown>;
 
@@ -219,7 +224,7 @@ function systemdEnvironment(): NodeJS.ProcessEnv {
   };
 }
 
-function sandboxUnits(): readonly string[] | null {
+function sandboxUnits(prefix: string | null): readonly string[] | null {
   const result = spawnSync(
     "/usr/bin/systemctl",
     [
@@ -242,14 +247,22 @@ function sandboxUnits(): readonly string[] | null {
     .split("\n")
     .map((line) => line.trim().split(/\s/u)[0])
     .filter((unit): unit is string => unit !== undefined && unit.length > 0);
-  if (units.some((unit) => !/^hitch-p0-[a-f0-9]{24}\.scope$/u.test(unit)))
-    return null;
+  if (prefix === null) {
+    if (units.some((unit) => !SANDBOX_UNIT_PATTERN.test(unit))) return null;
+  } else {
+    if (!SANDBOX_OWNER_PATTERN.test(prefix)) return null;
+    const pattern = new RegExp(
+      `^hitch-p0-${prefix}-[a-f0-9]{24}\\.scope$`,
+      "u",
+    );
+    if (units.some((unit) => !pattern.test(unit))) return null;
+  }
   return units;
 }
 
-async function cleanupSandboxUnits(): Promise<boolean> {
+async function cleanupSandboxUnits(prefix: string | null): Promise<boolean> {
   for (let attempt = 0; attempt < 100; attempt += 1) {
-    const units = sandboxUnits();
+    const units = sandboxUnits(prefix);
     if (units === null) return false;
     if (units.length === 0) return true;
     for (const unit of units) {
@@ -825,6 +838,7 @@ export class NativePiRuntime implements AgentRuntime {
   readonly #turnTimeoutMs: number;
   readonly #media: MediaStore;
   readonly #semaphore: AsyncSemaphore;
+  readonly #owner: string;
   #poisoned = false;
 
   private constructor(
@@ -846,6 +860,7 @@ export class NativePiRuntime implements AgentRuntime {
     this.#semaphore = new AsyncSemaphore(
       options.maxConcurrentTurns ?? DEFAULT_MAX_CONCURRENT_TURNS,
     );
+    this.#owner = randomBytes(8).toString("hex");
   }
 
   public static async create(
@@ -906,7 +921,7 @@ export class NativePiRuntime implements AgentRuntime {
     );
     privateDirectory(temporary.#runtimeRoot);
     privateDirectory(temporary.#sessionsRoot);
-    if (!(await cleanupSandboxUnits()))
+    if (activeRunCount === 0 && !(await cleanupSandboxUnits(null)))
       throw new Error("sandbox process-tree cleanup could not be confirmed");
     const models = await temporary.#loadCatalog();
     if (models.length === 0)
@@ -971,6 +986,7 @@ export class NativePiRuntime implements AgentRuntime {
       HITCH_P0_LOG: context.log,
       HITCH_P0_TURN_HANDLE: context.turnHandle,
       HITCH_P0_CONTROLLER_NONCE: context.controllerNonce,
+      HITCH_P0_UNIT_PREFIX: this.#owner,
       HITCH_P0_WORKER_SHA256: SANDBOX_ASSET_SHA256["sandbox-worker.mjs"],
       HITCH_P0_HELPER_SHA256: SANDBOX_ASSET_SHA256["secure-bwrap-helper"],
       HITCH_P0_EXTENSION_SHA256: SANDBOX_ASSET_SHA256["hitch-sandbox.ts"],
@@ -1007,7 +1023,7 @@ export class NativePiRuntime implements AgentRuntime {
       await controller.waitClosed();
       throw error;
     } finally {
-      if (!(await cleanupSandboxUnits()))
+      if (!(await cleanupSandboxUnits(this.#owner)))
         throw new Error("sandbox process-tree cleanup could not be confirmed");
       normalizeProfilePermissions(this.#catalogProfile);
       rmSync(context.root, { recursive: true, force: true });
@@ -1038,6 +1054,7 @@ export class NativePiRuntime implements AgentRuntime {
             helper: join(this.#assets, "secure-bwrap-helper"),
             log: context.log,
             turnHandle: context.turnHandle,
+            unitPrefix: this.#owner,
             workerSha256: SANDBOX_ASSET_SHA256["sandbox-worker.mjs"],
             helperSha256: SANDBOX_ASSET_SHA256["secure-bwrap-helper"],
             temporaryBytes: 4 * 1024 * 1024,
@@ -1094,7 +1111,7 @@ export class NativePiRuntime implements AgentRuntime {
         sessionReusable: true,
       };
     } finally {
-      const cleaned = await cleanupSandboxUnits();
+      const cleaned = await cleanupSandboxUnits(this.#owner);
       if (!cleaned) {
         this.#poisoned = true;
         throw new Error("sandbox process-tree cleanup could not be confirmed");
@@ -1108,6 +1125,7 @@ export class NativePiRuntime implements AgentRuntime {
     signal: AbortSignal,
     onProgress?: (delta: string) => void,
   ): Promise<RuntimeResult> {
+    activeRunCount += 1;
     const releaseSlot = await this.#semaphore.acquire();
     try {
       if (this.#poisoned)
@@ -1121,6 +1139,7 @@ export class NativePiRuntime implements AgentRuntime {
       return await this.#runExclusive(turn, signal, onProgress);
     } finally {
       releaseSlot();
+      activeRunCount -= 1;
     }
   }
 
@@ -1356,7 +1375,7 @@ export class NativePiRuntime implements AgentRuntime {
       return { outcome: "unknown", text: "", sessionReusable: false };
     } finally {
       signal.removeEventListener("abort", onExternalAbort);
-      const cleaned = await cleanupSandboxUnits();
+      const cleaned = await cleanupSandboxUnits(this.#owner);
       if (!cleaned) {
         this.#poisoned = true;
         throw new Error("sandbox process-tree cleanup could not be confirmed");

@@ -44,24 +44,26 @@ test("Pi profile validation is content-free and gives the attended recovery path
   );
 });
 
-test("production sandbox sources exactly match the reviewed Phase 0 assets", () => {
+test("production sandbox sources are staged from the pinned package mirror", () => {
   const repository = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+  const source = join(repository, "packages", "hitch-sandbox-extension");
+  const staged = join(repository, "dist", "sandbox");
   for (const name of [
     "hitch-sandbox.ts",
     "sandbox-backend.mjs",
     "sandbox-worker.mjs",
-    "secure-bwrap-helper.c",
   ]) {
     assert.deepEqual(
-      readFileSync(
-        join(repository, "packages", "hitch-sandbox-extension", name),
-      ),
-      readFileSync(join(repository, "spikes", "p0-sandbox", name)),
+      readFileSync(join(source, name)),
+      readFileSync(join(staged, name)),
       name,
     );
   }
 
-  const staged = join(repository, "dist", "sandbox");
+  // Phase 0 reviewed spike assets remain frozen historical evidence. The
+  // PAR-2 unit namespacing intentionally diverges the production package from
+  // those spikes while keeping the safety contract.
+
   for (const name of [
     "hitch-sandbox.ts",
     "sandbox-backend.mjs",
@@ -140,6 +142,7 @@ test(
           helper,
           log: join(root, "sandbox.log"),
           turnHandle: randomBytes(16).toString("hex"),
+          unitPrefix: randomBytes(8).toString("hex"),
           workerSha256: sha256(worker),
           helperSha256: sha256(helper),
           temporaryBytes: 4 * 1024 * 1024,

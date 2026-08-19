@@ -23,6 +23,7 @@ const requiredEnvironment = [
 	"HITCH_P0_LOG",
 	"HITCH_P0_TURN_HANDLE",
 	"HITCH_P0_CONTROLLER_NONCE",
+	"HITCH_P0_UNIT_PREFIX",
 	"HITCH_P0_WORKER_SHA256",
 	"HITCH_P0_HELPER_SHA256",
 	"HITCH_P0_EXTENSION_SHA256",
@@ -34,6 +35,9 @@ for (const name of requiredEnvironment) {
 }
 if (!/^[a-f0-9]{32}$/.test(process.env.HITCH_P0_CONTROLLER_NONCE!)) {
 	throw new Error("Hitch sandbox controller nonce is invalid");
+}
+if (!/^[a-f0-9]{16}$/.test(process.env.HITCH_P0_UNIT_PREFIX!)) {
+	throw new Error("Hitch sandbox unit prefix is invalid");
 }
 
 function sha256(path: string): string {
@@ -54,6 +58,7 @@ const backendConfiguration = Object.freeze({
 	helper: process.env.HITCH_P0_HELPER!,
 	log: process.env.HITCH_P0_LOG!,
 	turnHandle: process.env.HITCH_P0_TURN_HANDLE!,
+	unitPrefix: process.env.HITCH_P0_UNIT_PREFIX!,
 	workerSha256: process.env.HITCH_P0_WORKER_SHA256!,
 	helperSha256: process.env.HITCH_P0_HELPER_SHA256!,
 	temporaryBytes: 4 * 1024 * 1024,
