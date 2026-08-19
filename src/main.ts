@@ -126,6 +126,7 @@ async function main(): Promise<void> {
         : await NativePiRuntime.create({
             dataRoot: foundation.topology.dataRoot.path,
             piProfileDir: foundation.topology.piProfileDir.path,
+            userIds: foundation.topology.users.map((user) => user.id),
             mediaStore: media,
           });
     const store = new HitchStore(

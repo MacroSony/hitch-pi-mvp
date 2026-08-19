@@ -5,6 +5,7 @@ import {
 } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import {
+  chmodSync,
   closeSync,
   constants as fsConstants,
   existsSync,
@@ -19,6 +20,7 @@ import {
   realpathSync,
   rmSync,
   statSync,
+  writeFileSync,
 } from "node:fs";
 import {
   basename,
@@ -55,6 +57,7 @@ const SANDBOX_ASSET_SHA256 = {
   "secure-bwrap-helper":
     "9428f425beb6a544616920f66b74c6d7d4b2b92e9ccf3923a55f9796cf513027",
 } as const;
+const PI_PROFILE_ROOT = "pi-profiles";
 const MAX_RPC_BYTES = 8 * 1024 * 1024;
 const MAX_RPC_COMMAND_BYTES = 32 * 1024 * 1024;
 const MAX_STDERR_BYTES = 64 * 1024;
@@ -84,6 +87,7 @@ type JsonRecord = Record<string, unknown>;
 export interface NativePiRuntimeOptions {
   readonly dataRoot: string;
   readonly piProfileDir: string;
+  readonly userIds?: readonly string[];
   readonly turnTimeoutMs?: number;
   readonly mediaStore?: MediaStore;
 }
@@ -361,6 +365,41 @@ export function validatePiProfile(piProfileDir: string): void {
   ]) {
     validateJsonFile(join(piProfileDir, name));
   }
+}
+
+function normalizeProfilePermissions(piProfileDir: string): void {
+  privateDirectory(piProfileDir);
+  for (const name of readdirSync(piProfileDir)) {
+    const child = join(piProfileDir, name);
+    const metadata = lstatSync(child, { bigint: true });
+    if (metadata.isDirectory()) {
+      chmodSync(child, 0o700);
+      normalizeProfilePermissions(child);
+    } else if (metadata.isFile()) {
+      chmodSync(child, 0o600);
+    } else if (metadata.isSymbolicLink()) {
+      throw new Error("Pi profile contains a symbolic link");
+    }
+  }
+}
+
+function clonePiProfile(source: string, destination: string): void {
+  rmSync(destination, { recursive: true, force: true });
+  privateDirectory(destination);
+  for (const name of readdirSync(source)) {
+    const sourcePath = join(source, name);
+    const destinationPath = join(destination, name);
+    const metadata = lstatSync(sourcePath, { bigint: true });
+    if (metadata.isDirectory()) {
+      clonePiProfile(sourcePath, destinationPath);
+    } else if (metadata.isFile()) {
+      writeFileSync(destinationPath, readFileSync(sourcePath), { mode: 0o600 });
+      chmodSync(destinationPath, 0o600);
+    } else if (metadata.isSymbolicLink()) {
+      throw new Error("Pi profile contains a symbolic link");
+    }
+  }
+  validatePiProfile(destination);
 }
 
 class PiRpcProcess {
@@ -774,7 +813,8 @@ export class NativePiRuntime implements AgentRuntime {
   readonly catalogDigest: string;
   readonly #runtimeRoot: string;
   readonly #sessionsRoot: string;
-  readonly #profile: string;
+  readonly #profiles: ReadonlyMap<string, string>;
+  readonly #catalogProfile: string;
   readonly #cli: string;
   readonly #assets: string;
   readonly #turnTimeoutMs: number;
@@ -785,12 +825,15 @@ export class NativePiRuntime implements AgentRuntime {
   private constructor(
     options: NativePiRuntimeOptions,
     models: readonly RuntimeModel[],
+    profiles: ReadonlyMap<string, string>,
+    catalogProfile: string,
   ) {
     this.models = models;
     this.catalogDigest = stableDigest(models);
     this.#runtimeRoot = join(options.dataRoot, "pi-runtime");
     this.#sessionsRoot = join(options.dataRoot, "pi-sessions");
-    this.#profile = options.piProfileDir;
+    this.#profiles = profiles;
+    this.#catalogProfile = catalogProfile;
     this.#cli = piCliPath();
     this.#assets = assetRoot();
     this.#turnTimeoutMs = options.turnTimeoutMs ?? 10 * 60 * 1000;
@@ -813,7 +856,36 @@ export class NativePiRuntime implements AgentRuntime {
     validatePiPackage(cli);
     const assets = assetRoot();
     validateSandboxAssets(assets);
-    const temporary = new NativePiRuntime(options, []);
+    const profileRoot = join(options.dataRoot, PI_PROFILE_ROOT);
+    privateDirectory(profileRoot);
+    const userIds = options.userIds ?? [];
+    const profiles = new Map<string, string>();
+    let catalogProfile: string;
+    if (userIds.length === 0) {
+      catalogProfile = join(profileRoot, "default");
+      clonePiProfile(options.piProfileDir, catalogProfile);
+    } else {
+      for (const userId of userIds) {
+        const segment = safeSegment(userId, "Pi profile user id");
+        if (profiles.has(segment))
+          throw new Error("duplicate Pi profile user id");
+        const directory = join(profileRoot, segment);
+        clonePiProfile(options.piProfileDir, directory);
+        profiles.set(segment, directory);
+      }
+      const first = profiles.values().next().value;
+      if (first === undefined)
+        throw new Error(
+          "at least one user is required for a native Pi runtime",
+        );
+      catalogProfile = first;
+    }
+    const temporary = new NativePiRuntime(
+      options,
+      [],
+      profiles,
+      catalogProfile,
+    );
     privateDirectory(temporary.#runtimeRoot);
     privateDirectory(temporary.#sessionsRoot);
     if (!(await cleanupSandboxUnits()))
@@ -821,7 +893,7 @@ export class NativePiRuntime implements AgentRuntime {
     const models = await temporary.#loadCatalog();
     if (models.length === 0)
       throw new Error("Pi profile has no authenticated available model");
-    return new NativePiRuntime(options, models);
+    return new NativePiRuntime(options, models, profiles, catalogProfile);
   }
 
   #context(label: string, workspace: string): ControllerContext {
@@ -846,10 +918,19 @@ export class NativePiRuntime implements AgentRuntime {
     };
   }
 
+  #profileFor(userId: string): string {
+    const segment = safeSegment(userId, "runtime user id");
+    const directory = this.#profiles.get(segment);
+    if (directory === undefined)
+      throw new Error(`no Pi profile is prepared for user ${segment}`);
+    return directory;
+  }
+
   #controller(
     context: ControllerContext,
     session: Parameters<typeof controllerArguments>[1],
-    onTextDelta?: (delta: string) => void,
+    onTextDelta: ((delta: string) => void) | undefined,
+    profileDir: string,
   ): PiRpcProcess {
     validateSandboxAssets(this.#assets);
     const extension = join(this.#assets, "hitch-sandbox.ts");
@@ -861,7 +942,7 @@ export class NativePiRuntime implements AgentRuntime {
       LANG: "C.UTF-8",
       LC_ALL: "C.UTF-8",
       NO_COLOR: "1",
-      PI_CODING_AGENT_DIR: this.#profile,
+      PI_CODING_AGENT_DIR: profileDir,
       PI_OFFLINE: "1",
       PI_TELEMETRY: "0",
       HITCH_P0_WORKSPACE: context.workspace,
@@ -891,7 +972,12 @@ export class NativePiRuntime implements AgentRuntime {
     const workspace = join(this.#runtimeRoot, "catalog-workspace");
     privateDirectory(workspace);
     const context = this.#context(label, workspace);
-    const controller = this.#controller(context, { kind: "none" });
+    const controller = this.#controller(
+      context,
+      { kind: "none" },
+      undefined,
+      this.#catalogProfile,
+    );
     try {
       await waitForAttestation(controller, context);
       const response = await controller.send({ type: "get_available_models" });
@@ -905,6 +991,7 @@ export class NativePiRuntime implements AgentRuntime {
     } finally {
       if (!(await cleanupSandboxUnits()))
         throw new Error("sandbox process-tree cleanup could not be confirmed");
+      normalizeProfilePermissions(this.#catalogProfile);
       rmSync(context.root, { recursive: true, force: true });
     }
   }
@@ -1116,7 +1203,13 @@ export class NativePiRuntime implements AgentRuntime {
       inboxLines.length === 0
         ? turn.prompt
         : `${turn.prompt}\n\nHitch attached these opaque read-only files for this Turn:\n${inboxLines.join("\n")}`;
-    const controller = this.#controller(context, session, onProgress);
+    const profileDir = this.#profileFor(userId);
+    const controller = this.#controller(
+      context,
+      session,
+      onProgress,
+      profileDir,
+    );
     let timedOut = false;
     let promptSubmitted = false;
     let timer: NodeJS.Timeout | undefined;
@@ -1256,6 +1349,7 @@ export class NativePiRuntime implements AgentRuntime {
         this.#poisoned = true;
         throw new Error("sandbox process-tree cleanup could not be confirmed");
       }
+      normalizeProfilePermissions(profileDir);
       rmSync(context.root, { recursive: true, force: true });
     }
   }
