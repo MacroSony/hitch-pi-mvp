@@ -36,5 +36,9 @@
     "provider": "tavily",
     "apiKeyEnv": "TAVILY_API_KEY",
     "enabledUsers": []
+  },
+  "forge": {
+    "root": "/srv/hitch/forge-resources",
+    "enabledUsers": []
   }
 }

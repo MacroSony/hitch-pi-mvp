@@ -212,3 +212,24 @@ test("config validates optional webSearch configuration strictly", () => {
   };
   assert.throws(() => parseConfig(extraKeys), /unknown field/u);
 });
+
+test("Forge is explicit, per-user, and never a host/plugin configuration surface", () => {
+  assert.equal(parseConfig(validConfig()).forge, undefined);
+  const config = {
+    ...validConfig(),
+    forge: { root: "/srv/hitch/forge", enabledUsers: ["alice"] },
+  };
+  assert.deepEqual(parseConfig(config).forge, config.forge);
+  for (const forge of [
+    { root: "relative", enabledUsers: ["alice"] },
+    { root: "/srv/hitch/forge", enabledUsers: ["unknown"] },
+    { root: "/srv/hitch/forge", enabledUsers: ["alice", "alice"] },
+    { root: "/srv/hitch/forge", enabledUsers: ["alice"], subagents: true },
+  ])
+    assert.throws(() => parseConfig({ ...validConfig(), forge }), ConfigError);
+  assert.deepEqual(
+    parseConfig({ ...config, forge: { ...config.forge, enabledUsers: [] } })
+      .forge?.enabledUsers,
+    [],
+  );
+});

@@ -161,3 +161,13 @@ B1 controlled HTTP and B2 static per-user Tavily integration are implemented.
 and delivery passed. Independent final pre-commit review found no blocker.
 Generic loading, Mode A/C/D, and mandatory final-answer citations are not part
 of this phase.
+
+## Post-MVP Mode A — Forge prompt-only subset (code-accepted)
+
+`docs/mode-a-plan.md` defines the implemented service entry, operator-root
+catalog, per-session preset/profile commands and tool-policy reductions.
+Independent reviews passed after the documented semantic clarifications.
+Hitch deterministic check: 97 passed / 12 opt-in skipped; dedicated Pi RPC:
+12/12. The local Forge prerelease passed its full main-package verification.
+Mode A is not yet deployed; schema 4 requires an attended backup/migration.
+Desktop Forge, subagents, regex/history rewrite, Mode C/D remain excluded.

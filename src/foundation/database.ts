@@ -9,8 +9,8 @@ import {
   type ValidatedTopology,
 } from "./filesystem.js";
 
-const SCHEMA_VERSION = 3;
-const SCHEMA_ID = "hitch-pi-mvp-schema-3";
+const SCHEMA_VERSION = 4;
+const SCHEMA_ID = "hitch-pi-mvp-schema-4";
 const EXPECTED_TABLES = [
   "app_meta",
   "artifacts",
@@ -57,6 +57,11 @@ CREATE TABLE sessions (
   model_provider TEXT,
   model_id TEXT,
   thinking_level TEXT,
+  forge_kind TEXT CHECK (forge_kind IN ('preset', 'profile')),
+  forge_id TEXT CHECK (
+    (forge_kind IS NULL AND forge_id IS NULL) OR
+    (forge_kind IS NOT NULL AND forge_id IS NOT NULL AND length(CAST(forge_id AS BLOB)) BETWEEN 1 AND 64)
+  ),
   state TEXT NOT NULL CHECK (state IN ('active', 'stopped', 'quarantined')),
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
@@ -189,6 +194,14 @@ CREATE TABLE staged_artifacts (
   FOREIGN KEY (artifact_id, user_id) REFERENCES artifacts(id, user_id)
 ) STRICT;
 CREATE INDEX staged_artifacts_user_created ON staged_artifacts(user_id, created_at);
+`;
+
+const MIGRATE_3_TO_4 = `
+ALTER TABLE sessions ADD COLUMN forge_kind TEXT CHECK (forge_kind IN ('preset', 'profile'));
+ALTER TABLE sessions ADD COLUMN forge_id TEXT CHECK (
+  (forge_kind IS NULL AND forge_id IS NULL) OR
+  (forge_kind IS NOT NULL AND forge_id IS NOT NULL AND length(CAST(forge_id AS BLOB)) BETWEEN 1 AND 64)
+);
 `;
 
 const MIGRATE_1_TO_2 = `
@@ -352,6 +365,7 @@ function verifySchema(connection: DatabaseSync): void {
         throw new FoundationError("database table set is unknown");
       connection.exec(MIGRATE_1_TO_2);
       connection.exec(MIGRATE_2_TO_3);
+      connection.exec(MIGRATE_3_TO_4);
       connection
         .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
         .run(SCHEMA_ID, "schema_id");
@@ -370,6 +384,25 @@ function verifySchema(connection: DatabaseSync): void {
       if (meta?.value !== "hitch-pi-mvp-schema-2")
         throw new FoundationError("database schema 2 identity is unknown");
       connection.exec(MIGRATE_2_TO_3);
+      connection.exec(MIGRATE_3_TO_4);
+      connection
+        .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
+        .run(SCHEMA_ID, "schema_id");
+      connection.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+      connection.exec("COMMIT");
+    } catch (error) {
+      connection.exec("ROLLBACK");
+      throw error;
+    }
+  } else if (version === 3) {
+    connection.exec("BEGIN IMMEDIATE");
+    try {
+      const meta = connection
+        .prepare("SELECT value FROM app_meta WHERE key = ?")
+        .get("schema_id") as { value?: unknown } | undefined;
+      if (meta?.value !== "hitch-pi-mvp-schema-3")
+        throw new FoundationError("database schema 3 identity is unknown");
+      connection.exec(MIGRATE_3_TO_4);
       connection
         .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
         .run(SCHEMA_ID, "schema_id");

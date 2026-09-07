@@ -1,3 +1,4 @@
+import { reduceForgeTools } from "@zihanw/pi-forge/service";
 import {
   spawn,
   spawnSync,
@@ -42,6 +43,7 @@ import type {
   RuntimeTurn,
   ThinkingLevel,
 } from "../runtime/runtime.js";
+import type { ForgeCatalog, ForgeResolved } from "../forge/types.js";
 
 const PI_VERSION = "0.84.1";
 const PI_TREE_SHA256 =
@@ -50,9 +52,9 @@ const PI_DEPENDENCY_CLOSURE_SHA256 =
   "6d2055eaeef6823fd4b6edc062314e383fc6e233a4634a13e868a86eaebbcec4";
 const SANDBOX_ASSET_SHA256 = {
   "hitch-sandbox.ts":
-    "df777339bc6f6e985e0e77a7e125647ec52e5335e47c5658c92c867b545006fb",
+    "4e749c0bad40f0ede03a470f37228c453c16ea5a87e2c693490dee755586ab47",
   "pi-web-search.ts":
-    "b2bd930939e05a6a292b66efe6960c456bd47b8cdc30bf30a33c531cc55a4f70",
+    "0a503a373523eb1737417865f9e213c8db838b0a0eb5e87b197535cfccef43c7",
   "web-search/tavily.js":
     "3fd8c7caeb7226c9fa05e46dfdd4b79c30258ce2844efa932e284e89a9a9d3da",
   "egress/client.js":
@@ -110,6 +112,7 @@ export interface NativePiRuntimeOptions {
     readonly apiKey: string;
     readonly enabledUsers: readonly string[];
   };
+  readonly forge?: ForgeCatalog;
 }
 
 export interface ControllerContext {
@@ -122,6 +125,11 @@ export interface ControllerContext {
   readonly turnHandle: string;
   readonly userId: string;
   readonly webSearchEnabled: boolean;
+  readonly activeTools?: readonly string[];
+  readonly forgePrompt?: {
+    readonly mode: "replace" | "append" | "prepend";
+    readonly systemPrompt: string;
+  };
 }
 
 interface ClosedProcess {
@@ -767,6 +775,7 @@ export async function waitForAttestation(
   const expectedTools = context.webSearchEnabled
     ? [...EXPECTED_TOOLS, "web_search"].sort()
     : [...EXPECTED_TOOLS].sort();
+  const expectedActiveTools = context.activeTools ?? expectedTools;
   const extensionPath = join(assetRoot(), "hitch-sandbox.ts");
   const webExtensionPath = join(assetRoot(), "pi-web-search.ts");
   const deadline = Date.now() + 10_000;
@@ -809,7 +818,7 @@ export async function waitForAttestation(
             JSON.stringify(item.exactTools) !== JSON.stringify(expectedTools) ||
             JSON.stringify(item.allTools) !== JSON.stringify(expectedTools) ||
             JSON.stringify(item.activeTools) !==
-              JSON.stringify(expectedTools) ||
+              JSON.stringify(expectedActiveTools) ||
             !Array.isArray(item.sourcePaths) ||
             item.sourcePaths.length !== expectedTools.length ||
             !/^[a-f0-9]{64}$/u.test(String(item.schemaDigest))
@@ -893,6 +902,7 @@ function syncTranscript(path: string, sessionDirectory: string): string {
 export class NativePiRuntime implements AgentRuntime {
   readonly models: readonly RuntimeModel[];
   readonly catalogDigest: string;
+  readonly forge?: ForgeCatalog;
   readonly #runtimeRoot: string;
   readonly #sessionsRoot: string;
   readonly #profiles: ReadonlyMap<string, string>;
@@ -915,6 +925,9 @@ export class NativePiRuntime implements AgentRuntime {
   ) {
     this.models = models;
     this.catalogDigest = stableDigest(models);
+    if (options.forge !== undefined) {
+      this.forge = options.forge;
+    }
     this.#runtimeRoot = join(options.dataRoot, "pi-runtime");
     this.#sessionsRoot = join(options.dataRoot, "pi-sessions");
     this.#profiles = profiles;
@@ -1020,6 +1033,11 @@ export class NativePiRuntime implements AgentRuntime {
     workspace: string,
     userId: string,
     webSearchEnabled: boolean,
+    activeTools?: readonly string[],
+    forgePrompt?: {
+      readonly mode: "replace" | "append" | "prepend";
+      readonly systemPrompt: string;
+    },
   ): ControllerContext {
     const root = join(
       this.#runtimeRoot,
@@ -1041,6 +1059,8 @@ export class NativePiRuntime implements AgentRuntime {
       turnHandle: randomBytes(16).toString("hex"),
       userId,
       webSearchEnabled,
+      ...(activeTools === undefined ? {} : { activeTools }),
+      ...(forgePrompt === undefined ? {} : { forgePrompt }),
     };
   }
 
@@ -1063,6 +1083,10 @@ export class NativePiRuntime implements AgentRuntime {
     const webSearchExtension = join(this.#assets, "pi-web-search.ts");
     const worker = join(this.#assets, "sandbox-worker.mjs");
     const helper = join(this.#assets, "secure-bwrap-helper");
+    const baseline = context.webSearchEnabled
+      ? [...EXPECTED_TOOLS, "web_search"].sort()
+      : [...EXPECTED_TOOLS].sort();
+    const activeTools = context.activeTools ?? baseline;
     const environment: NodeJS.ProcessEnv = {
       PATH: "/usr/bin:/bin",
       HOME: context.root,
@@ -1087,6 +1111,15 @@ export class NativePiRuntime implements AgentRuntime {
       HITCH_P0_HELPER_SHA256: SANDBOX_ASSET_SHA256["secure-bwrap-helper"],
       HITCH_P0_EXTENSION_SHA256: SANDBOX_ASSET_SHA256["hitch-sandbox.ts"],
       HITCH_P0_BACKEND_SHA256: SANDBOX_ASSET_SHA256["sandbox-backend.mjs"],
+      HITCH_ACTIVE_TOOLS: JSON.stringify(activeTools),
+      ...(context.forgePrompt !== undefined
+        ? {
+            HITCH_FORGE_PROMPT: JSON.stringify({
+              mode: context.forgePrompt.mode,
+              systemPrompt: context.forgePrompt.systemPrompt,
+            }),
+          }
+        : {}),
       ...(context.webSearchEnabled
         ? {
             HITCH_WEB_SEARCH_ENABLED: "1",
@@ -1270,6 +1303,69 @@ export class NativePiRuntime implements AgentRuntime {
       return { outcome: "unknown", text: "", sessionReusable: false };
     }
     const userId = safeSegment(turn.userId, "runtime user id");
+    const selectedModel =
+      turn.modelProvider === undefined && turn.modelId === undefined
+        ? this.models[0]
+        : this.models.find(
+            (model) =>
+              model.provider === turn.modelProvider &&
+              model.id === turn.modelId,
+          );
+    let resolvedForge: ForgeResolved | undefined;
+    if (turn.forgeSelection !== undefined) {
+      if (this.forge === undefined || !this.forge.isEnabled(userId)) {
+        return { outcome: "failed", text: "", sessionReusable: true };
+      }
+      try {
+        resolvedForge = this.forge.resolve(turn.forgeSelection);
+      } catch {
+        return { outcome: "failed", text: "", sessionReusable: true };
+      }
+      if (
+        (resolvedForge.mode !== "replace" &&
+          resolvedForge.mode !== "append" &&
+          resolvedForge.mode !== "prepend") ||
+        typeof resolvedForge.systemPrompt !== "string" ||
+        Buffer.byteLength(resolvedForge.systemPrompt, "utf8") > 32 * 1024
+      ) {
+        return { outcome: "failed", text: "", sessionReusable: true };
+      }
+    }
+    const isWebEnabled = this.#webSearchUsers.has(userId);
+    const baselineTools = isWebEnabled
+      ? [...EXPECTED_TOOLS, "web_search"].sort()
+      : [...EXPECTED_TOOLS].sort();
+    let activeTools: readonly string[] = baselineTools;
+    if (resolvedForge !== undefined && turn.forgeSelection !== undefined) {
+      try {
+        activeTools = reduceForgeTools(baselineTools, resolvedForge.tools);
+        resolvedForge = this.forge!.resolve(turn.forgeSelection, {
+          now: new Date(),
+          activeTools,
+          ...(selectedModel === undefined
+            ? {}
+            : {
+                model: {
+                  provider: selectedModel.provider,
+                  id: selectedModel.id,
+                },
+              }),
+        });
+        if (
+          Buffer.byteLength(
+            JSON.stringify({
+              mode: resolvedForge.mode,
+              systemPrompt: resolvedForge.systemPrompt,
+            }),
+            "utf8",
+          ) >
+          64 * 1024
+        )
+          return { outcome: "failed", text: "", sessionReusable: true };
+      } catch {
+        return { outcome: "failed", text: "", sessionReusable: true };
+      }
+    }
     const sessionDirectory = join(this.#sessionsRoot, userId);
     privateDirectory(sessionDirectory);
     const session =
@@ -1284,11 +1380,20 @@ export class NativePiRuntime implements AgentRuntime {
             path: syncTranscript(turn.transcriptPath, sessionDirectory),
             directory: sessionDirectory,
           } as const);
+    const forgePrompt =
+      resolvedForge === undefined
+        ? undefined
+        : {
+            mode: resolvedForge.mode,
+            systemPrompt: resolvedForge.systemPrompt,
+          };
     const context = this.#context(
       safeSegment(turn.turnId, "runtime Turn id"),
       turn.workspace,
       userId,
-      this.#webSearchUsers.has(userId),
+      isWebEnabled,
+      activeTools,
+      forgePrompt,
     );
     const inputArtifacts = turn.artifacts ?? [];
     if (
@@ -1302,14 +1407,6 @@ export class NativePiRuntime implements AgentRuntime {
     }
     if (turn.publishPath !== undefined)
       return await this.#publishOnly(turn, context, signal);
-    const selectedModel =
-      turn.modelProvider === undefined && turn.modelId === undefined
-        ? this.models[0]
-        : this.models.find(
-            (model) =>
-              model.provider === turn.modelProvider &&
-              model.id === turn.modelId,
-          );
     const nativeImages =
       selectedModel !== undefined && selectedModel.input.includes("image");
     const images: Array<{

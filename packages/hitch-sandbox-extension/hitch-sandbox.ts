@@ -60,6 +60,77 @@ if (!/^[a-f0-9]{16}$/.test(process.env.HITCH_P0_UNIT_PREFIX!)) {
 	throw new Error("Hitch sandbox unit prefix is invalid");
 }
 
+function parseActiveTools(raw: string | undefined, baseline: readonly string[]): readonly string[] {
+	if (raw === undefined) return baseline.slice().sort();
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch {
+		throw new Error("Hitch active tools configuration is invalid JSON");
+	}
+	if (!Array.isArray(parsed)) {
+		throw new Error("Hitch active tools configuration is not an array");
+	}
+	const baselineSet = new Set(baseline);
+	for (const tool of parsed) {
+		if (typeof tool !== "string" || !baselineSet.has(tool)) {
+			throw new Error("Hitch active tools contains unknown tool");
+		}
+	}
+	const unique = [...new Set(parsed as string[])];
+	if (unique.length !== parsed.length) {
+		throw new Error("Hitch active tools contains duplicates");
+	}
+	const sorted = [...unique].sort();
+	if (JSON.stringify(parsed) !== JSON.stringify(sorted)) {
+		throw new Error("Hitch active tools is not strictly sorted");
+	}
+	return sorted;
+}
+
+const activeSubset = parseActiveTools(process.env.HITCH_ACTIVE_TOOLS, expectedTools);
+const activeSubsetSet = new Set(activeSubset);
+
+interface ForgePromptConfig {
+	readonly mode: "replace" | "append" | "prepend";
+	readonly systemPrompt: string;
+}
+
+function parseForgePrompt(raw: string | undefined): ForgePromptConfig | undefined {
+	if (raw === undefined) return undefined;
+	if (Buffer.byteLength(raw, "utf8") > 64 * 1024) {
+		throw new Error("Hitch Forge prompt environment is too large");
+	}
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch {
+		throw new Error("Hitch Forge prompt is invalid JSON");
+	}
+	if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+		throw new Error("Hitch Forge prompt is not an object");
+	}
+	const keys = Object.keys(parsed);
+	if (keys.length !== 2 || !("mode" in parsed) || !("systemPrompt" in parsed)) {
+		throw new Error("Hitch Forge prompt has invalid structure");
+	}
+	const record = parsed as Record<string, unknown>;
+	const mode = record.mode;
+	const systemPrompt = record.systemPrompt;
+	if (mode !== "replace" && mode !== "append" && mode !== "prepend") {
+		throw new Error("Hitch Forge prompt mode is invalid");
+	}
+	if (typeof systemPrompt !== "string") {
+		throw new Error("Hitch Forge prompt systemPrompt is not a string");
+	}
+	if (Buffer.byteLength(systemPrompt, "utf8") > 32 * 1024) {
+		throw new Error("Hitch Forge prompt exceeds 32KiB");
+	}
+	return { mode, systemPrompt };
+}
+
+const forgePrompt = parseForgePrompt(process.env.HITCH_FORGE_PROMPT);
+
 function sha256(path: string): string {
 	return createHash("sha256").update(fs.readFileSync(path)).digest("hex");
 }
@@ -165,10 +236,11 @@ export default function (pi: ExtensionAPI): void {
 			parameters: tool.parameters,
 		})).sort((left, right) => left.name.localeCompare(right.name));
 		const active = pi.getActiveTools().slice().sort();
-		const expected = expectedTools.slice().sort();
+		const expectedAll = expectedTools.slice().sort();
+		const expectedActive = activeSubset.slice().sort();
 		if (
-			JSON.stringify(all.map((tool) => tool.name)) !== JSON.stringify(expected) ||
-			JSON.stringify(active) !== JSON.stringify(expected) ||
+			JSON.stringify(all.map((tool) => tool.name)) !== JSON.stringify(expectedAll) ||
+			JSON.stringify(active) !== JSON.stringify(expectedActive) ||
 			all.some((tool) => tool.name === "web_search"
 				? tool.path !== webSearchPath
 				: tool.path !== selfPath)
@@ -183,6 +255,9 @@ export default function (pi: ExtensionAPI): void {
 
 	async function execute(name: keyof typeof schemas, input: Record<string, unknown>, signal?: AbortSignal) {
 		attest();
+		if (!activeSubsetSet.has(name)) {
+			throw new Error(`Tool '${name}' is disabled`);
+		}
 		const requestInput = name === "bash"
 			? { ...input, timeoutMs: Math.min(Number(input.timeout ?? 5) * 1000, 5000) }
 			: name === "hitch_publish"
@@ -218,8 +293,27 @@ export default function (pi: ExtensionAPI): void {
 		});
 	}
 
+	if (forgePrompt !== undefined) {
+		pi.on("before_agent_start", async (event) => {
+			attest();
+			const base = typeof event.systemPrompt === "string" ? event.systemPrompt : "";
+			// Forge's compiler preserves the base for an empty rendered stack,
+			// including model-only profiles. This is valid input, not load failure.
+			if (forgePrompt.systemPrompt.trim().length === 0) return { systemPrompt: base };
+			let systemPrompt: string;
+			if (forgePrompt.mode === "replace") {
+				systemPrompt = forgePrompt.systemPrompt;
+			} else if (forgePrompt.mode === "prepend") {
+				systemPrompt = base.length > 0 ? `${forgePrompt.systemPrompt}\n\n${base}` : forgePrompt.systemPrompt;
+			} else {
+				systemPrompt = base.length > 0 ? `${base}\n\n${forgePrompt.systemPrompt}` : forgePrompt.systemPrompt;
+			}
+			return { systemPrompt };
+		});
+	}
+
 	pi.on("session_start", async () => {
-		pi.setActiveTools(expectedTools);
+		pi.setActiveTools([...activeSubset]);
 		const attestation = attest();
 		const probe = await executeSandboxRequest(
 			backendConfiguration,
@@ -255,6 +349,9 @@ export default function (pi: ExtensionAPI): void {
 			async exec(command, _cwd, options) {
 				try {
 					attest();
+					if (!activeSubsetSet.has("bash")) {
+						throw new Error("bash is disabled");
+					}
 					const response = await executeSandboxRequest(
 						backendConfiguration,
 						{ operation: "bash", input: { command, timeoutMs: Math.min(options.timeout ?? 5000, 5000) } },

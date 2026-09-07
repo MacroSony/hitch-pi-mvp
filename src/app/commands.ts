@@ -11,6 +11,18 @@ export type Command =
   | { readonly kind: "models"; readonly filter?: string }
   | { readonly kind: "model"; readonly selector: string }
   | { readonly kind: "thinking"; readonly level: string }
+  | { readonly kind: "preset"; readonly action: "list" | "status" | "clear" }
+  | {
+      readonly kind: "preset";
+      readonly action: "use" | "preview";
+      readonly id: string;
+    }
+  | { readonly kind: "profile"; readonly action: "list" | "status" | "clear" }
+  | {
+      readonly kind: "profile";
+      readonly action: "use" | "preview";
+      readonly id: string;
+    }
   | { readonly kind: "send"; readonly path: string }
   | { readonly kind: "help" }
   | { readonly kind: "unknown"; readonly name: string };
@@ -22,6 +34,19 @@ function boundedArgument(value: string, label: string): string {
   if (
     Buffer.byteLength(trimmed, "utf8") > 64 ||
     /[\u0000-\u001f\u007f]/u.test(trimmed)
+  ) {
+    throw new AppError("rejected", `${label} is invalid`);
+  }
+  return trimmed;
+}
+
+function boundedForgeId(value: string, label: string): string {
+  const trimmed = value.trim();
+  if (trimmed.length === 0)
+    throw new AppError("rejected", `${label} is required`);
+  if (
+    Buffer.byteLength(trimmed, "utf8") > 64 ||
+    /[\u0000-\u001f\u007f/\\]/u.test(trimmed)
   ) {
     throw new AppError("rejected", `${label} is invalid`);
   }
@@ -86,6 +111,42 @@ export function parseCommand(text: string): Command | null {
         kind: "thinking",
         level: boundedArgument(argument, "thinking level").toLowerCase(),
       };
+    case "preset":
+    case "profile": {
+      const trimmedArg = argument.trim();
+      if (trimmedArg.length === 0) {
+        return { kind: name, action: "status" };
+      }
+      const parts = trimmedArg.split(/\s+/u);
+      const action = parts[0]?.toLowerCase();
+      if (action === "list" || action === "status" || action === "clear") {
+        if (parts.length > 1) {
+          throw new AppError(
+            "rejected",
+            `unexpected argument for !${name} ${action}`,
+          );
+        }
+        return { kind: name, action };
+      }
+      if (action === "use" || action === "preview") {
+        if (
+          parts.length < 2 ||
+          parts[1] === undefined ||
+          parts[1].length === 0
+        ) {
+          throw new AppError("rejected", `${name} id is required`);
+        }
+        if (parts.length > 2) {
+          throw new AppError("rejected", `${name} id is invalid`);
+        }
+        return {
+          kind: name,
+          action,
+          id: boundedForgeId(parts[1], `${name} id`),
+        };
+      }
+      throw new AppError("rejected", `unknown ${name} subcommand ${action}`);
+    }
     case "send":
       return { kind: "send", path: boundedPath(argument) };
     case "help":

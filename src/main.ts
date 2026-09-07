@@ -13,6 +13,7 @@ import { WeChatIlinkClient, WeChatWorker } from "./channels/wechat.js";
 import { WeChatStateStore } from "./channels/wechat-state.js";
 import { loadConfig, readRequiredSecret } from "./config/config.js";
 import { bootstrapFoundation } from "./foundation/bootstrap.js";
+import { createForgeCatalog } from "./forge/catalog.js";
 import { NativePiRuntime } from "./pi/native-runtime.js";
 import { MediaStore } from "./media/media-store.js";
 import { FakeAgentRuntime, type AgentRuntime } from "./runtime/runtime.js";
@@ -67,6 +68,18 @@ async function main(): Promise<void> {
   const config = loadConfig(cli.configPath);
   const foundation = bootstrapFoundation(config);
   try {
+    const forge =
+      config.forge !== undefined && config.forge.enabledUsers.length > 0
+        ? createForgeCatalog({
+            ...config.forge,
+            forbiddenRoots: [
+              config.dataRoot,
+              config.piProfileDir,
+              ...config.users.map((user) => user.workspace),
+              ...config.wechatAccounts.map((account) => account.stateDir),
+            ],
+          })
+        : undefined;
     const endpointCount = foundation.topology.users.reduce(
       (total, user) => total + user.endpoints.length,
       0,
@@ -131,13 +144,14 @@ async function main(): Promise<void> {
         : undefined;
     const runtime: AgentRuntime =
       cli.mode === "fake-channels"
-        ? new FakeAgentRuntime()
+        ? new FakeAgentRuntime(undefined, [], forge)
         : await NativePiRuntime.create({
             dataRoot: foundation.topology.dataRoot.path,
             piProfileDir: foundation.topology.piProfileDir.path,
             userIds: foundation.topology.users.map((user) => user.id),
             maxConcurrentTurns: config.maxConcurrentTurns,
             mediaStore: media,
+            ...(forge === undefined ? {} : { forge }),
             ...(nativeWebSearch === undefined
               ? {}
               : { webSearch: nativeWebSearch }),

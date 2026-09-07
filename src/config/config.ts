@@ -45,6 +45,11 @@ export interface WebSearchConfig {
   readonly enabledUsers: readonly string[];
 }
 
+export interface ForgeConfig {
+  readonly root: string;
+  readonly enabledUsers: readonly string[];
+}
+
 export interface AppConfig {
   readonly schemaVersion: 1;
   readonly dataRoot: string;
@@ -56,6 +61,7 @@ export interface AppConfig {
   readonly wechatAccounts: readonly WeChatAccountConfig[];
   readonly users: readonly UserConfig[];
   readonly webSearch?: WebSearchConfig;
+  readonly forge?: ForgeConfig;
 }
 
 export class ConfigError extends Error {
@@ -229,7 +235,7 @@ export function parseConfig(value: unknown): AppConfig {
       "wechatAccounts",
       "users",
     ],
-    ["mediaMode", "maxConcurrentTurns", "webSearch"],
+    ["mediaMode", "maxConcurrentTurns", "webSearch", "forge"],
     "config",
   );
   if (input.schemaVersion !== 1) fail("config.schemaVersion", "expected 1");
@@ -371,6 +377,26 @@ export function parseConfig(value: unknown): AppConfig {
     };
   }
 
+  let forge: ForgeConfig | undefined;
+  if (input.forge !== undefined) {
+    const resource = record(input.forge, "config.forge");
+    exactKeys(resource, ["root", "enabledUsers"], [], "config.forge");
+    const enabledUsers = arrayValue(
+      resource.enabledUsers,
+      "config.forge.enabledUsers",
+    ).map((item, index) =>
+      identifier(item, `config.forge.enabledUsers[${index}]`),
+    );
+    unique(enabledUsers, "config.forge.enabledUsers");
+    const known = new Set(users.map((user) => user.id));
+    if (enabledUsers.some((user) => !known.has(user)))
+      fail("config.forge.enabledUsers", "references an unknown user");
+    forge = {
+      root: absolutePath(resource.root, "config.forge.root"),
+      enabledUsers,
+    };
+  }
+
   return {
     schemaVersion: 1,
     dataRoot: absolutePath(input.dataRoot, "config.dataRoot"),
@@ -382,6 +408,7 @@ export function parseConfig(value: unknown): AppConfig {
     wechatAccounts,
     users,
     ...(webSearch === undefined ? {} : { webSearch }),
+    ...(forge === undefined ? {} : { forge }),
   };
 }
 

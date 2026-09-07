@@ -432,3 +432,67 @@ sudo loginctl disable-linger hitch
 The final recursive removal is intentionally explicit and irreversible. Verify
 both paths and the offline backup before running it. Delete the `hitch` account
 only if it is dedicated to this service and its home contains nothing else.
+
+
+## Forge Mode A (prompt-only subset)
+
+Mode A reads an operator-prepared root, **not** the interactive global Forge
+home. It imports the pinned `@zihanw/pi-forge/service` entry, never Forge's root
+Pi extension. No subagents, editor, provider login, plugins, or project discovery
+are enabled. The current bundled service is a local prerelease; see
+`../vendor/README.md` for reproducible source provenance.
+
+Optional configuration (absent or an empty user list disables the catalog):
+
+```json
+"forge": {
+  "root": "/srv/hitch/forge-resources",
+  "enabledUsers": ["alice"]
+}
+```
+
+Copy the examples under `examples/forge/` to that operator-owned root, preserving
+`prompt-stacks/*.json` and `agent-profiles/*.json`. Directories/files must be
+owned by the service operator and not writable by group/others; do not symlink
+or hardlink resources. The canonical root must be separate from all workspaces,
+Hitch data, Pi auth profiles, and channel-state directories. Resources are read
+once at startup: restart to publish edits. Never put credentials in prompts.
+
+- `!preset list`, `!preset use research`, `!preset preview research`
+- `!profile list`, `!profile use research`, `!profile preview research`
+- `!preset status`, `!profile status` (also the no-argument defaults)
+- `!preset clear` / `!profile clear` clears the selection only if its kind matches;
+  clearing the other kind is a no-op. There is one shared Forge selection.
+
+A preset and a profile are alternative selections, not two independently
+layered states. Selection belongs to the Hitch owner/session and survives
+controller and service restarts. Changes are refused while that session has
+queued or active work. Applying a profile validates and sets its model/thinking
+once; later `!model` / `!thinking` remains authoritative. Clearing Forge does
+not reset model selection. An omitted model in the supplied sample profile
+retains the current model (or Hitch's existing first-catalog fallback).
+
+Supported: system blocks, static parameters, bounded supplied-data slots,
+replace/append/prepend prompts, and Forge allow/deny tool globs. `allow: []`
+keeps Forge's original unrestricted-within-baseline semantics; use `deny: ["*"]`
+for no tools. Policies only shrink the enabled Hitch 8/9-tool baseline. The
+sample research preset cannot activate web search if operator configuration
+has not enabled it. An unmodified chat-history slot is accepted as a marker;
+Pi retains natural history. Valid empty rendering (including a model-only
+profile) explicitly preserves Pi's base system prompt, matching the Forge
+compiler; it does not restore disabled tools. Malformed configuration still
+fails initialization. Regex/history filters, synthetic user/assistant
+messages, skills/imports, custom macros/slots, and project-scoped references
+fail explicitly. This is not full desktop Forge compatibility.
+
+Limits: 64 KiB/resource, 128 resources combined, 1 MiB/catalog, 32 KiB compiled
+system content and 64 KiB serialized controller prompt configuration. Preview
+uses current time but does not represent a running model/tool snapshot; actual
+Turns supply their effective model/tools/time.
+
+**Database upgrade:** this version migrates schema 3 to 4 to retain Forge
+selection. Back up the database while stopped before deploying. A code-only
+rollback to B2 cannot read schema 4; a rollback needs the pre-upgrade database,
+which loses any newer messages unless separately reconciled. No live Mode A
+deployment or migration is implied by code acceptance. Dogfood remains on B2
+until an attended switch is explicitly arranged.

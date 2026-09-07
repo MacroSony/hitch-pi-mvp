@@ -4,6 +4,7 @@ import { resolve, sep } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 
 import type { Clock, FoundationDatabase } from "../foundation/database.js";
+import type { ForgeCatalog, ForgeResolved } from "../forge/types.js";
 import type {
   RuntimeModel,
   RuntimeArtifact,
@@ -566,11 +567,27 @@ export class HitchStore {
       );
   }
 
+  #rejectBusySessionForForge(userId: string, sessionId: string): void {
+    const busy = this.#database
+      .prepare(
+        `SELECT 1 FROM turns
+         WHERE user_id = ? AND session_id = ? AND state IN ('queued', 'starting', 'running')
+         LIMIT 1`,
+      )
+      .get(userId, sessionId);
+    if (busy !== undefined)
+      throw new AppError(
+        "busy",
+        "wait for active and queued Turns before changing Forge selection",
+      );
+  }
+
   public executeCommand(
     identity: MessageIdentity,
     command: Command,
     sourceText: string,
     models: readonly RuntimeModel[] = [],
+    forge?: ForgeCatalog,
   ): CommandResult {
     return transaction(this.#database, () => {
       const existing = this.#existingMessage(identity);
@@ -830,6 +847,294 @@ export class HitchStore {
           response = `Selected thinking level ${command.level}.`;
           break;
         }
+        case "preset":
+        case "profile": {
+          if (
+            forge === undefined ||
+            !forge.isEnabled(identity.endpoint.userId)
+          ) {
+            throw new AppError(
+              "rejected",
+              "Forge is not enabled for this user",
+            );
+          }
+
+          if (command.action === "list") {
+            const items = forge.list(command.kind);
+            if (items.length === 0) {
+              response = `No ${command.kind}s available.`;
+            } else {
+              response = items
+                .slice(0, 128)
+                .map((item) =>
+                  item.name.length > 0 && item.name !== item.id
+                    ? `${item.id} - ${item.name}`
+                    : item.id,
+                )
+                .join("\n");
+            }
+            break;
+          }
+
+          if (command.action === "preview") {
+            let resolved: ForgeResolved;
+            try {
+              resolved = forge.resolve({
+                kind: command.kind,
+                id: command.id,
+              });
+            } catch (error) {
+              if (error instanceof AppError) throw error;
+              throw new AppError(
+                "rejected",
+                `${command.kind} '${command.id}' not found or invalid`,
+              );
+            }
+            const lines: string[] = [
+              `${command.kind === "preset" ? "Preset" : "Profile"}: ${resolved.name} (${resolved.selection.id})`,
+              `Mode: ${resolved.mode}`,
+            ];
+            if (resolved.model !== undefined) {
+              lines.push(
+                `Model: ${resolved.model.provider}/${resolved.model.id}`,
+              );
+            }
+            if (resolved.thinkingLevel !== undefined) {
+              lines.push(`Thinking: ${resolved.thinkingLevel}`);
+            }
+            if (
+              resolved.tools?.allow !== undefined &&
+              resolved.tools.allow.length > 0
+            ) {
+              lines.push(`Tools allow: ${resolved.tools.allow.join(", ")}`);
+            }
+            if (
+              resolved.tools?.deny !== undefined &&
+              resolved.tools.deny.length > 0
+            ) {
+              lines.push(`Tools deny: ${resolved.tools.deny.join(", ")}`);
+            }
+            lines.push("--- System Prompt ---");
+            lines.push(resolved.systemPrompt);
+            response = lines.join("\n");
+            break;
+          }
+
+          if (command.action === "status") {
+            const selection = this.#database
+              .prepare(
+                "SELECT forge_kind, forge_id FROM sessions WHERE id = ? AND user_id = ?",
+              )
+              .get(session.id, identity.endpoint.userId) as
+              | {
+                  forge_kind: string | null;
+                  forge_id: string | null;
+                }
+              | undefined;
+            if (
+              selection?.forge_kind === command.kind &&
+              selection.forge_id !== null
+            ) {
+              response = `Selected ${command.kind}: ${selection.forge_id}.`;
+            } else {
+              response = `No ${command.kind} selected.`;
+            }
+            break;
+          }
+
+          if (command.action === "clear") {
+            this.#rejectBusySessionForForge(
+              identity.endpoint.userId,
+              session.id,
+            );
+            const selected = this.#database
+              .prepare(
+                "SELECT forge_kind FROM sessions WHERE id = ? AND user_id = ?",
+              )
+              .get(session.id, identity.endpoint.userId) as {
+              forge_kind: string | null;
+            };
+            if (selected.forge_kind !== command.kind) {
+              response = `No ${command.kind} selected.`;
+              break;
+            }
+            const changed = this.#database
+              .prepare(
+                `UPDATE sessions
+                 SET forge_kind = NULL, forge_id = NULL, updated_at = ?
+                 WHERE id = ? AND user_id = ? AND state = 'active'`,
+              )
+              .run(now, session.id, identity.endpoint.userId);
+            if (changed.changes !== 1n) {
+              throw new AppError(
+                "session-quarantined",
+                "selected session is not active; use !recover or !new",
+              );
+            }
+            response = `Cleared ${command.kind} selection.`;
+            break;
+          }
+
+          if (command.action === "use") {
+            this.#rejectBusySessionForForge(
+              identity.endpoint.userId,
+              session.id,
+            );
+            let resolved: ForgeResolved;
+            try {
+              resolved = forge.resolve({
+                kind: command.kind,
+                id: command.id,
+              });
+            } catch (error) {
+              if (error instanceof AppError) throw error;
+              throw new AppError(
+                "rejected",
+                `${command.kind} '${command.id}' not found or invalid`,
+              );
+            }
+
+            if (command.kind === "preset") {
+              const changed = this.#database
+                .prepare(
+                  `UPDATE sessions
+                   SET forge_kind = 'preset', forge_id = ?, updated_at = ?
+                   WHERE id = ? AND user_id = ? AND state = 'active'`,
+                )
+                .run(
+                  resolved.selection.id,
+                  now,
+                  session.id,
+                  identity.endpoint.userId,
+                );
+              if (changed.changes !== 1n) {
+                throw new AppError(
+                  "session-quarantined",
+                  "selected session is not active; use !recover or !new",
+                );
+              }
+              response = `Selected preset ${resolved.selection.id}.`;
+              break;
+            }
+
+            let modelProvider: string | null = null;
+            let modelId: string | null = null;
+            let thinkingLevel: string | null = null;
+
+            if (resolved.model !== undefined) {
+              const targetModel = models.find(
+                (candidate) =>
+                  candidate.provider === resolved.model?.provider &&
+                  candidate.id === resolved.model?.id,
+              );
+              if (targetModel === undefined) {
+                throw new AppError(
+                  "model-unavailable",
+                  "profile model is not in the current Pi catalog",
+                );
+              }
+              modelProvider = targetModel.provider;
+              modelId = targetModel.id;
+
+              if (resolved.thinkingLevel !== undefined) {
+                if (
+                  !targetModel.thinkingLevels.includes(resolved.thinkingLevel)
+                ) {
+                  throw new AppError(
+                    "model-unavailable",
+                    "profile thinking level is not supported by the model",
+                  );
+                }
+                thinkingLevel = resolved.thinkingLevel;
+              } else {
+                thinkingLevel = targetModel.thinkingLevels[0] ?? "off";
+              }
+            } else {
+              const current = this.#database
+                .prepare(
+                  "SELECT model_provider, model_id, thinking_level FROM sessions WHERE id = ? AND user_id = ? AND state = 'active'",
+                )
+                .get(session.id, identity.endpoint.userId) as
+                | {
+                    model_provider: string | null;
+                    model_id: string | null;
+                    thinking_level: string | null;
+                  }
+                | undefined;
+
+              if (
+                current !== undefined &&
+                current.model_provider !== null &&
+                current.model_id !== null
+              ) {
+                const currentModel = models.find(
+                  (candidate) =>
+                    candidate.provider === current.model_provider &&
+                    candidate.id === current.model_id,
+                );
+                if (currentModel === undefined && models.length > 0) {
+                  throw new AppError(
+                    "model-unavailable",
+                    "current session model is not in the Pi catalog",
+                  );
+                }
+                modelProvider = current.model_provider;
+                modelId = current.model_id;
+                if (resolved.thinkingLevel !== undefined) {
+                  if (
+                    currentModel !== undefined &&
+                    !currentModel.thinkingLevels.includes(
+                      resolved.thinkingLevel,
+                    )
+                  ) {
+                    throw new AppError(
+                      "model-unavailable",
+                      "profile thinking level is not supported by the current model",
+                    );
+                  }
+                  thinkingLevel = resolved.thinkingLevel;
+                } else {
+                  thinkingLevel = current.thinking_level;
+                }
+              } else {
+                if (resolved.thinkingLevel !== undefined) {
+                  throw new AppError(
+                    "model-unavailable",
+                    "select an available model before setting thinking",
+                  );
+                }
+                modelProvider = null;
+                modelId = null;
+                thinkingLevel = null;
+              }
+            }
+
+            const changed = this.#database
+              .prepare(
+                `UPDATE sessions
+                 SET forge_kind = 'profile', forge_id = ?, model_provider = ?, model_id = ?, thinking_level = ?, updated_at = ?
+                 WHERE id = ? AND user_id = ? AND state = 'active'`,
+              )
+              .run(
+                resolved.selection.id,
+                modelProvider,
+                modelId,
+                thinkingLevel,
+                now,
+                session.id,
+                identity.endpoint.userId,
+              );
+            if (changed.changes !== 1n) {
+              throw new AppError(
+                "session-quarantined",
+                "selected session is not active; use !recover or !new",
+              );
+            }
+            response = `Selected profile ${resolved.selection.id}.`;
+            break;
+          }
+          break;
+        }
         case "send": {
           if (session.state !== "active")
             throw new AppError(
@@ -920,6 +1225,8 @@ export class HitchStore {
             "!models [filter] - list available models",
             "!model <provider>/<id> - select a model",
             "!thinking <level> - select a thinking level",
+            "!preset [list|use <id>|preview <id>|status|clear] - manage preset prompt stacks",
+            "!profile [list|use <id>|preview <id>|status|clear] - manage persona profiles",
             "!send <relative-path> - publish a workspace file",
             "!help - show this list",
           ].join("\n");
@@ -980,7 +1287,8 @@ export class HitchStore {
           `SELECT t.id, t.user_id, t.session_id, t.endpoint_id, t.prompt_text,
                   t.operation_kind, t.publish_path,
                   u.workspace_path, s.pi_session_id, s.transcript_path,
-                  s.model_provider, s.model_id, s.thinking_level
+                  s.model_provider, s.model_id, s.thinking_level,
+                  s.forge_kind, s.forge_id
            FROM turns t
            JOIN sessions s ON s.id = t.session_id AND s.user_id = t.user_id
            JOIN users u ON u.id = t.user_id
@@ -1002,6 +1310,8 @@ export class HitchStore {
             model_provider: string | null;
             model_id: string | null;
             thinking_level: ThinkingLevel | null;
+            forge_kind: "preset" | "profile" | null;
+            forge_id: string | null;
           }
         | undefined;
       if (row === undefined) return null;
@@ -1028,6 +1338,13 @@ export class HitchStore {
         )
         .run(this.clock.now(), row.id, userId);
       if (changed.changes !== 1n) return null;
+      const forgeSelection =
+        row.forge_kind !== null && row.forge_id !== null
+          ? {
+              kind: row.forge_kind,
+              id: row.forge_id,
+            }
+          : undefined;
       return {
         turnId: row.id,
         userId: row.user_id,
@@ -1046,6 +1363,7 @@ export class HitchStore {
         ...(row.thinking_level === null
           ? {}
           : { thinkingLevel: row.thinking_level }),
+        ...(forgeSelection === undefined ? {} : { forgeSelection }),
         ...(artifacts.length === 0 ? {} : { artifacts }),
         ...(row.operation_kind === "publish" && row.publish_path !== null
           ? { publishPath: row.publish_path }

@@ -26,6 +26,7 @@
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "0.84.1",
+    "@zihanw/pi-forge": "file:vendor/zihanw-pi-forge-0.5.3-hitch.1.tgz",
     "undici": "8.9.0",
     "wechat-ilink-client": "0.1.0"
   }

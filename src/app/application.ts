@@ -305,6 +305,7 @@ export class HitchApplication {
       command,
       text,
       this.runtime.models ?? [],
+      this.runtime.forge,
     );
     if (result.abortTurnId !== null)
       this.#controllers.get(result.abortTurnId)?.abort();

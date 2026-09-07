@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "type": "pi-forge.agent-profile",
+  "id": "research",
+  "name": "Research profile",
+  "promptStack": "global:research",
+  "thinkingLevel": "off"
+}

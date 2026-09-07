@@ -1,3 +1,5 @@
+import type { ForgeCatalog, ForgeSelection } from "../forge/types.js";
+
 export interface RuntimeTurn {
   readonly turnId: string;
   readonly userId: string;
@@ -9,6 +11,7 @@ export interface RuntimeTurn {
   readonly modelProvider?: string;
   readonly modelId?: string;
   readonly thinkingLevel?: ThinkingLevel;
+  readonly forgeSelection?: ForgeSelection;
   readonly artifacts?: readonly RuntimeArtifact[];
   readonly publishPath?: string;
 }
@@ -63,6 +66,7 @@ export type AgentProgressHandler = (delta: string) => void;
 
 export interface AgentRuntime {
   readonly models?: readonly RuntimeModel[];
+  readonly forge?: ForgeCatalog;
   run(
     turn: RuntimeTurn,
     signal: AbortSignal,
@@ -78,10 +82,12 @@ export type FakeRuntimeHandler = (
 
 export class FakeAgentRuntime implements AgentRuntime {
   readonly #handler: FakeRuntimeHandler;
+  readonly forge?: ForgeCatalog;
 
   public constructor(
     handler?: FakeRuntimeHandler,
     readonly models: readonly RuntimeModel[] = [],
+    forge?: ForgeCatalog,
   ) {
     this.#handler =
       handler ??
@@ -90,6 +96,9 @@ export class FakeAgentRuntime implements AgentRuntime {
         text: `Fake Pi response: ${turn.prompt}`,
         sessionReusable: true,
       }));
+    if (forge !== undefined) {
+      this.forge = forge;
+    }
   }
 
   public run(

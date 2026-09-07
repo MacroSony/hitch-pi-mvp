@@ -1,9 +1,10 @@
 # Hitch extension power modes
 
-Status: power-mode design; only the concrete Mode B implementation is shipped.
+Status: power-mode design with concrete Mode A/B implementations.
 B1 provides controlled HTTP and B2 adds explicit per-user Tavily search with
 attended WeChat acceptance. There is no general manifest/extension loader.
-Modes A/C/D and declaration-based loading below remain proposals. See
+The bounded Forge Mode A subset is code-accepted but not yet deployed; see
+`mode-a-plan.md`. Modes C/D and declaration-based loading remain proposals. See
 `mode-b-plan.md` for implementation and acceptance evidence. This document
 supersedes the old per-extension design direction; historical
 `operator-extension-compatibility.md` is retained as reference, not a second
@@ -39,9 +40,15 @@ arguments. Hitch's irreducible security value is one sentence:
 
 Extensions are proposed as four power modes. A declaration alone does not
 provide enforcement: the extension must use the corresponding implemented
-Hitch entry point. B1 implements only the Mode B client.
+Hitch entry point. B1 implemented the Mode B client; B2 and the explicit Mode A integration
+are recorded in their respective plans.
 
 ### Mode A — prompt-only
+
+Implemented subset: explicit Forge service/catalog plus Hitch `!preset` /
+`!profile` list/use/preview/status/clear, static system prompts, and baseline
+tool reductions. No generic loader or full desktop Forge compatibility. The
+capabilities below describe the mode, not a claim that all are implemented.
 
 The extension contributes prompts, personas, session variables, and tool
 policy *reductions* only. It registers no tools with host authority.

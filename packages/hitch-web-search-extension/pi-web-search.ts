@@ -21,6 +21,55 @@ if (!mandatoryPath || !mandatoryPath.startsWith("/")) {
 }
 if (!apiKey) throw new Error("Hitch web-search key is missing");
 
+const EXPECTED_TOOLS = [
+  "bash",
+  "edit",
+  "find",
+  "grep",
+  "hitch_publish",
+  "ls",
+  "read",
+  "web_search",
+  "write",
+] as const;
+
+function parseActiveTools(
+  raw: string | undefined,
+  baseline: readonly string[],
+): readonly string[] {
+  if (raw === undefined) return baseline.slice().sort();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error("Hitch active tools configuration is invalid JSON");
+  }
+  if (!Array.isArray(parsed)) {
+    throw new Error("Hitch active tools configuration is not an array");
+  }
+  const baselineSet = new Set(baseline);
+  for (const tool of parsed) {
+    if (typeof tool !== "string" || !baselineSet.has(tool)) {
+      throw new Error("Hitch active tools contains unknown tool");
+    }
+  }
+  const unique = [...new Set(parsed as string[])];
+  if (unique.length !== parsed.length) {
+    throw new Error("Hitch active tools contains duplicates");
+  }
+  const sorted = [...unique].sort();
+  if (JSON.stringify(parsed) !== JSON.stringify(sorted)) {
+    throw new Error("Hitch active tools is not strictly sorted");
+  }
+  return sorted;
+}
+
+const activeSubset = parseActiveTools(
+  process.env.HITCH_ACTIVE_TOOLS,
+  EXPECTED_TOOLS,
+);
+const activeSubsetSet = new Set(activeSubset);
+
 const querySchema = Type.Object(
   {
     query: Type.String({ minLength: 1, maxLength: 512 }),
@@ -52,23 +101,18 @@ function tools(pi: ExtensionAPI): {
   return { all, active: pi.getActiveTools().slice().sort() };
 }
 
-function attest(pi: ExtensionAPI): void {
+function attest(pi: ExtensionAPI): {
+  readonly all: readonly string[];
+  readonly active: readonly string[];
+  readonly sourcePaths: readonly (string | undefined)[];
+} {
   const current = tools(pi);
-  const expected = [
-    "bash",
-    "edit",
-    "find",
-    "grep",
-    "hitch_publish",
-    "ls",
-    "read",
-    "web_search",
-    "write",
-  ];
+  const expectedAll = EXPECTED_TOOLS.slice().sort();
+  const expectedActive = activeSubset.slice().sort();
   if (
     JSON.stringify(current.all.map((tool) => tool.name)) !==
-      JSON.stringify(expected) ||
-    JSON.stringify(current.active) !== JSON.stringify(expected) ||
+      JSON.stringify(expectedAll) ||
+    JSON.stringify(current.active) !== JSON.stringify(expectedActive) ||
     current.all.some((tool) =>
       tool.name === "web_search"
         ? tool.path !== selfPath
@@ -77,6 +121,11 @@ function attest(pi: ExtensionAPI): void {
   ) {
     throw new Error("Hitch web-search tool attestation failed");
   }
+  return {
+    all: current.all.map((tool) => tool.name),
+    active: current.active,
+    sourcePaths: current.all.map((tool) => tool.path),
+  };
 }
 
 function boundedResult(value: unknown): string {
@@ -129,6 +178,9 @@ export default function (pi: ExtensionAPI): void {
     async execute(_id, input, signal) {
       try {
         attest(pi);
+        if (!activeSubsetSet.has("web_search")) {
+          throw new Error("web_search is disabled");
+        }
         const result = await adapter.search(
           input as { query: string; limit?: number },
           signal,
@@ -144,28 +196,16 @@ export default function (pi: ExtensionAPI): void {
   });
 
   pi.on("session_start", async () => {
-    pi.setActiveTools([
-      "read",
-      "write",
-      "edit",
-      "ls",
-      "grep",
-      "find",
-      "bash",
-      "hitch_publish",
-      "web_search",
-    ]);
-    attest(pi);
-    const current = tools(pi);
+    const attestation = attest(pi);
     log({
       type: "web-search-attestation",
       ready: true,
       controllerNonce,
       userId: process.env.HITCH_P0_USER_ID,
-      exactTools: current.all.map((tool) => tool.name),
-      allTools: current.all.map((tool) => tool.name),
-      activeTools: current.active,
-      sourcePaths: current.all.map((tool) => tool.path),
+      exactTools: EXPECTED_TOOLS.slice().sort(),
+      allTools: attestation.all,
+      activeTools: attestation.active,
+      sourcePaths: attestation.sourcePaths,
       sourcePath: selfPath,
       extensionDigest,
       schemaDigest: stableDigest(querySchema),

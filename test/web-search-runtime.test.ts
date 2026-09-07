@@ -24,7 +24,10 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { waitForAttestation } from "../src/pi/native-runtime.js";
+import {
+  waitForAttestation,
+  type ControllerContext,
+} from "../src/pi/native-runtime.js";
 
 const repository = join(dirname(fileURLToPath(import.meta.url)), "../..");
 const assets = join(repository, "dist", "sandbox");
@@ -328,8 +331,17 @@ interface FixtureRun {
   readonly turnHandle: string;
   readonly userId: string;
   readonly webSearchEnabled: boolean;
+  readonly activeTools: readonly string[];
+  readonly forgePrompt:
+    | {
+        readonly mode: "replace" | "append" | "prepend";
+        readonly systemPrompt: string;
+      }
+    | undefined;
   readonly providerLog: string;
   readonly prefix: string;
+  readonly sessionPath: string | undefined;
+  readonly context: ControllerContext;
   readonly rpc: FixtureRpcProcess;
   readonly server: FixtureServer;
 }
@@ -350,6 +362,13 @@ async function launchFixture(
     readonly registerWeb?: boolean;
     readonly webExtension?: string;
     readonly providerMode?: string;
+    readonly activeTools?: readonly string[];
+    readonly forgePrompt?: {
+      readonly mode: "replace" | "append" | "prepend";
+      readonly systemPrompt: string;
+    };
+    readonly forgePromptRaw?: string;
+    readonly sessionPath?: string;
   },
 ): Promise<FixtureRun> {
   const root = mkdtempSync(join(tmpdir(), "hitch-b2-rpc-"));
@@ -370,6 +389,18 @@ async function launchFixture(
   const controllerNonce = randomBytes(16).toString("hex");
   const userId = "b2-fixture-user";
   const webSearchEnabled = options.web;
+  const baselineTools = [
+    "bash",
+    "edit",
+    "find",
+    "grep",
+    "hitch_publish",
+    "ls",
+    "read",
+    "write",
+    ...(webSearchEnabled ? ["web_search"] : []),
+  ].sort();
+  const activeTools = [...(options.activeTools ?? baselineTools)].sort();
   const assetsRoot = join(repository, "dist", "sandbox");
   const mandatory = join(assetsRoot, "hitch-sandbox.ts");
   const web = join(assetsRoot, "pi-web-search.ts");
@@ -388,6 +419,12 @@ async function launchFixture(
     HITCH_B2_FIXTURE_PORT: String(server.port),
     HITCH_B2_PROVIDER_MODE: options.providerMode ?? "web-search",
     HITCH_B2_PROVIDER_LOG: providerLog,
+    HITCH_ACTIVE_TOOLS: JSON.stringify(activeTools),
+    ...(options.forgePromptRaw !== undefined
+      ? { HITCH_FORGE_PROMPT: options.forgePromptRaw }
+      : options.forgePrompt === undefined
+        ? {}
+        : { HITCH_FORGE_PROMPT: JSON.stringify(options.forgePrompt) }),
     HITCH_P0_WORKSPACE: workspace,
     HITCH_P0_INBOX: inbox,
     HITCH_P0_PUBLISH_ROOT: publishRoot,
@@ -442,9 +479,31 @@ async function launchFixture(
     "--no-themes",
     "--no-context-files",
     "--no-approve",
-    "--no-session",
+    ...(options.sessionPath === undefined
+      ? ["--no-session"]
+      : [
+          "--session",
+          options.sessionPath,
+          "--session-dir",
+          dirname(options.sessionPath),
+        ]),
   ];
   const rpc = new FixtureRpcProcess(args, environment, workspace);
+  const context: ControllerContext = {
+    root,
+    workspace,
+    inbox,
+    publishRoot,
+    log,
+    controllerNonce,
+    turnHandle,
+    userId,
+    webSearchEnabled,
+    activeTools,
+    ...(options.forgePrompt === undefined
+      ? {}
+      : { forgePrompt: options.forgePrompt }),
+  };
   return {
     root,
     workspace,
@@ -455,8 +514,12 @@ async function launchFixture(
     turnHandle,
     userId,
     webSearchEnabled,
+    activeTools,
+    forgePrompt: options.forgePrompt,
     providerLog,
     prefix,
+    sessionPath: options.sessionPath,
+    context,
     rpc,
     server,
   };
@@ -485,7 +548,7 @@ test(
     const server = await startFixtureServer();
     const run = await launchFixture(server, { web: true });
     try {
-      await waitForAttestation(run.rpc, run);
+      await waitForAttestation(run.rpc, run.context);
       const entries = logEntries(run.log);
       const mandatory = entries.find(
         (entry) => entry.type === "startup-attestation",
@@ -595,7 +658,7 @@ test(
       providerMode: "unknown-web",
     });
     try {
-      await waitForAttestation(run.rpc, run);
+      await waitForAttestation(run.rpc, run.context);
       const entries = logEntries(run.log);
       assert.equal(
         entries.some((entry) => entry.type === "web-search-attestation"),
@@ -646,6 +709,403 @@ test(
 );
 
 test(
+  "Mode A real RPC compiles a full allowlist and preserves replace/append/prepend prompt order",
+  { skip: process.env.HITCH_RUN_SANDBOX_TESTS !== "1", timeout: 120_000 },
+  async () => {
+    const server = await startFixtureServer();
+    const baseline = [
+      "bash",
+      "edit",
+      "find",
+      "grep",
+      "hitch_publish",
+      "ls",
+      "read",
+      "write",
+    ];
+    const cases = ["replace", "append", "prepend"] as const;
+    try {
+      for (const mode of cases) {
+        const prompt = `HITCH_MODE_A_PROMPT_SENTINEL ${mode}`;
+        const run = await launchFixture(server, {
+          web: false,
+          providerMode: `mode-a-${mode}`,
+          activeTools: baseline,
+          forgePrompt: { mode, systemPrompt: prompt },
+        });
+        try {
+          await waitForAttestation(run.rpc, run.context);
+          const attestation = logEntries(run.log).find(
+            (entry) => entry.type === "startup-attestation",
+          );
+          assert.deepEqual(attestation?.activeTools, baseline);
+          assert.deepEqual(attestation?.allTools, baseline);
+          assert.equal(
+            (
+              await run.rpc.send({
+                type: "set_model",
+                provider: "hitch-b2-fixture",
+                modelId: "b2-web-search",
+              })
+            ).success,
+            true,
+          );
+          assert.equal(
+            (
+              await run.rpc.send({
+                type: "prompt",
+                message: `check Mode A ${mode}`,
+              })
+            ).success,
+            true,
+          );
+          await run.rpc.waitFor(
+            (event) => event.type === "agent_settled",
+            30_000,
+          );
+          const final = await run.rpc.send({ type: "get_last_assistant_text" });
+          assert.equal(
+            record(final.data)?.text,
+            "HITCH_MODE_A_PROMPT_PROVIDER_SENTINEL",
+          );
+          const observations = logEntries(run.providerLog);
+          assert.equal(observations.length, 1);
+          const observation = observations[0];
+          assert.equal(observation?.promptHasSentinel, true);
+          assert.equal(observation?.toolNamesExact, true);
+          assert.deepEqual(observation?.toolNames, baseline);
+          assert.equal(observation?.promptShape, mode);
+          assert.equal(
+            observation?.promptOrder,
+            mode === "replace"
+              ? "replace"
+              : mode === "append"
+                ? "default-before-forge"
+                : "forge-before-default",
+          );
+          assert.equal(observation?.promptIsExactForge, mode === "replace");
+          assert.equal(
+            observation?.promptStartsWithForge,
+            mode === "prepend" || mode === "replace",
+          );
+          assert.equal(
+            observation?.promptEndsWithForge,
+            mode === "append" || mode === "replace",
+          );
+          assert.doesNotMatch(
+            readFileSync(run.providerLog, "utf8"),
+            /HITCH_MODE_A_PROMPT_SENTINEL (replace|append|prepend)/u,
+          );
+          assert.equal(server.requests.length, 0);
+        } finally {
+          await stopFixture(run);
+        }
+      }
+    } finally {
+      server.server.close();
+    }
+  },
+);
+
+test(
+  "Mode A real RPC denies web_search and bash despite provider tool calls",
+  { skip: process.env.HITCH_RUN_SANDBOX_TESTS !== "1", timeout: 120_000 },
+  async () => {
+    const server = await startFixtureServer();
+    const marker = "HITCH_MODE_A_MUTATION_HOST_EXECUTED";
+    const run = await launchFixture(server, {
+      web: true,
+      providerMode: "mode-a-disabled-tools",
+      activeTools: ["read"],
+      forgePrompt: {
+        mode: "replace",
+        systemPrompt: "HITCH_MODE_A_PROMPT_SENTINEL disabled",
+      },
+    });
+    try {
+      await waitForAttestation(run.rpc, run.context);
+      assert.equal(
+        (
+          await run.rpc.send({
+            type: "set_model",
+            provider: "hitch-b2-fixture",
+            modelId: "b2-web-search",
+          })
+        ).success,
+        true,
+      );
+      assert.equal(
+        (
+          await run.rpc.send({
+            type: "prompt",
+            message: "try both disabled tools",
+          })
+        ).success,
+        true,
+      );
+      await run.rpc.waitFor((event) => event.type === "agent_settled", 30_000);
+      const executions = run.rpc.events.filter(
+        (event) => event.type === "tool_execution_end",
+      );
+      assert.deepEqual(
+        executions.map((event) => event.toolName),
+        ["web_search", "bash"],
+      );
+      for (const execution of executions) {
+        assert.equal(execution.isError, true);
+        assert.match(
+          JSON.stringify(execution.result),
+          /sandbox-failed|disabled|not found/u,
+        );
+      }
+      assert.equal(
+        record((await run.rpc.send({ type: "get_last_assistant_text" })).data)
+          ?.text,
+        "HITCH_MODE_A_DISABLED_TOOLS_SETTLED",
+      );
+      assert.equal(existsSync(join(run.workspace, marker)), false);
+      assert.equal(server.requests.length, 0);
+      assert.ok(
+        logEntries(run.providerLog).every((entry) => entry.valid === true),
+      );
+    } finally {
+      await stopFixture(run);
+      server.server.close();
+    }
+  },
+);
+
+test(
+  "Mode A disabled RPC bash returns exit 125 and cannot touch the host workspace",
+  { skip: process.env.HITCH_RUN_SANDBOX_TESTS !== "1", timeout: 120_000 },
+  async () => {
+    const server = await startFixtureServer();
+    const run = await launchFixture(server, {
+      web: false,
+      providerMode: "mode-a-rpc-bash",
+      activeTools: [],
+      forgePrompt: {
+        mode: "replace",
+        systemPrompt: "HITCH_MODE_A_PROMPT_SENTINEL rpc",
+      },
+    });
+    try {
+      await waitForAttestation(run.rpc, run.context);
+      const response = await run.rpc.send({
+        type: "bash",
+        command: "touch HITCH_MODE_A_MUTATION_HOST_EXECUTED",
+      });
+      assert.equal(response.success, true);
+      assert.equal(record(response.data)?.exitCode, 125);
+      assert.equal(
+        existsSync(join(run.workspace, "HITCH_MODE_A_MUTATION_HOST_EXECUTED")),
+        false,
+      );
+      assert.equal(server.requests.length, 0);
+    } finally {
+      await stopFixture(run);
+      server.server.close();
+    }
+  },
+);
+
+test(
+  "Mode A re-injects the same compiled selection into two fresh Pi processes on one JSONL session",
+  { skip: process.env.HITCH_RUN_SANDBOX_TESTS !== "1", timeout: 120_000 },
+  async () => {
+    const server = await startFixtureServer();
+    const sessionRoot = mkdtempSync(join(tmpdir(), "hitch-mode-a-session-"));
+    privateDirectory(sessionRoot);
+    const sessionPath = join(sessionRoot, "selection.jsonl");
+    const selection = {
+      mode: "replace" as const,
+      systemPrompt: "HITCH_MODE_A_PROMPT_SENTINEL session",
+    };
+    const runs: FixtureRun[] = [];
+    try {
+      const first = await launchFixture(server, {
+        web: false,
+        providerMode: "mode-a-session",
+        activeTools: ["read", "write"],
+        forgePrompt: selection,
+        sessionPath,
+      });
+      runs.push(first);
+      await waitForAttestation(first.rpc, first.context);
+      assert.equal(
+        (
+          await first.rpc.send({
+            type: "set_model",
+            provider: "hitch-b2-fixture",
+            modelId: "b2-web-search",
+          })
+        ).success,
+        true,
+      );
+      assert.equal(
+        (
+          await first.rpc.send({
+            type: "prompt",
+            message: "session first turn",
+          })
+        ).success,
+        true,
+      );
+      await first.rpc.waitFor(
+        (event) => event.type === "agent_settled",
+        30_000,
+      );
+      const firstJsonl = readFileSync(sessionPath, "utf8");
+      assert.ok(firstJsonl.length > 0);
+      const firstObservation = logEntries(first.providerLog)[0];
+      assert.equal(firstObservation?.valid, true);
+      await first.rpc.stop();
+      await cleanOwnSandboxUnits(first.prefix);
+
+      const second = await launchFixture(server, {
+        web: false,
+        providerMode: "mode-a-session",
+        activeTools: ["read", "write"],
+        forgePrompt: selection,
+        sessionPath,
+      });
+      runs.push(second);
+      await waitForAttestation(second.rpc, second.context);
+      assert.equal(
+        (
+          await second.rpc.send({
+            type: "set_model",
+            provider: "hitch-b2-fixture",
+            modelId: "b2-web-search",
+          })
+        ).success,
+        true,
+      );
+      assert.equal(
+        (
+          await second.rpc.send({
+            type: "prompt",
+            message: "session second turn",
+          })
+        ).success,
+        true,
+      );
+      await second.rpc.waitFor(
+        (event) => event.type === "agent_settled",
+        30_000,
+      );
+      const secondJsonl = readFileSync(sessionPath, "utf8");
+      assert.ok(secondJsonl.startsWith(firstJsonl));
+      const secondObservation = logEntries(second.providerLog)[0];
+      assert.equal(secondObservation?.valid, true);
+      assert.deepEqual(
+        {
+          toolNames: secondObservation?.toolNames,
+          promptShape: secondObservation?.promptShape,
+          promptOrder: secondObservation?.promptOrder,
+          promptHasSentinel: secondObservation?.promptHasSentinel,
+          toolNamesExact: secondObservation?.toolNamesExact,
+        },
+        {
+          toolNames: firstObservation?.toolNames,
+          promptShape: firstObservation?.promptShape,
+          promptOrder: firstObservation?.promptOrder,
+          promptHasSentinel: firstObservation?.promptHasSentinel,
+          toolNamesExact: firstObservation?.toolNamesExact,
+        },
+      );
+    } finally {
+      for (const run of runs) await stopFixture(run);
+      rmSync(sessionRoot, { recursive: true, force: true });
+      server.server.close();
+    }
+  },
+);
+
+test(
+  "Mode A execute gate rejects a provider extension restoring the baseline after startup",
+  { skip: process.env.HITCH_RUN_SANDBOX_TESTS !== "1", timeout: 120_000 },
+  async () => {
+    const server = await startFixtureServer();
+    const marker = "HITCH_MODE_A_MUTATION_HOST_EXECUTED";
+    const run = await launchFixture(server, {
+      web: true,
+      providerMode: "mode-a-mutation",
+      activeTools: ["read"],
+      forgePrompt: {
+        mode: "replace",
+        systemPrompt: "HITCH_MODE_A_PROMPT_SENTINEL mutation",
+      },
+    });
+    try {
+      await waitForAttestation(run.rpc, run.context);
+      assert.equal(
+        (
+          await run.rpc.send({
+            type: "set_model",
+            provider: "hitch-b2-fixture",
+            modelId: "b2-web-search",
+          })
+        ).success,
+        true,
+      );
+      assert.equal(
+        (
+          await run.rpc.send({
+            type: "prompt",
+            message: "mutation must not execute",
+          })
+        ).success,
+        true,
+      );
+      await run.rpc.waitFor((event) => event.type === "agent_settled", 30_000);
+      const toolEnd = run.rpc.events.find(
+        (event) =>
+          event.type === "tool_execution_end" && event.toolName === "bash",
+      );
+      assert.ok(toolEnd);
+      assert.equal(toolEnd.isError, true);
+      assert.match(
+        JSON.stringify(toolEnd.result),
+        /sandbox-failed|disabled|not found/u,
+      );
+      assert.equal(existsSync(join(run.workspace, marker)), false);
+      assert.equal(server.requests.length, 0);
+    } finally {
+      await stopFixture(run);
+      server.server.close();
+    }
+  },
+);
+
+test(
+  "Mode A malformed HITCH_FORGE_PROMPT never produces startup attestation",
+  { skip: process.env.HITCH_RUN_SANDBOX_TESTS !== "1", timeout: 120_000 },
+  async () => {
+    const server = await startFixtureServer();
+    const run = await launchFixture(server, {
+      web: false,
+      providerMode: "mode-a-replace",
+      activeTools: ["read"],
+      forgePromptRaw: "{not-json",
+    });
+    try {
+      await assert.rejects(waitForAttestation(run.rpc, run.context));
+      assert.equal(
+        logEntries(run.log).some(
+          (entry) => entry.type === "startup-attestation",
+        ),
+        false,
+      );
+      assert.equal(server.requests.length, 0);
+    } finally {
+      await stopFixture(run);
+      server.server.close();
+    }
+  },
+);
+
+test(
   "B2 web attestation rejects a wrong source and a missing web registration before prompting",
   { skip: process.env.HITCH_RUN_SANDBOX_TESTS !== "1", timeout: 120_000 },
   async () => {
@@ -665,13 +1125,58 @@ test(
             : { registerWeb: false }),
         });
         try {
-          await assert.rejects(waitForAttestation(run.rpc, run));
+          await assert.rejects(waitForAttestation(run.rpc, run.context));
           assert.equal(server.requests.length, 0);
         } finally {
           await stopFixture(run);
         }
       }
     } finally {
+      server.server.close();
+    }
+  },
+);
+
+test(
+  "Mode A valid empty rendering explicitly preserves Pi base without widening tools",
+  { skip: process.env.HITCH_RUN_SANDBOX_TESTS !== "1", timeout: 30000 },
+  async () => {
+    const server = await startFixtureServer();
+    const run = await launchFixture(server, {
+      web: false,
+      providerMode: "mode-a-empty",
+      activeTools: ["read"],
+      forgePrompt: { mode: "replace", systemPrompt: "   " },
+    });
+    try {
+      await waitForAttestation(run.rpc, run.context);
+      assert.equal(
+        (
+          await run.rpc.send({
+            type: "set_model",
+            provider: "hitch-b2-fixture",
+            modelId: "b2-web-search",
+          })
+        ).success,
+        true,
+      );
+      assert.equal(
+        (
+          await run.rpc.send({
+            type: "prompt",
+            message: "check valid empty rendering",
+          })
+        ).success,
+        true,
+      );
+      await run.rpc.waitFor((e) => e.type === "agent_settled", 10000);
+      const observed = logEntries(run.providerLog)[0];
+      assert.equal(observed?.valid, true);
+      assert.equal(observed?.defaultPromptPresent, true);
+      assert.deepEqual(observed?.toolNames, ["read"]);
+      assert.equal(server.requests.length, 0);
+    } finally {
+      await stopFixture(run);
       server.server.close();
     }
   },
