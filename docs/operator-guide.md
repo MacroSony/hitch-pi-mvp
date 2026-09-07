@@ -110,6 +110,11 @@ Important fields:
 - `maxConcurrentTurns` (optional, default 2, valid 1–8) bounds how many native
   Pi controllers run at once across users. One user's Turns stay serialized;
   this setting only controls cross-user parallelism.
+- `webSearch` (optional) configures host-controlled web search integration
+  (Tavily). It requires `provider: "tavily"`, `apiKeyEnv` (the uppercase
+  environment variable name in `service.env`, e.g. `"TAVILY_API_KEY"`), and
+  `enabledUsers` (array of user IDs allowed to search, e.g. `["alice"]`). Set
+  `enabledUsers: []` or omit `webSearch` to disable web search.
 
 Validate and publish the topology without starting a channel or Pi:
 
@@ -213,6 +218,21 @@ ID into `config.users[].wechat.userId`. Credentials and the reset cursor are
 written atomically to the private state directory. Repeat login after an
 expired session; never copy one authenticated bot state into two configured
 accounts.
+
+### Web search (Tavily)
+
+When `webSearch` is configured, add the referenced API key variable to
+`/srv/hitch/service.env` with owner-only permissions:
+
+```text
+sudo -iu hitch bash -lc \
+  'umask 077; read -rsp "Tavily API key: " key; echo; \
+   printf "TAVILY_API_KEY=%s\n" "$key" >> /srv/hitch/service.env'
+```
+
+The key is loaded on host startup only for configured egress requests. It is
+never persisted to SQLite or shared with model tool sandboxes. If web search
+is not configured or `enabledUsers` is empty, no key is required.
 
 ## 5. First foreground run
 

@@ -13,6 +13,21 @@ import {
 } from "./sandbox-backend.mjs";
 
 const EXPECTED_TOOLS = ["read", "write", "edit", "ls", "grep", "find", "bash", "hitch_publish"] as const;
+const webSearchEnabled = process.env.HITCH_WEB_SEARCH_ENABLED === "1";
+const webSearchPath = process.env.HITCH_WEB_SEARCH_EXTENSION_PATH;
+const webSearchDigest = process.env.HITCH_WEB_SEARCH_EXTENSION_SHA256;
+if (webSearchEnabled !== (webSearchPath !== undefined && webSearchDigest !== undefined)) {
+	throw new Error("Hitch web-search configuration is incomplete");
+}
+if (webSearchPath !== undefined && !webSearchPath.startsWith("/")) {
+	throw new Error("Hitch web-search extension path is invalid");
+}
+if (webSearchDigest !== undefined && !/^[a-f0-9]{64}$/.test(webSearchDigest)) {
+	throw new Error("Hitch web-search extension digest is invalid");
+}
+const expectedTools = webSearchEnabled
+	? [...EXPECTED_TOOLS, "web_search"]
+	: [...EXPECTED_TOOLS];
 const selfPath = fileURLToPath(import.meta.url);
 const requiredEnvironment = [
 	"HITCH_P0_WORKSPACE",
@@ -23,15 +38,20 @@ const requiredEnvironment = [
 	"HITCH_P0_LOG",
 	"HITCH_P0_TURN_HANDLE",
 	"HITCH_P0_CONTROLLER_NONCE",
+	"HITCH_P0_USER_ID",
 	"HITCH_P0_UNIT_PREFIX",
 	"HITCH_P0_WORKER_SHA256",
 	"HITCH_P0_HELPER_SHA256",
 	"HITCH_P0_EXTENSION_SHA256",
+	"HITCH_P0_EXTENSION_PATH",
 	"HITCH_P0_BACKEND_SHA256",
 ] as const;
 
 for (const name of requiredEnvironment) {
 	if (!process.env[name]) throw new Error("Hitch sandbox configuration is incomplete");
+}
+if (process.env.HITCH_P0_EXTENSION_PATH !== selfPath) {
+	throw new Error("Hitch sandbox extension path is invalid");
 }
 if (!/^[a-f0-9]{32}$/.test(process.env.HITCH_P0_CONTROLLER_NONCE!)) {
 	throw new Error("Hitch sandbox controller nonce is invalid");
@@ -138,20 +158,27 @@ function resultText(result: Record<string, unknown>): string {
 }
 
 export default function (pi: ExtensionAPI): void {
-	function attest(): { schemaDigest: string } {
+	function attest(): { schemaDigest: string; allTools: readonly string[]; activeTools: readonly string[]; sourcePaths: readonly (string | undefined)[] } {
 		const all = pi.getAllTools().map((tool) => ({
 			name: tool.name,
 			path: tool.sourceInfo?.path,
 			parameters: tool.parameters,
 		})).sort((left, right) => left.name.localeCompare(right.name));
 		const active = pi.getActiveTools().slice().sort();
-		const expected = [...EXPECTED_TOOLS].sort();
+		const expected = expectedTools.slice().sort();
 		if (
 			JSON.stringify(all.map((tool) => tool.name)) !== JSON.stringify(expected) ||
 			JSON.stringify(active) !== JSON.stringify(expected) ||
-			all.some((tool) => tool.path !== selfPath)
+			all.some((tool) => tool.name === "web_search"
+				? tool.path !== webSearchPath
+				: tool.path !== selfPath)
 		) throw new Error("Hitch sandbox tool attestation failed");
-		return { schemaDigest: stableDigest(all.map(({ name, parameters }) => ({ name, parameters }))) };
+		return {
+			schemaDigest: stableDigest(all.map(({ name, parameters }) => ({ name, parameters }))),
+			allTools: all.map((tool) => tool.name),
+			activeTools: active,
+			sourcePaths: all.map((tool) => tool.path),
+		};
 	}
 
 	async function execute(name: keyof typeof schemas, input: Record<string, unknown>, signal?: AbortSignal) {
@@ -192,7 +219,7 @@ export default function (pi: ExtensionAPI): void {
 	}
 
 	pi.on("session_start", async () => {
-		pi.setActiveTools([...EXPECTED_TOOLS]);
+		pi.setActiveTools(expectedTools);
 		const attestation = attest();
 		const probe = await executeSandboxRequest(
 			backendConfiguration,
@@ -211,7 +238,14 @@ export default function (pi: ExtensionAPI): void {
 			type: "startup-attestation",
 			ready: true,
 			controllerNonce: process.env.HITCH_P0_CONTROLLER_NONCE,
-			exactTools: [...EXPECTED_TOOLS].sort(),
+			userId: process.env.HITCH_P0_USER_ID,
+			exactTools: expectedTools.slice().sort(),
+			allTools: attestation.allTools,
+			activeTools: attestation.activeTools,
+			sourcePaths: attestation.sourcePaths,
+			sourcePath: selfPath,
+			extensionDigest: process.env.HITCH_P0_EXTENSION_SHA256,
+			webSearchEnabled,
 			schemaDigest: attestation.schemaDigest,
 		});
 	});

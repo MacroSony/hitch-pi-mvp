@@ -50,7 +50,13 @@ const PI_DEPENDENCY_CLOSURE_SHA256 =
   "6d2055eaeef6823fd4b6edc062314e383fc6e233a4634a13e868a86eaebbcec4";
 const SANDBOX_ASSET_SHA256 = {
   "hitch-sandbox.ts":
-    "8a51722009388b8c79e93d0a8c5508d34acae45b10be76f94eed074a77adff07",
+    "df777339bc6f6e985e0e77a7e125647ec52e5335e47c5658c92c867b545006fb",
+  "pi-web-search.ts":
+    "b2bd930939e05a6a292b66efe6960c456bd47b8cdc30bf30a33c531cc55a4f70",
+  "web-search/tavily.js":
+    "3fd8c7caeb7226c9fa05e46dfdd4b79c30258ce2844efa932e284e89a9a9d3da",
+  "egress/client.js":
+    "31a1ca0255e64076ff3037a4663be8c72d337ecc2dbec5622eb4c0204cfc8599",
   "sandbox-backend.mjs":
     "44a694871cf8396e9db3b8775b0adbb48381a92b2de3e90c8caa47a108c8ac73",
   "sandbox-worker.mjs":
@@ -100,9 +106,13 @@ export interface NativePiRuntimeOptions {
   readonly maxConcurrentTurns?: number;
   readonly turnTimeoutMs?: number;
   readonly mediaStore?: MediaStore;
+  readonly webSearch?: {
+    readonly apiKey: string;
+    readonly enabledUsers: readonly string[];
+  };
 }
 
-interface ControllerContext {
+export interface ControllerContext {
   readonly root: string;
   readonly workspace: string;
   readonly inbox: string;
@@ -110,6 +120,8 @@ interface ControllerContext {
   readonly log: string;
   readonly controllerNonce: string;
   readonly turnHandle: string;
+  readonly userId: string;
+  readonly webSearchEnabled: boolean;
 }
 
 interface ClosedProcess {
@@ -699,6 +711,7 @@ function validatePiPackage(cliPath: string): void {
 
 function controllerArguments(
   extension: string,
+  webSearchExtension: string | undefined,
   session:
     | { readonly kind: "none" }
     | {
@@ -719,6 +732,9 @@ function controllerArguments(
     "--no-extensions",
     "--extension",
     extension,
+    ...(webSearchExtension === undefined
+      ? []
+      : ["--extension", webSearchExtension]),
     "--no-builtin-tools",
     "--no-skills",
     "--no-prompt-templates",
@@ -744,39 +760,87 @@ function controllerArguments(
   return arguments_;
 }
 
-async function waitForAttestation(
-  controller: PiRpcProcess,
+export async function waitForAttestation(
+  controller: { readonly exited: boolean },
   context: ControllerContext,
 ): Promise<void> {
+  const expectedTools = context.webSearchEnabled
+    ? [...EXPECTED_TOOLS, "web_search"].sort()
+    : [...EXPECTED_TOOLS].sort();
+  const extensionPath = join(assetRoot(), "hitch-sandbox.ts");
+  const webExtensionPath = join(assetRoot(), "pi-web-search.ts");
   const deadline = Date.now() + 10_000;
   for (;;) {
     if (existsSync(context.log)) {
       const metadata = statSync(context.log);
       if (metadata.size > 64 * 1024)
         throw new Error("sandbox attestation log exceeded its bound");
-      const matching = readFileSync(context.log, "utf8")
+      const entries = readFileSync(context.log, "utf8")
         .split("\n")
         .filter(Boolean)
         .map((line) => record(JSON.parse(line) as unknown))
-        .filter(
-          (item): item is JsonRecord =>
-            item?.type === "startup-attestation" &&
-            item.ready === true &&
-            item.controllerNonce === context.controllerNonce,
-        );
-      if (matching.length === 1) {
-        const tools = matching[0]?.exactTools;
+        .filter((item): item is JsonRecord => item !== null);
+      const mandatory = entries.filter(
+        (item) =>
+          item.type === "startup-attestation" &&
+          item.ready === true &&
+          item.controllerNonce === context.controllerNonce &&
+          item.userId === context.userId,
+      );
+      const web = entries.filter(
+        (item) =>
+          item.type === "web-search-attestation" &&
+          item.ready === true &&
+          item.controllerNonce === context.controllerNonce &&
+          item.userId === context.userId,
+      );
+      if (mandatory.length > 1 || web.length > 1)
+        throw new Error("sandbox startup attestation is not unique");
+      if (
+        mandatory.length === 1 &&
+        (context.webSearchEnabled ? web.length === 1 : web.length === 0)
+      ) {
+        const standard = mandatory[0];
+        if (standard === undefined)
+          throw new Error("sandbox startup attestation is missing");
+        const webRecord = web[0];
+        const check = (item: JsonRecord, source: string): void => {
+          if (
+            JSON.stringify(item.exactTools) !== JSON.stringify(expectedTools) ||
+            JSON.stringify(item.allTools) !== JSON.stringify(expectedTools) ||
+            JSON.stringify(item.activeTools) !==
+              JSON.stringify(expectedTools) ||
+            !Array.isArray(item.sourcePaths) ||
+            item.sourcePaths.length !== expectedTools.length ||
+            !/^[a-f0-9]{64}$/u.test(String(item.schemaDigest))
+          )
+            throw new Error("sandbox startup attestation is invalid");
+          const sourcePaths = item.sourcePaths;
+          const expectedSources = expectedTools.map((name) =>
+            name === "web_search" ? webExtensionPath : extensionPath,
+          );
+          if (JSON.stringify(sourcePaths) !== JSON.stringify(expectedSources))
+            throw new Error("sandbox tool source attestation is invalid");
+          if (item.sourcePath !== source)
+            throw new Error("sandbox extension source attestation is invalid");
+        };
+        check(standard, extensionPath);
         if (
-          !Array.isArray(tools) ||
-          JSON.stringify(tools) !== JSON.stringify(EXPECTED_TOOLS) ||
-          !/^[a-f0-9]{64}$/u.test(String(matching[0]?.schemaDigest))
-        ) {
-          throw new Error("sandbox startup attestation is invalid");
+          standard.extensionDigest !== SANDBOX_ASSET_SHA256["hitch-sandbox.ts"]
+        )
+          throw new Error("sandbox extension digest attestation is invalid");
+        if (context.webSearchEnabled && webRecord !== undefined) {
+          check(webRecord, webExtensionPath);
+          if (
+            webRecord.extensionDigest !==
+            SANDBOX_ASSET_SHA256["pi-web-search.ts"]
+          )
+            throw new Error(
+              "web-search extension digest attestation is invalid",
+            );
         }
         return;
       }
-      if (matching.length > 1)
-        throw new Error("sandbox startup attestation is not unique");
     }
     if (controller.exited || Date.now() >= deadline)
       throw new Error("sandbox startup attestation did not arrive");
@@ -839,6 +903,8 @@ export class NativePiRuntime implements AgentRuntime {
   readonly #media: MediaStore;
   readonly #semaphore: AsyncSemaphore;
   readonly #owner: string;
+  readonly #webSearchKey: string | undefined;
+  readonly #webSearchUsers: ReadonlySet<string>;
   #poisoned = false;
 
   private constructor(
@@ -861,6 +927,8 @@ export class NativePiRuntime implements AgentRuntime {
       options.maxConcurrentTurns ?? DEFAULT_MAX_CONCURRENT_TURNS,
     );
     this.#owner = randomBytes(8).toString("hex");
+    this.#webSearchKey = options.webSearch?.apiKey;
+    this.#webSearchUsers = new Set(options.webSearch?.enabledUsers ?? []);
   }
 
   public static async create(
@@ -892,6 +960,24 @@ export class NativePiRuntime implements AgentRuntime {
     const profileRoot = join(options.dataRoot, PI_PROFILE_ROOT);
     privateDirectory(profileRoot);
     const userIds = options.userIds ?? [];
+    const configuredUsers = new Set(userIds);
+    if (configuredUsers.size !== userIds.length)
+      throw new Error("duplicate Pi profile user id");
+    if (options.webSearch !== undefined) {
+      if (
+        typeof options.webSearch.apiKey !== "string" ||
+        options.webSearch.apiKey.length === 0 ||
+        options.webSearch.enabledUsers.some(
+          (userId) => !configuredUsers.has(userId),
+        ) ||
+        new Set(options.webSearch.enabledUsers).size !==
+          options.webSearch.enabledUsers.length
+      ) {
+        throw new Error("web search users are not prepared for the runtime");
+      }
+      for (const userId of options.webSearch.enabledUsers)
+        safeSegment(userId, "web search user id");
+    }
     const profiles = new Map<string, string>();
     let catalogProfile: string;
     if (userIds.length === 0) {
@@ -929,7 +1015,12 @@ export class NativePiRuntime implements AgentRuntime {
     return new NativePiRuntime(options, models, profiles, catalogProfile);
   }
 
-  #context(label: string, workspace: string): ControllerContext {
+  #context(
+    label: string,
+    workspace: string,
+    userId: string,
+    webSearchEnabled: boolean,
+  ): ControllerContext {
     const root = join(
       this.#runtimeRoot,
       safeSegment(label, "controller label"),
@@ -948,6 +1039,8 @@ export class NativePiRuntime implements AgentRuntime {
       log: join(root, "sandbox.log"),
       controllerNonce: randomBytes(16).toString("hex"),
       turnHandle: randomBytes(16).toString("hex"),
+      userId,
+      webSearchEnabled,
     };
   }
 
@@ -961,12 +1054,13 @@ export class NativePiRuntime implements AgentRuntime {
 
   #controller(
     context: ControllerContext,
-    session: Parameters<typeof controllerArguments>[1],
+    session: Parameters<typeof controllerArguments>[2],
     onTextDelta: ((delta: string) => void) | undefined,
     profileDir: string,
   ): PiRpcProcess {
     validateSandboxAssets(this.#assets);
     const extension = join(this.#assets, "hitch-sandbox.ts");
+    const webSearchExtension = join(this.#assets, "pi-web-search.ts");
     const worker = join(this.#assets, "sandbox-worker.mjs");
     const helper = join(this.#assets, "secure-bwrap-helper");
     const environment: NodeJS.ProcessEnv = {
@@ -986,15 +1080,30 @@ export class NativePiRuntime implements AgentRuntime {
       HITCH_P0_LOG: context.log,
       HITCH_P0_TURN_HANDLE: context.turnHandle,
       HITCH_P0_CONTROLLER_NONCE: context.controllerNonce,
+      HITCH_P0_USER_ID: context.userId,
+      HITCH_P0_EXTENSION_PATH: extension,
       HITCH_P0_UNIT_PREFIX: this.#owner,
       HITCH_P0_WORKER_SHA256: SANDBOX_ASSET_SHA256["sandbox-worker.mjs"],
       HITCH_P0_HELPER_SHA256: SANDBOX_ASSET_SHA256["secure-bwrap-helper"],
       HITCH_P0_EXTENSION_SHA256: SANDBOX_ASSET_SHA256["hitch-sandbox.ts"],
       HITCH_P0_BACKEND_SHA256: SANDBOX_ASSET_SHA256["sandbox-backend.mjs"],
+      ...(context.webSearchEnabled
+        ? {
+            HITCH_WEB_SEARCH_ENABLED: "1",
+            HITCH_WEB_SEARCH_KEY: this.#webSearchKey ?? "",
+            HITCH_WEB_SEARCH_EXTENSION_PATH: webSearchExtension,
+            HITCH_WEB_SEARCH_EXTENSION_SHA256:
+              SANDBOX_ASSET_SHA256["pi-web-search.ts"],
+          }
+        : {}),
     };
     return new PiRpcProcess(
       this.#cli,
-      controllerArguments(extension, session),
+      controllerArguments(
+        extension,
+        context.webSearchEnabled ? webSearchExtension : undefined,
+        session,
+      ),
       context.workspace,
       environment,
       onTextDelta,
@@ -1005,7 +1114,7 @@ export class NativePiRuntime implements AgentRuntime {
     const label = `catalog-${randomBytes(8).toString("hex")}`;
     const workspace = join(this.#runtimeRoot, "catalog-workspace");
     privateDirectory(workspace);
-    const context = this.#context(label, workspace);
+    const context = this.#context(label, workspace, "catalog", false);
     const controller = this.#controller(
       context,
       { kind: "none" },
@@ -1178,6 +1287,8 @@ export class NativePiRuntime implements AgentRuntime {
     const context = this.#context(
       safeSegment(turn.turnId, "runtime Turn id"),
       turn.workspace,
+      userId,
+      this.#webSearchUsers.has(userId),
     );
     const inputArtifacts = turn.artifacts ?? [];
     if (

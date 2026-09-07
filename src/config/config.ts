@@ -39,6 +39,12 @@ export interface UserConfig {
 
 export type MediaMode = "always-trigger" | "text-trigger";
 
+export interface WebSearchConfig {
+  readonly provider: "tavily";
+  readonly apiKeyEnv: string;
+  readonly enabledUsers: readonly string[];
+}
+
 export interface AppConfig {
   readonly schemaVersion: 1;
   readonly dataRoot: string;
@@ -49,6 +55,7 @@ export interface AppConfig {
   readonly telegramAccounts: readonly TelegramAccountConfig[];
   readonly wechatAccounts: readonly WeChatAccountConfig[];
   readonly users: readonly UserConfig[];
+  readonly webSearch?: WebSearchConfig;
 }
 
 export class ConfigError extends Error {
@@ -222,7 +229,7 @@ export function parseConfig(value: unknown): AppConfig {
       "wechatAccounts",
       "users",
     ],
-    ["mediaMode", "maxConcurrentTurns"],
+    ["mediaMode", "maxConcurrentTurns", "webSearch"],
     "config",
   );
   if (input.schemaVersion !== 1) fail("config.schemaVersion", "expected 1");
@@ -316,6 +323,54 @@ export function parseConfig(value: unknown): AppConfig {
     );
   }
 
+  let webSearch: WebSearchConfig | undefined;
+  if (input.webSearch !== undefined) {
+    const wsInput = record(input.webSearch, "config.webSearch");
+    exactKeys(
+      wsInput,
+      ["provider", "apiKeyEnv", "enabledUsers"],
+      [],
+      "config.webSearch",
+    );
+    if (wsInput.provider !== "tavily") {
+      fail("config.webSearch.provider", "expected 'tavily'");
+    }
+    const apiKeyEnv = stringValue(
+      wsInput.apiKeyEnv,
+      "config.webSearch.apiKeyEnv",
+      128,
+    );
+    if (!ENV_PATTERN.test(apiKeyEnv)) {
+      fail(
+        "config.webSearch.apiKeyEnv",
+        "must be an uppercase environment variable name",
+      );
+    }
+    const rawEnabledUsers = arrayValue(
+      wsInput.enabledUsers,
+      "config.webSearch.enabledUsers",
+    );
+    const enabledUsers = rawEnabledUsers.map((item, index) =>
+      identifier(item, `config.webSearch.enabledUsers[${index}]`),
+    );
+    unique(enabledUsers, "config.webSearch.enabledUsers");
+
+    const userIds = new Set(users.map(({ id }) => id));
+    for (const userId of enabledUsers) {
+      if (!userIds.has(userId)) {
+        fail(
+          "config.webSearch.enabledUsers",
+          `references an unknown user: ${userId}`,
+        );
+      }
+    }
+    webSearch = {
+      provider: "tavily",
+      apiKeyEnv,
+      enabledUsers,
+    };
+  }
+
   return {
     schemaVersion: 1,
     dataRoot: absolutePath(input.dataRoot, "config.dataRoot"),
@@ -326,6 +381,7 @@ export function parseConfig(value: unknown): AppConfig {
     telegramAccounts,
     wechatAccounts,
     users,
+    ...(webSearch === undefined ? {} : { webSearch }),
   };
 }
 

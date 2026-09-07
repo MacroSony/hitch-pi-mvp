@@ -31,5 +31,10 @@
         "userId": "wxid_alice"
       }
     }
-  ]
+  ],
+  "webSearch": {
+    "provider": "tavily",
+    "apiKeyEnv": "TAVILY_API_KEY",
+    "enabledUsers": []
+  }
 }

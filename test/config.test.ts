@@ -135,3 +135,80 @@ test("loadConfig rejects malformed and oversized files", () => {
   writeFileSync(oversized, "x".repeat(1024 * 1024 + 1), { mode: 0o600 });
   assert.throws(() => loadConfig(oversized), /too large/u);
 });
+
+test("config validates optional webSearch configuration strictly", () => {
+  const base = validConfig();
+  const withoutWs = parseConfig(base);
+  assert.equal(withoutWs.webSearch, undefined);
+
+  const withWs = validConfig();
+  withWs.webSearch = {
+    provider: "tavily",
+    apiKeyEnv: "TAVILY_API_KEY",
+    enabledUsers: ["alice"],
+  };
+  const parsedWithWs = parseConfig(withWs);
+  assert.deepEqual(parsedWithWs.webSearch, {
+    provider: "tavily",
+    apiKeyEnv: "TAVILY_API_KEY",
+    enabledUsers: ["alice"],
+  });
+
+  const emptyUsers = validConfig();
+  emptyUsers.webSearch = {
+    provider: "tavily",
+    apiKeyEnv: "TAVILY_API_KEY",
+    enabledUsers: [],
+  };
+  assert.deepEqual(parseConfig(emptyUsers).webSearch?.enabledUsers, []);
+
+  const invalidProvider = validConfig();
+  invalidProvider.webSearch = {
+    provider: "google",
+    apiKeyEnv: "TAVILY_API_KEY",
+    enabledUsers: ["alice"],
+  };
+  assert.throws(
+    () => parseConfig(invalidProvider),
+    /config\.webSearch\.provider/u,
+  );
+
+  const invalidEnv = validConfig();
+  invalidEnv.webSearch = {
+    provider: "tavily",
+    apiKeyEnv: "tavily_api_key",
+    enabledUsers: ["alice"],
+  };
+  assert.throws(
+    () => parseConfig(invalidEnv),
+    /uppercase environment variable name/u,
+  );
+
+  const unknownUser = validConfig();
+  unknownUser.webSearch = {
+    provider: "tavily",
+    apiKeyEnv: "TAVILY_API_KEY",
+    enabledUsers: ["bob"],
+  };
+  assert.throws(
+    () => parseConfig(unknownUser),
+    /references an unknown user: bob/u,
+  );
+
+  const duplicateUser = validConfig();
+  duplicateUser.webSearch = {
+    provider: "tavily",
+    apiKeyEnv: "TAVILY_API_KEY",
+    enabledUsers: ["alice", "alice"],
+  };
+  assert.throws(() => parseConfig(duplicateUser), /duplicate value/u);
+
+  const extraKeys = validConfig();
+  extraKeys.webSearch = {
+    provider: "tavily",
+    apiKeyEnv: "TAVILY_API_KEY",
+    enabledUsers: ["alice"],
+    extra: true,
+  };
+  assert.throws(() => parseConfig(extraKeys), /unknown field/u);
+});

@@ -152,3 +152,12 @@ The following remain release requirements even for trusted users:
   user-installed extensions; and
 - exhaustive filesystem race, media bomb, provider-family, and channel-failure
   certification beyond the bounded paths used by the MVP.
+
+## Post-MVP Mode B — controlled search (completed)
+
+B1 controlled HTTP and B2 static per-user Tavily integration are implemented.
+`docs/mode-b-plan.md` records the limits and acceptance: deterministic 74 passed /
+5 opt-in skipped; dedicated Pi RPC 5/5; attended real Tavily and WeChat search
+and delivery passed. Independent final pre-commit review found no blocker.
+Generic loading, Mode A/C/D, and mandatory final-answer citations are not part
+of this phase.

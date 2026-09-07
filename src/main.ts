@@ -120,6 +120,15 @@ async function main(): Promise<void> {
         "configured WeChat accounts must use distinct authenticated bot accounts",
       );
     }
+    const nativeWebSearch =
+      cli.mode === "channels" &&
+      config.webSearch !== undefined &&
+      config.webSearch.enabledUsers.length > 0
+        ? {
+            apiKey: readRequiredSecret(config.webSearch.apiKeyEnv),
+            enabledUsers: config.webSearch.enabledUsers,
+          }
+        : undefined;
     const runtime: AgentRuntime =
       cli.mode === "fake-channels"
         ? new FakeAgentRuntime()
@@ -129,6 +138,9 @@ async function main(): Promise<void> {
             userIds: foundation.topology.users.map((user) => user.id),
             maxConcurrentTurns: config.maxConcurrentTurns,
             mediaStore: media,
+            ...(nativeWebSearch === undefined
+              ? {}
+              : { webSearch: nativeWebSearch }),
           });
     const store = new HitchStore(
       foundation.database,
