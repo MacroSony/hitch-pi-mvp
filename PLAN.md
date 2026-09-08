@@ -185,3 +185,14 @@ rotation before local commit can still require re-login. Real credentials,
 online config/service and release builds remain untouched. Attended deployment,
 authority selection/re-login and channel acceptance are pending; combined Mode A
 schema 3→4 deployment has its own rollback/data-loss decision.
+
+
+## Post-MVP AGY-1 — fixed Antigravity provider (code-accepted; login pending)
+
+See `docs/antigravity-plan.md`: public-entry provider-only adapter, no account
+commands/hooks/writers, original shared OAuth store, explicit startup attestation.
+Includes the new-session/model-less-profile thinking fallback fix. Fixed local
+3.8 model artifact has documented provenance and no silent 3.7 downgrade.
+119 tests passed / 17 opt-in skipped; namespace real Pi RPC 17/17.
+Operator staging login, real model availability, and final profile activation
+remain attended gates, not implied by passing dummy provider fixtures.

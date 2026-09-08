@@ -1,0 +1,77 @@
+--- a/src/models/models.ts
++++ b/src/models/models.ts
+@@ -9,6 +9,7 @@
+  * Public selectable model IDs → backend request model IDs by thinking effort.
+  *
+  * Catalog mirrors `agy models` (Antigravity CLI), which currently advertises:
++ * - Gemini 3.8 Flash (Low / Medium / High)
+  * - Gemini 3.7 Flash (Low / Medium / High)
+  * - Gemini 3.6 Flash (Low / Medium / High)
+  * - Gemini 3.5 Flash (Low / Medium / High)
+@@ -58,6 +59,20 @@
+     },
+     defaultRequestId: "gemini-3.1-pro-low",
+   },
++  "gemini-3.8-flash": {
++    // Currently live on the daily/sandbox ring as one tiered runtime id (same
++    // shape as 3.7). fetchAvailableModels on prod does not list it yet; stream.ts
++    // falls through to the sandbox endpoint on 404/429. Effort goes in thinkingConfig.
++    off: "gemini-3.8-flash-tiered",
++    routing: {
++      minimal: "gemini-3.8-flash-tiered",
++      low: "gemini-3.8-flash-tiered",
++      medium: "gemini-3.8-flash-tiered",
++      high: "gemini-3.8-flash-tiered",
++      xhigh: "gemini-3.8-flash-tiered",
++    },
++    defaultRequestId: "gemini-3.8-flash-tiered",
++  },
+   "gemini-3.7-flash": {
+     // `agy models` presents Low/Medium/High labels, but fetchAvailableModels exposes
+     // one requestable runtime ID. Thinking effort belongs in thinkingConfig.
+@@ -112,6 +127,8 @@
+  * Requesting more than these limits returns a 400 Bad Request from the API.
+  */
+ export const RUNTIME_MAX_OUTPUT_TOKENS: Record<string, number> = {
++  "gemini-3.8-flash": 65536,
++  "gemini-3.8-flash-tiered": 65536,
+   "gemini-3.7-flash": 65536,
+   "gemini-3.7-flash-tiered": 65536,
+   // Retain rollout-era IDs for compatibility with pinned runtime overrides.
+@@ -200,6 +217,16 @@
+ /** Same set as `agy models`, collapsed to public Pi model IDs. */
+ export const ANTIGRAVITY_MODELS: ProviderModelConfig[] = [
+   {
++    id: "gemini-3.8-flash",
++    name: "Gemini 3.8 Flash (Antigravity)",
++    reasoning: true,
++    thinkingLevelMap: thinkingLevelMaps.lowMediumHigh,
++    input: ["text", "image"],
++    cost: freeCost,
++    contextWindow: 1048576,
++    maxTokens: 65536,
++  },
++  {
+     id: "gemini-3.7-flash",
+     name: "Gemini 3.7 Flash (Antigravity)",
+     reasoning: true,
+@@ -308,6 +335,8 @@
+  * provide a fallback runtime model ID (e.g. Gemini 3.6 Flash) to maintain availability.
+  */
+ export function getFallbackRuntimeModel(runtimeModel: string, effort?: string): string | undefined {
++  // Hitch: an explicit 3.8 selection must not silently execute 3.7.
++  if (runtimeModel.startsWith("gemini-3.8-flash")) return undefined;
+   if (runtimeModel === "gemini-3.7-flash-tiered") {
+     return getAntigravityRequestModelId("gemini-3.6-flash", effort);
+   }
+--- a/src/stream/stream.ts
++++ b/src/stream/stream.ts
+@@ -389,7 +389,7 @@
+
+   const generationConfig: GeminiGenerationConfig = {};
+   if (options.temperature !== undefined) generationConfig.temperature = options.temperature;
+-  if (runtimeModel === "gemini-3.7-flash-tiered") {
++  if (runtimeModel === "gemini-3.7-flash-tiered" || runtimeModel === "gemini-3.8-flash-tiered") {
+     const effort = options.reasoning ?? "off";
+     generationConfig.thinkingConfig = {
+       thinkingLevel:

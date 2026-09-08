@@ -25,8 +25,10 @@
     "typescript": "5.9.3"
   },
   "dependencies": {
+    "@earendil-works/pi-ai": "0.84.1",
     "@earendil-works/pi-coding-agent": "0.84.1",
     "@zihanw/pi-forge": "file:vendor/zihanw-pi-forge-0.5.3-hitch.1.tgz",
+    "pi-agy": "file:vendor/pi-agy-0.6.1-hitch.1.tgz",
     "proper-lockfile": "4.1.2",
     "undici": "8.9.0",
     "wechat-ilink-client": "0.1.0"

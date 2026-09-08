@@ -58,9 +58,11 @@ const PI_DEPENDENCY_CLOSURE_SHA256 =
   "6d2055eaeef6823fd4b6edc062314e383fc6e233a4634a13e868a86eaebbcec4";
 const SANDBOX_ASSET_SHA256 = {
   "hitch-sandbox.ts":
-    "0a35feb0d76462a39721ef56b3a4387fc5c0d803b0799ffc8fc1a1368fb2f024",
+    "dca37b3c08e9ad953bcd25195ff8afa73eb25a632f2b1ca8ff87b951c9292073",
   "pi-web-search.ts":
     "0a503a373523eb1737417865f9e213c8db838b0a0eb5e87b197535cfccef43c7",
+  "pi-antigravity.ts":
+    "c3656827c2c8f33277fc2eeed3d7409f8dbe6d34b066d29e536bffbb8a060df2",
   "web-search/tavily.js":
     "3fd8c7caeb7226c9fa05e46dfdd4b79c30258ce2844efa932e284e89a9a9d3da",
   "egress/client.js":
@@ -118,6 +120,7 @@ export interface NativePiRuntimeOptions {
     readonly enabledUsers: readonly string[];
   };
   readonly forge?: ForgeCatalog;
+  readonly antigravity?: boolean;
 }
 
 export interface ControllerContext {
@@ -131,6 +134,7 @@ export interface ControllerContext {
   readonly userId: string;
   readonly webSearchEnabled: boolean;
   readonly sharedAuthRequired?: boolean;
+  readonly antigravityRequired?: boolean;
   readonly activeTools?: readonly string[];
   readonly forgePrompt?: {
     readonly mode: "replace" | "append" | "prepend";
@@ -643,7 +647,7 @@ function validatePiPackage(cliPath: string): void {
   }
 }
 
-function controllerArguments(
+export function controllerArguments(
   extension: string,
   webSearchExtension: string | undefined,
   session:
@@ -658,6 +662,7 @@ function controllerArguments(
         readonly path: string;
         readonly directory: string;
       },
+  providerExtension?: string,
 ): readonly string[] {
   const arguments_ = [
     "--mode",
@@ -669,6 +674,9 @@ function controllerArguments(
     ...(webSearchExtension === undefined
       ? []
       : ["--extension", webSearchExtension]),
+    ...(providerExtension === undefined
+      ? []
+      : ["--extension", providerExtension]),
     "--no-builtin-tools",
     "--no-skills",
     "--no-prompt-templates",
@@ -763,6 +771,18 @@ export async function waitForAttestation(
         if (context.sharedAuthRequired === true && standard.sharedAuth !== true)
           throw new Error("shared auth startup attestation is missing");
         if (
+          context.antigravityRequired === true &&
+          standard.antigravity !== true
+        )
+          throw new Error(
+            "antigravity provider startup attestation is missing",
+          );
+        if (
+          context.antigravityRequired !== true &&
+          standard.antigravity === true
+        )
+          throw new Error("antigravity provider attestation unexpected");
+        if (
           standard.extensionDigest !== SANDBOX_ASSET_SHA256["hitch-sandbox.ts"]
         )
           throw new Error("sandbox extension digest attestation is invalid");
@@ -844,6 +864,7 @@ export class NativePiRuntime implements AgentRuntime {
   readonly #owner: string;
   readonly #webSearchKey: string | undefined;
   readonly #webSearchUsers: ReadonlySet<string>;
+  readonly #antigravity: boolean;
   #poisoned = false;
 
   private constructor(
@@ -873,6 +894,7 @@ export class NativePiRuntime implements AgentRuntime {
     this.#owner = randomBytes(8).toString("hex");
     this.#webSearchKey = options.webSearch?.apiKey;
     this.#webSearchUsers = new Set(options.webSearch?.enabledUsers ?? []);
+    this.#antigravity = options.antigravity === true;
   }
 
   public static async create(
@@ -985,6 +1007,7 @@ export class NativePiRuntime implements AgentRuntime {
       userId,
       webSearchEnabled,
       sharedAuthRequired: true,
+      ...(this.#antigravity ? { antigravityRequired: true } : {}),
       ...(activeTools === undefined ? {} : { activeTools }),
       ...(forgePrompt === undefined ? {} : { forgePrompt }),
     };
@@ -1007,6 +1030,7 @@ export class NativePiRuntime implements AgentRuntime {
     validateSandboxAssets(this.#assets);
     const extension = join(this.#assets, "hitch-sandbox.ts");
     const webSearchExtension = join(this.#assets, "pi-web-search.ts");
+    const antigravityExtension = join(this.#assets, "pi-antigravity.ts");
     const worker = join(this.#assets, "sandbox-worker.mjs");
     const helper = join(this.#assets, "secure-bwrap-helper");
     const baseline = context.webSearchEnabled
@@ -1057,6 +1081,15 @@ export class NativePiRuntime implements AgentRuntime {
               SANDBOX_ASSET_SHA256["pi-web-search.ts"],
           }
         : {}),
+      ...(context.antigravityRequired
+        ? {
+            HITCH_ANTIGRAVITY_ENABLED: "1",
+            ANTIGRAVITY_NO_PREWARM: "1",
+            HITCH_ANTIGRAVITY_EXTENSION_PATH: antigravityExtension,
+            HITCH_ANTIGRAVITY_EXTENSION_SHA256:
+              SANDBOX_ASSET_SHA256["pi-antigravity.ts"],
+          }
+        : {}),
     };
     return new PiRpcProcess(
       this.#cli,
@@ -1064,6 +1097,7 @@ export class NativePiRuntime implements AgentRuntime {
         extension,
         context.webSearchEnabled ? webSearchExtension : undefined,
         session,
+        context.antigravityRequired ? antigravityExtension : undefined,
       ),
       context.workspace,
       environment,

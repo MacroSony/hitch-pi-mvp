@@ -233,3 +233,21 @@ test("Forge is explicit, per-user, and never a host/plugin configuration surface
     [],
   );
 });
+
+test("config validates optional strict boolean antigravity flag", () => {
+  const base = validConfig();
+  assert.equal(parseConfig(base).antigravity, false);
+
+  const enabled = { ...validConfig(), antigravity: true };
+  assert.equal(parseConfig(enabled).antigravity, true);
+
+  const disabled = { ...validConfig(), antigravity: false };
+  assert.equal(parseConfig(disabled).antigravity, false);
+
+  for (const invalid of ["true", "false", 1, 0, null, {}, []]) {
+    assert.throws(
+      () => parseConfig({ ...validConfig(), antigravity: invalid }),
+      /config\.antigravity/u,
+    );
+  }
+});

@@ -151,6 +151,7 @@ async function main(): Promise<void> {
             userIds: foundation.topology.users.map((user) => user.id),
             maxConcurrentTurns: config.maxConcurrentTurns,
             mediaStore: media,
+            antigravity: config.antigravity ?? false,
             ...(forge === undefined ? {} : { forge }),
             ...(nativeWebSearch === undefined
               ? {}

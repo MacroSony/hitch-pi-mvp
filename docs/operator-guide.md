@@ -569,3 +569,22 @@ The old runtime clones auth again, so its original persistence defect returns.
 For combined Mode A→B2 rollback, schema 4 is not readable by B2: restoring the
 pre-upgrade schema-3 backup discards newer messages/state. Obtain agreement on
 that loss or repair forward; restoring old credentials does not repair schema.
+
+
+## 12. Fixed Antigravity provider (AGY-1)
+
+Set optional `antigravity: true` to explicitly load the shipped provider-only
+adapter in both catalog and turn controllers. Default is false. It exposes no
+account-management commands, runtime login UI, additional tools or linked-account
+pool. Do not load the full desktop extension alongside it.
+
+Use operator-terminal login in an isolated staging profile, then perform the
+stopped, provider-specific import described in `docs/antigravity-plan.md`. Never
+send tokens/callback URLs in chat or overwrite shared auth with the whole staging
+file. Ordinary API-key models keep working while this authentication is pending.
+
+The local artifact adds `antigravity/gemini-3.8-flash`; npm 0.6.1 alone does not.
+Profiles for it need thinking low/medium/high (use low), not off. It will not
+quietly substitute Gemini 3.7 on a 404. Verify real availability before changing
+working profile defaults. A successful new-session model-less profile now uses
+the same default-model fallback as ordinary turns; manual overrides remain.

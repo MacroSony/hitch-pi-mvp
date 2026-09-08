@@ -62,6 +62,7 @@ export interface AppConfig {
   readonly users: readonly UserConfig[];
   readonly webSearch?: WebSearchConfig;
   readonly forge?: ForgeConfig;
+  readonly antigravity?: boolean;
 }
 
 export class ConfigError extends Error {
@@ -235,7 +236,7 @@ export function parseConfig(value: unknown): AppConfig {
       "wechatAccounts",
       "users",
     ],
-    ["mediaMode", "maxConcurrentTurns", "webSearch", "forge"],
+    ["mediaMode", "maxConcurrentTurns", "webSearch", "forge", "antigravity"],
     "config",
   );
   if (input.schemaVersion !== 1) fail("config.schemaVersion", "expected 1");
@@ -397,6 +398,14 @@ export function parseConfig(value: unknown): AppConfig {
     };
   }
 
+  let antigravity: boolean | undefined;
+  if (input.antigravity !== undefined) {
+    if (typeof input.antigravity !== "boolean") {
+      fail("config.antigravity", "expected a boolean");
+    }
+    antigravity = input.antigravity;
+  }
+
   return {
     schemaVersion: 1,
     dataRoot: absolutePath(input.dataRoot, "config.dataRoot"),
@@ -409,6 +418,7 @@ export function parseConfig(value: unknown): AppConfig {
     users,
     ...(webSearch === undefined ? {} : { webSearch }),
     ...(forge === undefined ? {} : { forge }),
+    antigravity: antigravity ?? false,
   };
 }
 

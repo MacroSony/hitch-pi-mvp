@@ -332,6 +332,7 @@ interface FixtureRun {
   readonly turnHandle: string;
   readonly userId: string;
   readonly webSearchEnabled: boolean;
+  readonly antigravity: boolean;
   readonly activeTools: readonly string[];
   readonly forgePrompt:
     | {
@@ -361,6 +362,9 @@ async function launchFixture(
   server: FixtureServer,
   options: {
     readonly web: boolean;
+    readonly antigravity?: boolean;
+    readonly antigravityMode?: "stream" | "404";
+    readonly missingProvider?: boolean;
     readonly registerWeb?: boolean;
     readonly webExtension?: string;
     readonly providerMode?: string;
@@ -390,11 +394,18 @@ async function launchFixture(
     options.sharedAuth === undefined
       ? "{}\n"
       : `${JSON.stringify({
-          "hitch-b2-fixture": {
+          [options.antigravity ? "antigravity" : "hitch-b2-fixture"]: {
             type: "oauth",
-            access: "HITCH_B2_WRONG_ACCESS",
-            refresh: "HITCH_B2_WRONG_REFRESH",
+            access: options.antigravity
+              ? "HITCH_ANTIGRAVITY_PER_USER_OLD_ACCESS"
+              : "HITCH_B2_WRONG_ACCESS",
+            refresh: options.antigravity
+              ? "HITCH_ANTIGRAVITY_PER_USER_OLD_REFRESH"
+              : "HITCH_B2_WRONG_REFRESH",
             expires: Date.now() + 60 * 60 * 1000,
+            ...(options.antigravity
+              ? { projectId: "per-user-old-project" }
+              : {}),
           },
         })}\n`,
     { mode: 0o600 },
@@ -411,6 +422,7 @@ async function launchFixture(
   const controllerNonce = randomBytes(16).toString("hex");
   const userId = "b2-fixture-user";
   const webSearchEnabled = options.web;
+  const antigravity = options.antigravity === true;
   const baselineTools = [
     "bash",
     "edit",
@@ -427,7 +439,12 @@ async function launchFixture(
   const mandatory = join(assetsRoot, "hitch-sandbox.ts");
   const web = join(assetsRoot, "pi-web-search.ts");
   const provider = join(repository, "test", "fixtures", "provider-fixture.mjs");
-  const preload = join(repository, "test", "fixtures", "network-preload.mjs");
+  const preload = join(
+    repository,
+    "test",
+    "fixtures",
+    antigravity ? "antigravity-network-preload.mjs" : "network-preload.mjs",
+  );
   const environment: NodeJS.ProcessEnv = {
     PATH: "/usr/bin:/bin",
     HOME: root,
@@ -441,6 +458,9 @@ async function launchFixture(
     HITCH_B2_FIXTURE_PORT: String(server.port),
     HITCH_B2_PROVIDER_MODE: options.providerMode ?? "web-search",
     HITCH_B2_PROVIDER_LOG: providerLog,
+    ...(antigravity
+      ? { HITCH_ANTIGRAVITY_FIXTURE_MODE: options.antigravityMode ?? "stream" }
+      : {}),
     ...(options.sharedAuth === undefined
       ? {}
       : {
@@ -475,6 +495,17 @@ async function launchFixture(
       join(assetsRoot, "sandbox-backend.mjs"),
     ),
   };
+  if (antigravity) {
+    environment.HITCH_ANTIGRAVITY_ENABLED = "1";
+    environment.ANTIGRAVITY_NO_PREWARM = "1";
+    environment.HITCH_ANTIGRAVITY_EXTENSION_PATH = join(
+      assetsRoot,
+      "pi-antigravity.ts",
+    );
+    environment.HITCH_ANTIGRAVITY_EXTENSION_SHA256 = assetDigest(
+      join(assetsRoot, "pi-antigravity.ts"),
+    );
+  }
   if (options.web) {
     environment.HITCH_WEB_SEARCH_ENABLED = "1";
     environment.HITCH_WEB_SEARCH_KEY = "fixture-key";
@@ -505,8 +536,11 @@ async function launchFixture(
       : options.webExtension === undefined
         ? []
         : ["--extension", options.webExtension]),
-    "--extension",
-    provider,
+    ...(antigravity
+      ? options.missingProvider === true
+        ? []
+        : ["--extension", join(assetsRoot, "pi-antigravity.ts")]
+      : ["--extension", provider]),
     "--no-builtin-tools",
     "--no-skills",
     "--no-prompt-templates",
@@ -538,6 +572,7 @@ async function launchFixture(
       ? {}
       : { forgePrompt: options.forgePrompt }),
     ...(options.sharedAuth === undefined ? {} : { sharedAuthRequired: true }),
+    ...(antigravity ? { antigravityRequired: true } : {}),
   };
   return {
     root,
@@ -549,6 +584,7 @@ async function launchFixture(
     turnHandle,
     userId,
     webSearchEnabled,
+    antigravity,
     activeTools,
     forgePrompt: options.forgePrompt,
     providerLog,
@@ -790,6 +826,315 @@ test(
       for (const run of runs) await stopFixture(run);
       rmSync(sessionRoot, { recursive: true, force: true });
       rmSync(sharedRoot, { recursive: true, force: true });
+      server.server.close();
+    }
+  },
+);
+
+test(
+  "Antigravity fixture uses the pinned provider, shared OAuth, and a real sandbox tool loop",
+  { skip: process.env.HITCH_RUN_SANDBOX_TESTS !== "1", timeout: 120_000 },
+  async () => {
+    const server = await startFixtureServer();
+    const sharedRoot = mkdtempSync(join(tmpdir(), "hitch-antigravity-auth-"));
+    privateDirectory(sharedRoot);
+    const sharedAuth = join(sharedRoot, "auth.json");
+    writeFileSync(
+      sharedAuth,
+      `${JSON.stringify({
+        antigravity: {
+          type: "oauth",
+          access: "HITCH_ANTIGRAVITY_ACCESS_EXPIRED",
+          refresh: "HITCH_ANTIGRAVITY_REFRESH",
+          expires: 0,
+          projectId: "fixture-project",
+        },
+      })}\n`,
+      { mode: 0o600 },
+    );
+    const run = await launchFixture(server, {
+      web: false,
+      antigravity: true,
+      sharedAuth,
+    });
+    writeFileSync(
+      join(run.workspace, "HITCH_ANTIGRAVITY_READ_SENTINEL"),
+      "HITCH_ANTIGRAVITY_READ_SENTINEL\n",
+      { mode: 0o600 },
+    );
+    try {
+      await waitForAttestation(run.rpc, run.context);
+      assert.equal(
+        logEntries(run.log).find((e) => e.type === "startup-attestation")
+          ?.antigravity,
+        true,
+      );
+      assert.equal(run.antigravity, true);
+      assert.equal(logEntries(run.providerLog).length, 0);
+
+      const available = await run.rpc.send({ type: "get_available_models" });
+      assert.equal(available.success, true);
+      const models = record(available.data)?.models;
+      assert.ok(Array.isArray(models));
+      const antigravityModel = models.find(
+        (item) =>
+          record(item)?.provider === "antigravity" &&
+          record(item)?.id === "gemini-3.8-flash",
+      );
+      assert.ok(antigravityModel);
+      assert.deepEqual(record(antigravityModel)?.thinkingLevelMap, {
+        off: null,
+        minimal: null,
+        low: "low",
+        medium: "medium",
+        high: "high",
+        xhigh: null,
+        max: null,
+      });
+      assert.deepEqual(
+        record(
+          (await run.rpc.send({ type: "get_available_thinking_levels" })).data,
+        )?.levels,
+        ["low", "medium", "high"],
+      );
+
+      assert.equal(
+        (
+          await run.rpc.send({
+            type: "set_model",
+            provider: "antigravity",
+            modelId: "gemini-3.8-flash",
+          })
+        ).success,
+        true,
+      );
+      const thinking = await run.rpc.send({
+        type: "set_thinking_level",
+        level: "low",
+      });
+      assert.equal(thinking.success, true);
+      assert.deepEqual(
+        record(
+          (await run.rpc.send({ type: "get_available_thinking_levels" })).data,
+        )?.levels,
+        ["low", "medium", "high"],
+      );
+      assert.equal(
+        (
+          await run.rpc.send({
+            type: "prompt",
+            message: "read the fixture marker",
+          })
+        ).success,
+        true,
+      );
+      await run.rpc.waitFor((event) => event.type === "agent_settled", 30_000);
+      const readEnd = run.rpc.events.find(
+        (event) =>
+          event.type === "tool_execution_end" && event.toolName === "read",
+      );
+      assert.ok(
+        readEnd,
+        JSON.stringify({
+          observations: logEntries(run.providerLog),
+          errors: run.rpc.events
+            .filter((e) => e.type === "message_end")
+            .map((e) => record(e.message)?.errorMessage),
+        }),
+      );
+      assert.equal(readEnd.isError, false);
+      assert.equal(
+        record((await run.rpc.send({ type: "get_last_assistant_text" })).data)
+          ?.text,
+        "HITCH_ANTIGRAVITY_STREAM_TOOL_LOOP_SETTLED",
+      );
+
+      const observations = logEntries(run.providerLog);
+      assert.deepEqual(
+        observations.map((entry) => ({
+          kind: entry.kind,
+          tokenValid: entry.tokenValid,
+          model: entry.model,
+          toolSeen: entry.toolSeen,
+        })),
+        [
+          {
+            kind: "token",
+            tokenValid: true,
+            model: undefined,
+            toolSeen: undefined,
+          },
+          {
+            kind: "stream",
+            tokenValid: true,
+            model: "gemini-3.8-flash-tiered",
+            toolSeen: false,
+          },
+          {
+            kind: "stream",
+            tokenValid: true,
+            model: "gemini-3.8-flash-tiered",
+            toolSeen: true,
+          },
+        ],
+      );
+      for (const entry of observations) {
+        assert.deepEqual(
+          Object.keys(entry).sort(),
+          [
+            "kind",
+            ...(entry.kind === "token"
+              ? ["tokenValid"]
+              : ["model", "tokenValid", "toolSeen"]),
+          ].sort(),
+        );
+      }
+      const saved = JSON.parse(readFileSync(sharedAuth, "utf8")).antigravity;
+      assert.equal(saved.access, "HITCH_ANTIGRAVITY_ACCESS_REFRESHED");
+      assert.equal(saved.refresh, "HITCH_ANTIGRAVITY_REFRESH_ROTATED");
+      assert.equal(saved.projectId, "fixture-project");
+      assert.equal(
+        JSON.parse(readFileSync(join(run.root, "profile", "auth.json"), "utf8"))
+          .antigravity.access,
+        "HITCH_ANTIGRAVITY_PER_USER_OLD_ACCESS",
+      );
+      assert.equal(server.requests.length, 0);
+      for (const secret of [
+        "HITCH_ANTIGRAVITY_ACCESS_EXPIRED",
+        "HITCH_ANTIGRAVITY_ACCESS_REFRESHED",
+        "HITCH_ANTIGRAVITY_REFRESH",
+        "HITCH_ANTIGRAVITY_REFRESH_ROTATED",
+      ])
+        assertNoSecret(run, secret);
+    } finally {
+      await stopFixture(run);
+      rmSync(sharedRoot, { recursive: true, force: true });
+      server.server.close();
+    }
+  },
+);
+
+test(
+  "Antigravity required launch fails closed when its provider attestation is absent",
+  { skip: process.env.HITCH_RUN_SANDBOX_TESTS !== "1", timeout: 45_000 },
+  async () => {
+    const server = await startFixtureServer();
+    const root = mkdtempSync(join(tmpdir(), "hitch-antigravity-missing-"));
+    privateDirectory(root);
+    const auth = join(root, "auth.json");
+    writeFileSync(
+      auth,
+      `${JSON.stringify({
+        antigravity: {
+          type: "oauth",
+          access: "HITCH_ANTIGRAVITY_ACCESS_VALID",
+          refresh: "HITCH_ANTIGRAVITY_REFRESH",
+          expires: Date.now() + 60 * 60 * 1000,
+          projectId: "fixture-project",
+        },
+      })}\n`,
+      { mode: 0o600 },
+    );
+    const run = await launchFixture(server, {
+      web: false,
+      antigravity: true,
+      missingProvider: true,
+      sharedAuth: auth,
+    });
+    try {
+      await assert.rejects(
+        waitForAttestation(run.rpc, run.context),
+        /startup attestation (is missing|did not arrive)/u,
+      );
+      assert.equal(logEntries(run.providerLog).length, 0);
+    } finally {
+      await stopFixture(run);
+      rmSync(root, { recursive: true, force: true });
+      server.server.close();
+    }
+  },
+);
+
+test(
+  "Antigravity 3.8 404 reports an error without requesting the forbidden 3.7 fallback",
+  { skip: process.env.HITCH_RUN_SANDBOX_TESTS !== "1", timeout: 120_000 },
+  async () => {
+    const server = await startFixtureServer();
+    const root = mkdtempSync(join(tmpdir(), "hitch-antigravity-404-"));
+    privateDirectory(root);
+    const auth = join(root, "auth.json");
+    writeFileSync(
+      auth,
+      `${JSON.stringify({
+        antigravity: {
+          type: "oauth",
+          access: "HITCH_ANTIGRAVITY_ACCESS_VALID",
+          refresh: "HITCH_ANTIGRAVITY_REFRESH",
+          expires: Date.now() + 60 * 60 * 1000,
+          projectId: "fixture-project",
+        },
+      })}\n`,
+      { mode: 0o600 },
+    );
+    const run = await launchFixture(server, {
+      web: false,
+      antigravity: true,
+      antigravityMode: "404",
+      sharedAuth: auth,
+    });
+    try {
+      await waitForAttestation(run.rpc, run.context);
+      assert.equal(
+        (
+          await run.rpc.send({
+            type: "set_model",
+            provider: "antigravity",
+            modelId: "gemini-3.8-flash",
+          })
+        ).success,
+        true,
+      );
+      assert.equal(
+        (await run.rpc.send({ type: "set_thinking_level", level: "low" }))
+          .success,
+        true,
+      );
+      assert.equal(
+        (await run.rpc.send({ type: "prompt", message: "404 fixture" }))
+          .success,
+        true,
+      );
+      await run.rpc.waitFor((event) => event.type === "agent_settled", 30_000);
+      const streams = logEntries(run.providerLog).filter(
+        (entry) => entry.kind === "stream",
+      );
+      assert.ok(
+        streams.length >= 1,
+        JSON.stringify({
+          observations: logEntries(run.providerLog),
+          errors: run.rpc.events
+            .filter((e) => e.type === "message_end")
+            .map((e) => record(e.message)?.errorMessage),
+        }),
+      );
+      assert.ok(
+        streams.every((entry) => entry.model === "gemini-3.8-flash-tiered"),
+      );
+      assert.equal(
+        streams.some((entry) => entry.model === "gemini-3.7-flash-tiered"),
+        false,
+      );
+      assert.ok(
+        run.rpc.events.some(
+          (event) =>
+            event.type === "message_end" &&
+            record(event.message)?.stopReason === "error",
+        ),
+      );
+      assert.equal(server.requests.length, 0);
+    } finally {
+      await stopFixture(run);
+      rmSync(root, { recursive: true, force: true });
       server.server.close();
     }
   },

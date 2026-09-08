@@ -1072,7 +1072,7 @@ export class HitchStore {
                     candidate.provider === current.model_provider &&
                     candidate.id === current.model_id,
                 );
-                if (currentModel === undefined && models.length > 0) {
+                if (currentModel === undefined) {
                   throw new AppError(
                     "model-unavailable",
                     "current session model is not in the Pi catalog",
@@ -1082,7 +1082,6 @@ export class HitchStore {
                 modelId = current.model_id;
                 if (resolved.thinkingLevel !== undefined) {
                   if (
-                    currentModel !== undefined &&
                     !currentModel.thinkingLevels.includes(
                       resolved.thinkingLevel,
                     )
@@ -1098,14 +1097,29 @@ export class HitchStore {
                 }
               } else {
                 if (resolved.thinkingLevel !== undefined) {
-                  throw new AppError(
-                    "model-unavailable",
-                    "select an available model before setting thinking",
-                  );
+                  const fallbackModel = models[0];
+                  if (fallbackModel === undefined) {
+                    throw new AppError(
+                      "model-unavailable",
+                      "select an available model before setting thinking",
+                    );
+                  }
+                  if (
+                    !fallbackModel.thinkingLevels.includes(
+                      resolved.thinkingLevel,
+                    )
+                  ) {
+                    throw new AppError(
+                      "model-unavailable",
+                      "profile thinking level is not supported by the current model",
+                    );
+                  }
+                  thinkingLevel = resolved.thinkingLevel;
+                } else {
+                  thinkingLevel = current?.thinking_level ?? null;
                 }
                 modelProvider = null;
                 modelId = null;
-                thinkingLevel = null;
               }
             }
 

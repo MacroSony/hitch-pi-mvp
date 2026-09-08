@@ -14,12 +14,18 @@ import { fileURLToPath } from "node:url";
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const source = join(repository, "packages", "hitch-sandbox-extension");
 const webSource = join(repository, "packages", "hitch-web-search-extension");
+const antigravitySource = join(
+  repository,
+  "packages",
+  "hitch-antigravity-extension",
+);
 const destination = join(repository, "dist", "sandbox");
 mkdirSync(destination, { recursive: true, mode: 0o700 });
 
 for (const [from, name] of [
   [join(source, "hitch-sandbox.ts"), "hitch-sandbox.ts"],
   [join(webSource, "pi-web-search.ts"), "pi-web-search.ts"],
+  [join(antigravitySource, "pi-antigravity.ts"), "pi-antigravity.ts"],
   [join(source, "sandbox-backend.mjs"), "sandbox-backend.mjs"],
   [join(source, "sandbox-worker.mjs"), "sandbox-worker.mjs"],
 ]) {

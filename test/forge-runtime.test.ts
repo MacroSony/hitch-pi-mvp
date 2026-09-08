@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import {
+  controllerArguments,
   waitForAttestation,
   type ControllerContext,
 } from "../src/pi/native-runtime.js";
@@ -365,4 +366,197 @@ test("Forge catalog resolution validation in native runtime handles unresolvable
   assert.throws(() => {
     mockCatalog.resolve({ kind: "profile", id: "nonexistent" });
   });
+});
+
+test("controllerArguments accepts 4th optional provider extension and formats CLI args strictly", () => {
+  const sandboxExt = "/dist/sandbox/hitch-sandbox.ts";
+  const webExt = "/dist/sandbox/pi-web-search.ts";
+  const providerExt = "/dist/sandbox/pi-antigravity.ts";
+
+  const baseArgs = controllerArguments(sandboxExt, undefined, { kind: "none" });
+  assert.deepEqual(baseArgs, [
+    "--mode",
+    "rpc",
+    "--offline",
+    "--no-extensions",
+    "--extension",
+    sandboxExt,
+    "--no-builtin-tools",
+    "--no-skills",
+    "--no-prompt-templates",
+    "--no-themes",
+    "--no-context-files",
+    "--no-approve",
+    "--no-session",
+  ]);
+
+  const webArgs = controllerArguments(sandboxExt, webExt, { kind: "none" });
+  assert.deepEqual(webArgs, [
+    "--mode",
+    "rpc",
+    "--offline",
+    "--no-extensions",
+    "--extension",
+    sandboxExt,
+    "--extension",
+    webExt,
+    "--no-builtin-tools",
+    "--no-skills",
+    "--no-prompt-templates",
+    "--no-themes",
+    "--no-context-files",
+    "--no-approve",
+    "--no-session",
+  ]);
+
+  const providerArgs = controllerArguments(
+    sandboxExt,
+    undefined,
+    { kind: "none" },
+    providerExt,
+  );
+  assert.deepEqual(providerArgs, [
+    "--mode",
+    "rpc",
+    "--offline",
+    "--no-extensions",
+    "--extension",
+    sandboxExt,
+    "--extension",
+    providerExt,
+    "--no-builtin-tools",
+    "--no-skills",
+    "--no-prompt-templates",
+    "--no-themes",
+    "--no-context-files",
+    "--no-approve",
+    "--no-session",
+  ]);
+
+  const bothArgs = controllerArguments(
+    sandboxExt,
+    webExt,
+    { kind: "id", id: "sess-1", directory: "/sess-dir" },
+    providerExt,
+  );
+  assert.deepEqual(bothArgs, [
+    "--mode",
+    "rpc",
+    "--offline",
+    "--no-extensions",
+    "--extension",
+    sandboxExt,
+    "--extension",
+    webExt,
+    "--extension",
+    providerExt,
+    "--no-builtin-tools",
+    "--no-skills",
+    "--no-prompt-templates",
+    "--no-themes",
+    "--no-context-files",
+    "--no-approve",
+    "--session-id",
+    "sess-1",
+    "--session-dir",
+    "/sess-dir",
+  ]);
+});
+
+test("waitForAttestation strictly verifies antigravity attestation and fails closed", async () => {
+  const root = mkdtempSync(join(tmpdir(), "hitch-antigravity-attest-"));
+  chmodSync(root, 0o700);
+  const logPath = join(root, "sandbox.log");
+  const controllerNonce = randomBytes(16).toString("hex");
+  const userId = "alice";
+
+  const baseline8 = [
+    "bash",
+    "edit",
+    "find",
+    "grep",
+    "hitch_publish",
+    "ls",
+    "read",
+    "write",
+  ];
+
+  const extensionPath = join(repository, "dist", "sandbox", "hitch-sandbox.ts");
+  const dummySchemaDigest = createHash("sha256")
+    .update("schemas")
+    .digest("hex");
+  const extensionDigest = sha256File(
+    join(repository, "packages", "hitch-sandbox-extension", "hitch-sandbox.ts"),
+  );
+
+  const baseContext: ControllerContext = {
+    root,
+    workspace: join(root, "workspace"),
+    inbox: join(root, "inbox"),
+    publishRoot: join(root, "publish"),
+    log: logPath,
+    controllerNonce,
+    turnHandle: randomBytes(16).toString("hex"),
+    userId,
+    webSearchEnabled: false,
+    activeTools: baseline8,
+    sharedAuthRequired: true,
+  };
+
+  const fakeController = {
+    get exited() {
+      return false;
+    },
+  };
+
+  try {
+    // 1. antigravityRequired = true, log has antigravity: true -> OK
+    const validEntry = {
+      type: "startup-attestation",
+      ready: true,
+      controllerNonce,
+      userId,
+      exactTools: baseline8,
+      allTools: baseline8,
+      activeTools: baseline8,
+      sourcePaths: baseline8.map(() => extensionPath),
+      sourcePath: extensionPath,
+      extensionDigest,
+      webSearchEnabled: false,
+      sharedAuth: true,
+      antigravity: true,
+      schemaDigest: dummySchemaDigest,
+    };
+    writeFileSync(logPath, `${JSON.stringify(validEntry)}\n`, { mode: 0o600 });
+    await waitForAttestation(fakeController, {
+      ...baseContext,
+      antigravityRequired: true,
+    });
+
+    // 2. antigravityRequired = true, log missing antigravity -> fail closed
+    const missingEntry = {
+      ...validEntry,
+      antigravity: false,
+    };
+    writeFileSync(logPath, `${JSON.stringify(missingEntry)}\n`, {
+      mode: 0o600,
+    });
+    await assert.rejects(async () => {
+      await waitForAttestation(fakeController, {
+        ...baseContext,
+        antigravityRequired: true,
+      });
+    }, /antigravity provider startup attestation is missing/u);
+
+    // 3. antigravityRequired = false/undefined, log has antigravity: true -> unexpected attestation error
+    writeFileSync(logPath, `${JSON.stringify(validEntry)}\n`, { mode: 0o600 });
+    await assert.rejects(async () => {
+      await waitForAttestation(fakeController, {
+        ...baseContext,
+        antigravityRequired: false,
+      });
+    }, /antigravity provider attestation unexpected/u);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

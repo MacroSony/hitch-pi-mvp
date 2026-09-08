@@ -153,6 +153,20 @@ const TEST_PROFILES: ForgeResolved[] = [
     model: { provider: "openai", id: "gpt-4o" },
     thinkingLevel: "high",
   },
+  {
+    selection: { kind: "profile", id: "mika" },
+    name: "Mika Draft Profile",
+    mode: "replace",
+    systemPrompt: "Mika system prompt.",
+    thinkingLevel: "off",
+  },
+  {
+    selection: { kind: "profile", id: "model-less-unsupported-thinking" },
+    name: "Model-less Unsupported Thinking Profile",
+    mode: "replace",
+    systemPrompt: "Unsupported thinking level on fallback.",
+    thinkingLevel: "xhigh",
+  },
 ];
 
 function privateDirectory(path: string): void {
@@ -805,4 +819,226 @@ test("clearing the other Forge kind does not remove the selected resource", () =
     app.stop();
     env.foundation.close();
   }
+});
+
+test("new session without explicit model successfully uses profile with thinkingLevel off and executes turn with fallback model", async () => {
+  const env = setup();
+  const claimedTurns: RuntimeTurn[] = [];
+  const runtime = new FakeAgentRuntime(
+    (turn) => {
+      claimedTurns.push(turn);
+      return {
+        outcome: "succeeded",
+        text: `Echo: ${turn.prompt}`,
+        sessionReusable: true,
+      };
+    },
+    TEST_MODELS,
+    env.catalog,
+  );
+  const app = new HitchApplication(env.store, runtime);
+  app.start();
+
+  // Create new session
+  assert.equal(
+    app.receiveTelegram("primary", update(1, "101", "!new mika-session"))
+      .accepted,
+    true,
+  );
+
+  // Use model-less profile with thinkingLevel off (like !profile use mika)
+  const useProfile = app.receiveTelegram(
+    "primary",
+    update(2, "101", "!profile use mika"),
+  );
+  assert.equal(useProfile.accepted, true);
+
+  // Check profile status and session status
+  assert.equal(
+    app.receiveTelegram("primary", update(3, "101", "!profile status"))
+      .accepted,
+    true,
+  );
+  assert.equal(
+    app.receiveTelegram("primary", update(4, "101", "!status")).accepted,
+    true,
+  );
+
+  const outbox = env.store
+    .pendingTelegramOutbox("primary", 50)
+    .map((o) => o.text ?? "");
+  assert.ok(outbox.some((t) => t.includes("Selected profile mika.")));
+  assert.ok(outbox.some((t) => t.includes("Selected profile: mika.")));
+  assert.ok(
+    outbox.some(
+      (t) => t.includes("model Pi default") && t.includes("thinking off"),
+    ),
+  );
+
+  // Submit prompt and verify turn payload
+  assert.equal(
+    app.receiveTelegram("primary", update(5, "101", "hello mika")).accepted,
+    true,
+  );
+  await app.drain();
+
+  assert.equal(claimedTurns.length, 1);
+  const turn = claimedTurns[0];
+  assert.ok(turn !== undefined);
+  assert.deepEqual(turn.forgeSelection, { kind: "profile", id: "mika" });
+  assert.equal(turn.modelProvider, undefined);
+  assert.equal(turn.modelId, undefined);
+  assert.equal(turn.thinkingLevel, "off");
+
+  env.foundation.close();
+});
+
+test("profile without explicit model preserves existing session model while updating thinkingLevel", async () => {
+  const env = setup();
+  const claimedTurns: RuntimeTurn[] = [];
+  const runtime = new FakeAgentRuntime(
+    (turn) => {
+      claimedTurns.push(turn);
+      return {
+        outcome: "succeeded",
+        text: `Echo: ${turn.prompt}`,
+        sessionReusable: true,
+      };
+    },
+    TEST_MODELS,
+    env.catalog,
+  );
+  const app = new HitchApplication(env.store, runtime);
+  app.start();
+
+  // User explicitly selects model
+  assert.equal(
+    app.receiveTelegram("primary", update(1, "101", "!model openai/gpt-4o"))
+      .accepted,
+    true,
+  );
+
+  // Use model-less profile with thinkingLevel off
+  assert.equal(
+    app.receiveTelegram("primary", update(2, "101", "!profile use mika"))
+      .accepted,
+    true,
+  );
+
+  // Status confirms model is preserved and thinking level is off
+  assert.equal(
+    app.receiveTelegram("primary", update(3, "101", "!status")).accepted,
+    true,
+  );
+  const outbox = env.store
+    .pendingTelegramOutbox("primary", 50)
+    .map((o) => o.text ?? "");
+  assert.ok(
+    outbox.some(
+      (t) => t.includes("model openai/gpt-4o") && t.includes("thinking off"),
+    ),
+  );
+
+  // Submit prompt and verify claimed turn retains explicit model
+  assert.equal(
+    app.receiveTelegram(
+      "primary",
+      update(4, "101", "prompt with preserved model"),
+    ).accepted,
+    true,
+  );
+  await app.drain();
+
+  assert.equal(claimedTurns.length, 1);
+  const turn = claimedTurns[0];
+  assert.ok(turn !== undefined);
+  assert.deepEqual(turn.forgeSelection, { kind: "profile", id: "mika" });
+  assert.equal(turn.modelProvider, "openai");
+  assert.equal(turn.modelId, "gpt-4o");
+  assert.equal(turn.thinkingLevel, "off");
+
+  env.foundation.close();
+});
+
+test("model-less profile with unsupported thinking level on fallback model fails atomically", () => {
+  const env = setup();
+  const runtime = new FakeAgentRuntime(undefined, TEST_MODELS, env.catalog);
+  const app = new HitchApplication(env.store, runtime);
+  app.start();
+
+  const res = app.receiveTelegram(
+    "primary",
+    update(1, "101", "!profile use model-less-unsupported-thinking"),
+  );
+  assert.equal(res.accepted, false);
+  assert.equal(res.category, "model-unavailable");
+
+  // Verify status is unchanged
+  assert.equal(
+    app.receiveTelegram("primary", update(2, "101", "!profile status"))
+      .accepted,
+    true,
+  );
+  assert.equal(
+    app.receiveTelegram("primary", update(3, "101", "!status")).accepted,
+    true,
+  );
+  const outbox = env.store
+    .pendingTelegramOutbox("primary", 50)
+    .map((o) => o.text ?? "");
+  assert.ok(outbox.some((t) => t.includes("No profile selected.")));
+  assert.ok(
+    outbox.some(
+      (t) =>
+        t.includes("model Pi default") && t.includes("thinking Pi default"),
+    ),
+  );
+
+  env.foundation.close();
+});
+
+test("profile use fails atomically without partial update when no models are available in catalog", () => {
+  const env = setup();
+  const runtime = new FakeAgentRuntime(undefined, [], env.catalog);
+  const app = new HitchApplication(env.store, runtime);
+  app.start();
+
+  // Model-less profile with thinking level fails
+  const modelLessRes = app.receiveTelegram(
+    "primary",
+    update(1, "101", "!profile use mika"),
+  );
+  assert.equal(modelLessRes.accepted, false);
+  assert.equal(modelLessRes.category, "model-unavailable");
+
+  // Profile with explicit model fails
+  const explicitRes = app.receiveTelegram(
+    "primary",
+    update(2, "101", "!profile use senior-dev"),
+  );
+  assert.equal(explicitRes.accepted, false);
+  assert.equal(explicitRes.category, "model-unavailable");
+
+  // Verify session state has not been partially modified
+  assert.equal(
+    app.receiveTelegram("primary", update(3, "101", "!profile status"))
+      .accepted,
+    true,
+  );
+  assert.equal(
+    app.receiveTelegram("primary", update(4, "101", "!status")).accepted,
+    true,
+  );
+  const outbox = env.store
+    .pendingTelegramOutbox("primary", 50)
+    .map((o) => o.text ?? "");
+  assert.ok(outbox.some((t) => t.includes("No profile selected.")));
+  assert.ok(
+    outbox.some(
+      (t) =>
+        t.includes("model Pi default") && t.includes("thinking Pi default"),
+    ),
+  );
+
+  env.foundation.close();
 });

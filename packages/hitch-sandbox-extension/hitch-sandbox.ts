@@ -316,6 +316,9 @@ export default function (pi: ExtensionAPI): void {
 		if (process.env.HITCH_SHARED_AUTH_REQUIRED === "1" && process.env.HITCH_SHARED_AUTH_INSTALLED !== "1") {
 			throw new Error("shared-auth-failed");
 		}
+		if (process.env.HITCH_ANTIGRAVITY_ENABLED === "1" && process.env.HITCH_ANTIGRAVITY_INSTALLED !== "1") {
+			throw new Error("antigravity-provider-failed");
+		}
 		pi.setActiveTools([...activeSubset]);
 		const attestation = attest();
 		const probe = await executeSandboxRequest(
@@ -334,6 +337,7 @@ export default function (pi: ExtensionAPI): void {
 		log({
 			type: "startup-attestation",
 			sharedAuth: process.env.HITCH_SHARED_AUTH_INSTALLED === "1",
+			antigravity: process.env.HITCH_ANTIGRAVITY_INSTALLED === "1",
 			ready: true,
 			controllerNonce: process.env.HITCH_P0_CONTROLLER_NONCE,
 			userId: process.env.HITCH_P0_USER_ID,
