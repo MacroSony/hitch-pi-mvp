@@ -6,6 +6,9 @@ const RESULT_SENTINEL = "HITCH_B2_WEB_RESULT_SENTINEL";
 const MODE_A_PROMPT_SENTINEL = "HITCH_MODE_A_PROMPT_SENTINEL";
 const MODE_A_SETTLED_SENTINEL = "HITCH_MODE_A_DISABLED_TOOLS_SETTLED";
 const MODE_A_MUTATION_MARKER = "HITCH_MODE_A_MUTATION_HOST_EXECUTED";
+const DUMMY_ACCESS_EXPIRED = "HITCH_B2_DUMMY_ACCESS_EXPIRED";
+const DUMMY_ACCESS_REFRESHED = "HITCH_B2_DUMMY_ACCESS_REFRESHED";
+const DUMMY_REFRESH = "HITCH_B2_DUMMY_REFRESH";
 const BASELINE_TOOLS = [
   "bash",
   "edit",
@@ -144,6 +147,15 @@ function modeAObservation(context, mode) {
 function streamFixture(selectedModel, context, options) {
   const stream = createAssistantMessageEventStream();
   queueMicrotask(() => {
+    const sharedAuth = process.env.HITCH_B2_SHARED_AUTH === "1";
+    const apiKeyValid =
+      !sharedAuth || options?.apiKey === DUMMY_ACCESS_REFRESHED;
+    if (sharedAuth && process.env.HITCH_B2_PROVIDER_LOG) {
+      fs.appendFileSync(
+        process.env.HITCH_B2_PROVIDER_LOG,
+        `${JSON.stringify({ sharedAuthApiKeyValid: apiKeyValid })}\n`,
+      );
+    }
     const toolResults = context.messages.filter(
       (message) => message.role === "toolResult",
     );
@@ -151,7 +163,17 @@ function streamFixture(selectedModel, context, options) {
     let content;
     let stopReason;
 
-    if (mode === "unknown-web") {
+    if (mode === "shared-auth") {
+      content = [
+        {
+          type: "text",
+          text: apiKeyValid
+            ? "HITCH_B2_SHARED_AUTH_SETTLED"
+            : "HITCH_B2_SHARED_AUTH_API_KEY_MISMATCH",
+        },
+      ];
+      stopReason = "stop";
+    } else if (mode === "unknown-web") {
       if (toolResults.length === 0) {
         content = [
           {
@@ -270,6 +292,7 @@ function streamFixture(selectedModel, context, options) {
 
 export default function (pi) {
   const mode = process.env.HITCH_B2_PROVIDER_MODE ?? "web-search";
+  const sharedAuth = process.env.HITCH_B2_SHARED_AUTH === "1";
   if (mode === "mode-a-mutation") {
     const baseline = [...BASELINE_TOOLS];
     if (process.env.HITCH_WEB_SEARCH_ENABLED === "1")
@@ -280,12 +303,48 @@ export default function (pi) {
     pi.on("session_start", async () => restoreBaseline());
     pi.on("before_agent_start", async () => restoreBaseline());
   }
-  pi.registerProvider("hitch-b2-fixture", {
-    name: "Hitch B2 deterministic provider fixture",
-    baseUrl: "http://127.0.0.1:9/v1",
-    apiKey: "B2_PROVIDER_ONLY_NOT_A_WEB_KEY",
-    api: "openai-completions",
-    streamSimple: streamFixture,
-    models: [model("b2-web-search")],
-  });
+  const provider = sharedAuth
+    ? {
+        name: "Hitch B2 deterministic OAuth provider fixture",
+        baseUrl: "http://127.0.0.1:9/v1",
+        api: "openai-completions",
+        streamSimple: streamFixture,
+        models: [model("b2-web-search")],
+        oauth: {
+          name: "Hitch B2 deterministic OAuth provider fixture",
+          async login() {
+            throw new Error("fixture login is intentionally disabled");
+          },
+          async refreshToken(credentials, signal) {
+            signal?.throwIfAborted?.();
+            if (
+              credentials?.type !== "oauth" ||
+              credentials.access !== DUMMY_ACCESS_EXPIRED ||
+              credentials.refresh !== DUMMY_REFRESH
+            ) {
+              throw new Error("fixture refresh credential mismatch");
+            }
+            const refreshLog = process.env.HITCH_B2_REFRESH_LOG;
+            if (refreshLog)
+              fs.appendFileSync(refreshLog, "refreshed\n", { mode: 0o600 });
+            return {
+              refresh: "HITCH_B2_DUMMY_REFRESH_ROTATED",
+              access: DUMMY_ACCESS_REFRESHED,
+              expires: Date.now() + 60 * 60 * 1000,
+            };
+          },
+          getApiKey(credentials) {
+            return credentials.access;
+          },
+        },
+      }
+    : {
+        name: "Hitch B2 deterministic provider fixture",
+        baseUrl: "http://127.0.0.1:9/v1",
+        apiKey: "B2_PROVIDER_ONLY_NOT_A_WEB_KEY",
+        api: "openai-completions",
+        streamSimple: streamFixture,
+        models: [model("b2-web-search")],
+      };
+  pi.registerProvider("hitch-b2-fixture", provider);
 }

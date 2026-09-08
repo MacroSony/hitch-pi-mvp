@@ -140,11 +140,15 @@ sudo -iu hitch bash -lc \
 ```
 
 Never use a personal ambient Pi profile and never put provider keys in
-`service.env`. Hitch validates this source profile, then clones it into
-owner-only per-user directories under `dataRoot/pi-profiles` and validates each
-clone before native startup. While the service is stopped, keep an
-owner-private offline copy of `auth.json`; the pinned Pi writer is not
-crash-atomic.
+`service.env`. Stop Hitch before logging in, editing or restoring provider auth;
+use an owner-private profile directory and `auth.json` (0700/0600).
+`piProfileDir/auth.json` is the persistent shared authority for all configured
+users, **not a startup seed**. Runtime OAuth refresh writes back there using a
+shared lock and atomic replacement. Keep an owner-private stopped backup.
+Per-user directories under `dataRoot/pi-profiles` still hold separate settings
+and model caches; settings/models are synchronized at startup, model cache is
+seeded only when absent. Auth is never copied again; legacy per-user auth is
+retained but ignored. See Section 11 before upgrading an existing deployment.
 
 ### Telegram
 
@@ -496,3 +500,72 @@ rollback to B2 cannot read schema 4; a rollback needs the pre-upgrade database,
 which loses any newer messages unless separately reconciled. No live Mode A
 deployment or migration is implied by code acceptance. Dogfood remains on B2
 until an attended switch is explicitly arranged.
+
+
+## 11. Shared operator authentication (AUTH-1)
+
+This section describes the new code, not proof that an existing deployment has
+been migrated. Deterministic real-CLI fixtures passed; an attended real-provider
+and channel check is still required. No new config key or auth database exists.
+
+### Upgrade an existing deployment
+
+1. Arrange a maintenance window. Confirm turn queue, active sandbox scopes and
+   pending deliveries are idle, then stop the service using Section 8. Stop any
+   desktop Pi or other process using the same rotating OAuth authorization.
+2. Take an owner-private stopped backup of the deployment, including the
+   operator profile **and** old per-user profiles. Do not print their contents,
+   send them in chat, put them in a workspace or commit them to Git.
+3. Choose the single current authority at `piProfileDir/auth.json` in the
+   operator terminal. Older versions refreshed separate clones, so the original
+   source may be stale. Do not select a clone by timestamp alone, merge refresh
+   tokens, or automatically overwrite from the old seed. If currency cannot be
+   established, use the pinned Pi `/login` command in Section 4 against this
+   dedicated profile while stopped. It must produce a valid, private auth file;
+   a missing/corrupt/linked file causes fail-closed startup.
+4. Deploy an immutable build and retain the previous release/config. AUTH-1
+   itself has no schema migration, but the combined Mode A code uses schema 4:
+   upgrading a live schema-3 B2 deployment requires its stopped DB backup and an
+   explicit data-loss decision for rollback. Do not assume code-only rollback.
+5. Start the new service. Check available models and send an attended test turn
+   from the intended private channel. Then, while idle, restart and repeat.
+   Only metadata and success/failure belong in logs or an acceptance report.
+   Dummy refresh tests do not establish real-provider refresh acceptance; test
+   actual refresh when feasible without editing or revealing tokens.
+
+### Daily operation and recovery
+
+- All approved users share the operator account's permissions, quota, rate
+  limits and failure/revocation domain. Check provider terms. Their session,
+  workspace and model-cache isolation remains unchanged.
+- Service-stopped operator `/login` is the recovery path; there is no remote
+  chat login and no UI fallback. Restart afterward to refresh the model catalog.
+  Do not edit auth during active work, share the entire Pi profile directory,
+  or keep separate rotating-token copies in a concurrent desktop instance.
+- The controller accepts literal API keys and Pi `$VAR` / `${VAR}` templates
+  with `$$` / `$!` escapes. Provider-scoped auth environment is supported;
+  ambient host environment is not generally inherited. Missing references and
+  leading `!command` key commands fail closed. Do not move provider secrets to
+  a model-visible file or enable host command execution to work around this.
+- Shared updates use the canonical `auth.json.lock` convention (30s stale,
+  bounded 30s wait). Ordinary model requests are not all serialized; the
+  read→refresh→save transaction is. Never remove a live lock to unblock a turn.
+- Atomic local replacement prevents a partially written authority. It cannot
+  prevent remote token rotation followed by a crash before local persistence;
+  an old backup may already be invalid, requiring re-login. A failed save can
+  also mean a new complete file exists but directory fsync failed. Do not
+  automatically retry by restoring an old token. While stopped, remove only
+  confirmed orphan `auth.json.tmp-*` files; these are private secret-bearing
+  files, not diagnostics to upload.
+- Additional plugin writers (notably pi-agy) are not integrated or certified.
+  Do not enable them merely because they recognize the same auth format.
+
+### Rollback
+
+Stop and retain the current state first. For an AUTH-1-only rollback on the same
+DB schema, preserve the latest authoritative operator auth, restore compatible
+code/config, and re-login if needed. **Do not blindly restore old auth clones.**
+The old runtime clones auth again, so its original persistence defect returns.
+For combined Mode A→B2 rollback, schema 4 is not readable by B2: restoring the
+pre-upgrade schema-3 backup discards newer messages/state. Obtain agreement on
+that loss or repair forward; restoring old credentials does not repair schema.

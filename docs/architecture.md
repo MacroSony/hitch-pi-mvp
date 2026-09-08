@@ -142,24 +142,28 @@ JSONL sibling branches to one session while only one Turn remains on the
 selected leaf, so the per-user pump plus per-user profile/session isolation
 still prohibits concurrent opens of the same transcript.
 
-The controller uses an operator-managed, host-private Pi profile that is cloned
-into a private per-user directory at startup (`dataRoot/pi-profiles/<user>`).
-Every clone is normalized to owner-only modes and passes `validatePiProfile`
-before use; runtime picks the clone by `userId`, never the shared operator
-source. `NativePiRuntime` uses native `ModelRuntime`. At service startup Hitch
-obtains `get_available_models` from a dedicated clone, checks static allowlists,
-and publishes a content-free catalog digest. Session changes use RPC
-`set_model` and `set_thinking_level`. Hitch does not parse provider requests or
-credentials.
+The controller retains a private per-user Pi directory at startup
+(`dataRoot/pi-profiles/<user>`). Only settings/models are synchronized from the
+operator profile; models-store is seeded once and retained. All configured users
+intentionally share one operator authority, `piProfileDir/auth.json`; old auth
+clones are ignored. A fixed controller-only Node preload wraps public
+`ModelRuntime.create({credentials})` before the original pinned CLI starts.
+No private Pi imports or generic loader are introduced. Both catalog and turn
+controllers use this store, and mandatory startup attestation proves that the
+auth bootstrap ran. Session model/thinking changes retain the original RPC path.
+Pi still owns provider protocol/refresh; Hitch's small store owns locked and
+atomic persistence, without putting credentials in model or sandbox contexts.
 
 The MVP admits at most `maxConcurrentTurns` provider-owning Pi controllers
 globally (config, default 2, validated 1–8). The per-user pump still serializes
-Turns for one user; the semaphore only bounds cross-user parallelism. The
-pinned Pi serializes rotating OAuth refresh with a file lock, but its in-place
-`auth.json` write is not crash-atomic: deterministic mid-write termination can
-leave invalid JSON. For this attended MVP, startup validates each per-user
-profile clone and the operator keeps a private backup or logs in again after
-corruption. A durable upstream writer remains post-MVP hardening. Sandbox
+Turns for one user; the semaphore only bounds cross-user parallelism. Shared
+`proper-lockfile` coordination covers re-read→Pi refresh callback→atomic save,
+not whole provider requests. Private temporary-file fsync, rename and directory
+fsync avoid truncated authority files. Remote refresh and local persistence are
+not one transaction: a crash between them can still require operator re-login.
+Login and external auth edits happen only while stopped; additional plugin
+writers are not covered. See `docs/shared-auth-plan.md` for acceptance and
+migration details. Sandbox
 scopes are namespaced to the owning runtime, so one runtime's cleanup cannot
 kill another runtime's active units; a global sweep only runs at startup when
 no Turn is active.

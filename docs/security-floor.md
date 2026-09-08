@@ -34,8 +34,10 @@ without pretending the MVP is hardened for adversarial users.
 ### Pi and extensions
 
 - Pin Pi and the mandatory Hitch extension. Use a dedicated, host-private Pi
-  source profile that is cloned into owner-only per-user directories at
-  startup and is never mounted into the tool sandbox.
+  operator auth authority shared by the configured users; keep per-user
+  settings/cache directories separate. Never clone auth at startup or mount
+  either auth or profile directories into the tool sandbox. Require shared-auth
+  bootstrap attestation before prompting.
 - Disable Pi project/global discovery, context files, workspace settings,
   packages, project extensions, skills, prompts, and themes.
 - Disable Pi built-in tools. Before each prompt, attest that `read`, `write`,
@@ -107,10 +109,12 @@ without pretending the MVP is hardened for adversarial users.
 
 ## Accepted MVP risks
 
-- Pi 0.84.1 serializes OAuth refresh but writes `auth.json` in place. A host or
-  process crash during that write can require restoring the operator backup or
-  logging in again. This is accepted for an attended MVP and remains a
-  post-MVP upstream hardening item.
+- AUTH-1 uses locked atomic persistence around Pi 0.84.1 refresh, but remote
+  rotation and local persistence are not one transaction. A crash between them
+  can require operator re-login; restoring an older backup may not help.
+  External/desktop/plugin writers are not certified by this path and must not
+  run concurrently against the same rotating authorization. Operator auth
+  changes require a stopped service.
 - The initial ext4 deployment has no project quota. Configured object/temp
   limits and free-space checks reduce accidental exhaustion, but a runaway
   workspace can consume shared disk. The operator monitors and can stop the

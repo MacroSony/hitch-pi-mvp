@@ -12,6 +12,7 @@ import {
 } from "node:http";
 import {
   readFileSync,
+  readdirSync,
   statSync,
   mkdirSync,
   mkdtempSync,
@@ -339,6 +340,7 @@ interface FixtureRun {
       }
     | undefined;
   readonly providerLog: string;
+  readonly refreshLog: string | undefined;
   readonly prefix: string;
   readonly sessionPath: string | undefined;
   readonly context: ControllerContext;
@@ -369,6 +371,9 @@ async function launchFixture(
     };
     readonly forgePromptRaw?: string;
     readonly sessionPath?: string;
+    /** An absolute auth.json shared by independently launched Pi processes. */
+    readonly sharedAuth?: string;
+    readonly omitSharedAuthPreload?: boolean;
   },
 ): Promise<FixtureRun> {
   const root = mkdtempSync(join(tmpdir(), "hitch-b2-rpc-"));
@@ -380,10 +385,27 @@ async function launchFixture(
   const publishRoot = join(root, "publish");
   for (const path of [data, profile, workspace, inbox, publishRoot])
     privateDirectory(path);
-  writeFileSync(join(profile, "auth.json"), "{}\n", { mode: 0o600 });
+  writeFileSync(
+    join(profile, "auth.json"),
+    options.sharedAuth === undefined
+      ? "{}\n"
+      : `${JSON.stringify({
+          "hitch-b2-fixture": {
+            type: "oauth",
+            access: "HITCH_B2_WRONG_ACCESS",
+            refresh: "HITCH_B2_WRONG_REFRESH",
+            expires: Date.now() + 60 * 60 * 1000,
+          },
+        })}\n`,
+    { mode: 0o600 },
+  );
   writeFileSync(join(inbox, "input.txt"), "fixture inbox\n", { mode: 0o600 });
   const log = join(root, "sandbox.log");
   const providerLog = join(root, "provider.log");
+  const refreshLog =
+    options.sharedAuth === undefined
+      ? undefined
+      : join(dirname(options.sharedAuth), "refresh.log");
   const prefix = randomBytes(8).toString("hex");
   const turnHandle = randomBytes(16).toString("hex");
   const controllerNonce = randomBytes(16).toString("hex");
@@ -419,6 +441,14 @@ async function launchFixture(
     HITCH_B2_FIXTURE_PORT: String(server.port),
     HITCH_B2_PROVIDER_MODE: options.providerMode ?? "web-search",
     HITCH_B2_PROVIDER_LOG: providerLog,
+    ...(options.sharedAuth === undefined
+      ? {}
+      : {
+          HITCH_B2_SHARED_AUTH: "1",
+          HITCH_SHARED_AUTH_PATH: options.sharedAuth,
+          HITCH_SHARED_AUTH_REQUIRED: "1",
+          HITCH_B2_REFRESH_LOG: refreshLog,
+        }),
     HITCH_ACTIVE_TOOLS: JSON.stringify(activeTools),
     ...(options.forgePromptRaw !== undefined
       ? { HITCH_FORGE_PROMPT: options.forgePromptRaw }
@@ -452,6 +482,10 @@ async function launchFixture(
     environment.HITCH_WEB_SEARCH_EXTENSION_SHA256 = assetDigest(web);
   }
   const args = [
+    ...(options.sharedAuth === undefined ||
+    options.omitSharedAuthPreload === true
+      ? []
+      : ["--import", join(repository, "dist", "src", "pi", "auth-preload.js")]),
     join(
       repository,
       "node_modules",
@@ -489,7 +523,7 @@ async function launchFixture(
         ]),
   ];
   const rpc = new FixtureRpcProcess(args, environment, workspace);
-  const context: ControllerContext = {
+  const context = {
     root,
     workspace,
     inbox,
@@ -503,6 +537,7 @@ async function launchFixture(
     ...(options.forgePrompt === undefined
       ? {}
       : { forgePrompt: options.forgePrompt }),
+    ...(options.sharedAuth === undefined ? {} : { sharedAuthRequired: true }),
   };
   return {
     root,
@@ -517,6 +552,7 @@ async function launchFixture(
     activeTools,
     forgePrompt: options.forgePrompt,
     providerLog,
+    refreshLog,
     prefix,
     sessionPath: options.sessionPath,
     context,
@@ -531,15 +567,233 @@ async function stopFixture(run: FixtureRun): Promise<void> {
   rmSync(run.root, { recursive: true, force: true });
 }
 
+function directoryText(path: string): string {
+  let text = "";
+  for (const entry of readdirSync(path, { withFileTypes: true })) {
+    const child = join(path, entry.name);
+    if (entry.isDirectory()) text += directoryText(child);
+    else if (entry.isFile()) text += readFileSync(child, "utf8");
+  }
+  return text;
+}
+
 function assertNoSecret(run: FixtureRun, secret: string): void {
   const text = [
     ...run.rpc.stdout,
     ...run.rpc.stderr,
     existsSync(run.log) ? readFileSync(run.log, "utf8") : "",
     existsSync(run.providerLog) ? readFileSync(run.providerLog, "utf8") : "",
+    run.refreshLog !== undefined && existsSync(run.refreshLog)
+      ? readFileSync(run.refreshLog, "utf8")
+      : "",
+    directoryText(run.workspace),
   ].join("\n");
   assert.doesNotMatch(text, new RegExp(secret, "u"));
 }
+
+test(
+  "B2 real RPC shares OAuth credentials across isolated controllers and sandboxes",
+  { skip: process.env.HITCH_RUN_SANDBOX_TESTS !== "1", timeout: 180_000 },
+  async () => {
+    const server = await startFixtureServer();
+    const sharedRoot = mkdtempSync(join(tmpdir(), "hitch-b2-shared-auth-"));
+    privateDirectory(sharedRoot);
+    const sharedAuth = join(sharedRoot, "auth.json");
+    const refreshLog = join(sharedRoot, "refresh.log");
+    writeFileSync(
+      sharedAuth,
+      `${JSON.stringify({
+        "hitch-b2-fixture": {
+          type: "oauth",
+          access: "HITCH_B2_DUMMY_ACCESS_EXPIRED",
+          refresh: "HITCH_B2_DUMMY_REFRESH",
+          expires: 0,
+        },
+      })}\n`,
+      { mode: 0o600 },
+    );
+    chmodSync(sharedAuth, 0o600);
+    const sessionRoot = mkdtempSync(join(tmpdir(), "hitch-b2-auth-sessions-"));
+    privateDirectory(sessionRoot);
+    const runs: FixtureRun[] = [];
+    const launchOne = launchFixture(server, {
+      web: false,
+      providerMode: "shared-auth",
+      sharedAuth,
+      sessionPath: join(sessionRoot, "one.jsonl"),
+    });
+    const launchTwo = launchFixture(server, {
+      web: false,
+      providerMode: "shared-auth",
+      sharedAuth,
+      sessionPath: join(sessionRoot, "two.jsonl"),
+    });
+    try {
+      const launched = await Promise.allSettled([launchOne, launchTwo]);
+      for (const result of launched) {
+        if (result.status === "fulfilled") runs.push(result.value);
+      }
+      for (const result of launched) {
+        if (result.status === "rejected") throw result.reason;
+      }
+      assert.equal(runs.length, 2);
+      await Promise.all(
+        runs.map((run) => waitForAttestation(run.rpc, run.context)),
+      );
+      for (const run of runs) {
+        const attestation = logEntries(run.log).find(
+          (entry) => entry.type === "startup-attestation",
+        );
+        assert.ok(attestation);
+        assert.equal(attestation.sharedAuth, true);
+        const available = await run.rpc.send({ type: "get_available_models" });
+        assert.equal(available.success, true);
+        const models = record(available.data)?.models;
+        assert.ok(Array.isArray(models));
+        assert.ok(
+          models.some(
+            (item) =>
+              record(item)?.provider === "hitch-b2-fixture" &&
+              record(item)?.id === "b2-web-search",
+          ),
+        );
+        const perUserAuth = JSON.parse(
+          readFileSync(join(run.root, "profile", "auth.json"), "utf8"),
+        )["hitch-b2-fixture"];
+        assert.equal(perUserAuth.access, "HITCH_B2_WRONG_ACCESS");
+        assert.equal(perUserAuth.refresh, "HITCH_B2_WRONG_REFRESH");
+      }
+
+      await Promise.all(
+        runs.map(async (run) => {
+          assert.equal(
+            (
+              await run.rpc.send({
+                type: "set_model",
+                provider: "hitch-b2-fixture",
+                modelId: "b2-web-search",
+              })
+            ).success,
+            true,
+          );
+          assert.equal(
+            (
+              await run.rpc.send({
+                type: "prompt",
+                message: "shared OAuth fixture prompt",
+              })
+            ).success,
+            true,
+          );
+        }),
+      );
+      await Promise.all(
+        runs.map((run) =>
+          run.rpc.waitFor((event) => event.type === "agent_settled", 30_000),
+        ),
+      );
+      for (const run of runs) {
+        assert.equal(
+          record((await run.rpc.send({ type: "get_last_assistant_text" })).data)
+            ?.text,
+          "HITCH_B2_SHARED_AUTH_SETTLED",
+        );
+        assert.ok(
+          logEntries(run.providerLog).some(
+            (entry) => entry.sharedAuthApiKeyValid === true,
+          ),
+        );
+      }
+      assert.equal(
+        existsSync(refreshLog)
+          ? readFileSync(refreshLog, "utf8")
+              .split("\n")
+              .filter((line) => line === "refreshed").length
+          : 0,
+        1,
+      );
+      const savedAuth = JSON.parse(readFileSync(sharedAuth, "utf8"))[
+        "hitch-b2-fixture"
+      ];
+      assert.equal(savedAuth.access, "HITCH_B2_DUMMY_ACCESS_REFRESHED");
+      assert.equal(savedAuth.refresh, "HITCH_B2_DUMMY_REFRESH_ROTATED");
+
+      const parentPid = runs[0]?.rpc.child.pid;
+      assert.ok(parentPid !== undefined);
+      const probe = await runs[0]!.rpc.send({
+        type: "bash",
+        command: [
+          `if [ -r ${JSON.stringify(sharedAuth)} ]; then exit 41; fi`,
+          'if [ -n "$HITCH_SHARED_AUTH_PATH" ]; then exit 42; fi',
+          "if env | /usr/bin/grep -Eq 'HITCH_B2_DUMMY_(ACCESS|REFRESH)'; then exit 43; fi",
+          `if [ -e /proc/${parentPid} ]; then exit 44; fi`,
+          "printf HITCH_B2_SHARED_AUTH_SANDBOX_PROBE_OK",
+        ].join("; "),
+      });
+      assert.equal(probe.success, true);
+      assert.equal(record(probe.data)?.exitCode, 0);
+      assert.equal(
+        record(probe.data)?.output,
+        "HITCH_B2_SHARED_AUTH_SANDBOX_PROBE_OK",
+      );
+
+      for (const run of runs) {
+        assertNoSecret(run, "HITCH_B2_DUMMY_ACCESS_EXPIRED");
+        assertNoSecret(run, "HITCH_B2_DUMMY_ACCESS_REFRESHED");
+        assertNoSecret(run, "HITCH_B2_DUMMY_REFRESH");
+      }
+      await Promise.all(runs.splice(0).map((run) => stopFixture(run)));
+      const third = await launchFixture(server, {
+        web: false,
+        providerMode: "shared-auth",
+        sharedAuth,
+        sessionPath: join(sessionRoot, "three.jsonl"),
+      });
+      runs.push(third);
+      await waitForAttestation(third.rpc, third.context);
+      assert.equal(
+        (
+          await third.rpc.send({
+            type: "set_model",
+            provider: "hitch-b2-fixture",
+            modelId: "b2-web-search",
+          })
+        ).success,
+        true,
+      );
+      assert.equal(
+        (await third.rpc.send({ type: "prompt", message: "fresh reuse" }))
+          .success,
+        true,
+      );
+      await third.rpc.waitFor(
+        (event) => event.type === "agent_settled",
+        30_000,
+      );
+      assert.equal(
+        record((await third.rpc.send({ type: "get_last_assistant_text" })).data)
+          ?.text,
+        "HITCH_B2_SHARED_AUTH_SETTLED",
+      );
+      assert.equal(
+        readFileSync(refreshLog, "utf8")
+          .split("\n")
+          .filter((line) => line === "refreshed").length,
+        1,
+      );
+      for (const run of runs) {
+        assertNoSecret(run, "HITCH_B2_DUMMY_ACCESS_EXPIRED");
+        assertNoSecret(run, "HITCH_B2_DUMMY_ACCESS_REFRESHED");
+        assertNoSecret(run, "HITCH_B2_DUMMY_REFRESH");
+      }
+    } finally {
+      for (const run of runs) await stopFixture(run);
+      rmSync(sessionRoot, { recursive: true, force: true });
+      rmSync(sharedRoot, { recursive: true, force: true });
+      server.server.close();
+    }
+  },
+);
 
 test(
   "B2 real pinned Pi RPC performs web_search through production egress and settles",
@@ -1177,6 +1431,41 @@ test(
       assert.equal(server.requests.length, 0);
     } finally {
       await stopFixture(run);
+      server.server.close();
+    }
+  },
+);
+
+test(
+  "shared auth required: missing bootstrap or invalid authority never passes host attestation",
+  { skip: process.env.HITCH_RUN_SANDBOX_TESTS !== "1", timeout: 45000 },
+  async () => {
+    const server = await startFixtureServer();
+    const root = mkdtempSync(join(tmpdir(), "hitch-auth-negative-"));
+    privateDirectory(root);
+    const auth = join(root, "auth.json");
+    writeFileSync(auth, "{}", { mode: 0o600 });
+    try {
+      for (const scenario of ["missing-bootstrap", "missing-file"] as const) {
+        const run = await launchFixture(server, {
+          web: false,
+          sharedAuth:
+            scenario === "missing-file" ? join(root, "absent.json") : auth,
+          omitSharedAuthPreload: scenario === "missing-bootstrap",
+        });
+        try {
+          await assert.rejects(waitForAttestation(run.rpc, run.context));
+          assert.equal(
+            logEntries(run.log).some((e) => e.type === "startup-attestation"),
+            false,
+          );
+          assert.equal(server.requests.length, 0);
+        } finally {
+          await stopFixture(run);
+        }
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
       server.server.close();
     }
   },

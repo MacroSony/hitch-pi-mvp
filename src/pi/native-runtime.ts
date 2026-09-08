@@ -6,14 +6,12 @@ import {
 } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import {
-  chmodSync,
   closeSync,
   constants as fsConstants,
   existsSync,
   fstatSync,
   fsyncSync,
   lstatSync,
-  mkdirSync,
   openSync,
   readFileSync,
   readdirSync,
@@ -21,7 +19,6 @@ import {
   realpathSync,
   rmSync,
   statSync,
-  writeFileSync,
 } from "node:fs";
 import {
   basename,
@@ -35,6 +32,15 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { MediaStore, MAX_OUTBOUND_ARTIFACTS } from "../media/media-store.js";
 import { AsyncSemaphore } from "./semaphore.js";
+import { validateSharedAuthPath } from "./shared-credentials.js";
+import {
+  normalizeProfilePermissions,
+  preparePiProfile,
+  preparePiProfiles,
+  privateDirectory,
+  safeSegment,
+  validatePiProfile,
+} from "./profile-preparation.js";
 import type {
   AgentRuntime,
   RuntimeArtifact,
@@ -52,7 +58,7 @@ const PI_DEPENDENCY_CLOSURE_SHA256 =
   "6d2055eaeef6823fd4b6edc062314e383fc6e233a4634a13e868a86eaebbcec4";
 const SANDBOX_ASSET_SHA256 = {
   "hitch-sandbox.ts":
-    "4e749c0bad40f0ede03a470f37228c453c16ea5a87e2c693490dee755586ab47",
+    "0a35feb0d76462a39721ef56b3a4387fc5c0d803b0799ffc8fc1a1368fb2f024",
   "pi-web-search.ts":
     "0a503a373523eb1737417865f9e213c8db838b0a0eb5e87b197535cfccef43c7",
   "web-search/tavily.js":
@@ -73,7 +79,6 @@ const MAX_MAX_CONCURRENT_TURNS = 8;
 const MAX_RPC_BYTES = 8 * 1024 * 1024;
 const MAX_RPC_COMMAND_BYTES = 32 * 1024 * 1024;
 const MAX_STDERR_BYTES = 64 * 1024;
-const MAX_PROFILE_JSON_BYTES = 1024 * 1024;
 const EXPECTED_TOOLS = [
   "bash",
   "edit",
@@ -125,6 +130,7 @@ export interface ControllerContext {
   readonly turnHandle: string;
   readonly userId: string;
   readonly webSearchEnabled: boolean;
+  readonly sharedAuthRequired?: boolean;
   readonly activeTools?: readonly string[];
   readonly forgePrompt?: {
     readonly mode: "replace" | "append" | "prepend";
@@ -154,27 +160,6 @@ function record(value: unknown): JsonRecord | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as JsonRecord)
     : null;
-}
-
-function privateDirectory(path: string): void {
-  mkdirSync(path, { recursive: true, mode: 0o700 });
-  const metadata = lstatSync(path, { bigint: true });
-  const uid = process.getuid?.();
-  if (
-    !metadata.isDirectory() ||
-    metadata.isSymbolicLink() ||
-    (uid !== undefined && metadata.uid !== BigInt(uid)) ||
-    (metadata.mode & 0o077n) !== 0n ||
-    realpathSync(path) !== path
-  ) {
-    throw new Error("native Pi runtime directory is unsafe");
-  }
-}
-
-function safeSegment(value: string, label: string): string {
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(value))
-    throw new Error(`${label} is invalid`);
-  return value;
 }
 
 function sha256File(path: string): string {
@@ -370,74 +355,10 @@ function parseCatalog(value: unknown): readonly RuntimeModel[] {
     );
 }
 
-function validateJsonFile(path: string): void {
-  if (!existsSync(path)) return;
-  const metadata = lstatSync(path, { bigint: true });
-  const uid = process.getuid?.();
-  if (
-    !metadata.isFile() ||
-    metadata.isSymbolicLink() ||
-    metadata.size > BigInt(MAX_PROFILE_JSON_BYTES) ||
-    (uid !== undefined && metadata.uid !== BigInt(uid)) ||
-    (metadata.mode & 0o077n) !== 0n
-  ) {
-    throw new Error("Pi profile contains an unsafe JSON file");
-  }
-  try {
-    const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
-    if (record(parsed) === null) throw new Error("not an object");
-  } catch {
-    throw new Error(
-      "Pi profile JSON is corrupt; restore the operator backup or log in again",
-    );
-  }
-}
+export { preparePiProfile, preparePiProfiles, validatePiProfile };
 
-export function validatePiProfile(piProfileDir: string): void {
-  privateDirectory(piProfileDir);
-  for (const name of [
-    "auth.json",
-    "models.json",
-    "models-store.json",
-    "settings.json",
-  ]) {
-    validateJsonFile(join(piProfileDir, name));
-  }
-}
-
-function normalizeProfilePermissions(piProfileDir: string): void {
-  privateDirectory(piProfileDir);
-  for (const name of readdirSync(piProfileDir)) {
-    const child = join(piProfileDir, name);
-    const metadata = lstatSync(child, { bigint: true });
-    if (metadata.isDirectory()) {
-      chmodSync(child, 0o700);
-      normalizeProfilePermissions(child);
-    } else if (metadata.isFile()) {
-      chmodSync(child, 0o600);
-    } else if (metadata.isSymbolicLink()) {
-      throw new Error("Pi profile contains a symbolic link");
-    }
-  }
-}
-
-function clonePiProfile(source: string, destination: string): void {
-  rmSync(destination, { recursive: true, force: true });
-  privateDirectory(destination);
-  for (const name of readdirSync(source)) {
-    const sourcePath = join(source, name);
-    const destinationPath = join(destination, name);
-    const metadata = lstatSync(sourcePath, { bigint: true });
-    if (metadata.isDirectory()) {
-      clonePiProfile(sourcePath, destinationPath);
-    } else if (metadata.isFile()) {
-      writeFileSync(destinationPath, readFileSync(sourcePath), { mode: 0o600 });
-      chmodSync(destinationPath, 0o600);
-    } else if (metadata.isSymbolicLink()) {
-      throw new Error("Pi profile contains a symbolic link");
-    }
-  }
-  validatePiProfile(destination);
+function authPreloadPath(): string {
+  return fileURLToPath(new URL("./auth-preload.js", import.meta.url));
 }
 
 class PiRpcProcess {
@@ -473,11 +394,16 @@ class PiRpcProcess {
     environment: NodeJS.ProcessEnv,
     readonly onTextDelta?: (delta: string) => void,
   ) {
-    this.#child = spawn(process.execPath, [cliPath, ...arguments_], {
-      cwd,
-      env: environment,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+    const preload = authPreloadPath();
+    this.#child = spawn(
+      process.execPath,
+      ["--import", preload, cliPath, ...arguments_],
+      {
+        cwd,
+        env: environment,
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+    );
     this.#child.stdout.setEncoding("utf8");
     this.#child.stderr.setEncoding("utf8");
     this.#child.stdout.on("data", (chunk: string) => this.#read(chunk));
@@ -834,6 +760,8 @@ export async function waitForAttestation(
             throw new Error("sandbox extension source attestation is invalid");
         };
         check(standard, extensionPath);
+        if (context.sharedAuthRequired === true && standard.sharedAuth !== true)
+          throw new Error("shared auth startup attestation is missing");
         if (
           standard.extensionDigest !== SANDBOX_ASSET_SHA256["hitch-sandbox.ts"]
         )
@@ -903,6 +831,7 @@ export class NativePiRuntime implements AgentRuntime {
   readonly models: readonly RuntimeModel[];
   readonly catalogDigest: string;
   readonly forge?: ForgeCatalog;
+  readonly sharedAuthPath: string;
   readonly #runtimeRoot: string;
   readonly #sessionsRoot: string;
   readonly #profiles: ReadonlyMap<string, string>;
@@ -922,9 +851,11 @@ export class NativePiRuntime implements AgentRuntime {
     models: readonly RuntimeModel[],
     profiles: ReadonlyMap<string, string>,
     catalogProfile: string,
+    sharedAuthPath: string,
   ) {
     this.models = models;
     this.catalogDigest = stableDigest(models);
+    this.sharedAuthPath = sharedAuthPath;
     if (options.forge !== undefined) {
       this.forge = options.forge;
     }
@@ -966,6 +897,9 @@ export class NativePiRuntime implements AgentRuntime {
       );
     }
     validatePiProfile(options.piProfileDir);
+    const sharedAuthPath = validateSharedAuthPath(
+      join(options.piProfileDir, "auth.json"),
+    );
     const cli = piCliPath();
     validatePiPackage(cli);
     const assets = assetRoot();
@@ -991,32 +925,17 @@ export class NativePiRuntime implements AgentRuntime {
       for (const userId of options.webSearch.enabledUsers)
         safeSegment(userId, "web search user id");
     }
-    const profiles = new Map<string, string>();
-    let catalogProfile: string;
-    if (userIds.length === 0) {
-      catalogProfile = join(profileRoot, "default");
-      clonePiProfile(options.piProfileDir, catalogProfile);
-    } else {
-      for (const userId of userIds) {
-        const segment = safeSegment(userId, "Pi profile user id");
-        if (profiles.has(segment))
-          throw new Error("duplicate Pi profile user id");
-        const directory = join(profileRoot, segment);
-        clonePiProfile(options.piProfileDir, directory);
-        profiles.set(segment, directory);
-      }
-      const first = profiles.values().next().value;
-      if (first === undefined)
-        throw new Error(
-          "at least one user is required for a native Pi runtime",
-        );
-      catalogProfile = first;
-    }
+    const { profiles, catalogProfile } = preparePiProfiles(
+      options.piProfileDir,
+      profileRoot,
+      userIds,
+    );
     const temporary = new NativePiRuntime(
       options,
       [],
       profiles,
       catalogProfile,
+      sharedAuthPath,
     );
     privateDirectory(temporary.#runtimeRoot);
     privateDirectory(temporary.#sessionsRoot);
@@ -1025,7 +944,13 @@ export class NativePiRuntime implements AgentRuntime {
     const models = await temporary.#loadCatalog();
     if (models.length === 0)
       throw new Error("Pi profile has no authenticated available model");
-    return new NativePiRuntime(options, models, profiles, catalogProfile);
+    return new NativePiRuntime(
+      options,
+      models,
+      profiles,
+      catalogProfile,
+      sharedAuthPath,
+    );
   }
 
   #context(
@@ -1059,6 +984,7 @@ export class NativePiRuntime implements AgentRuntime {
       turnHandle: randomBytes(16).toString("hex"),
       userId,
       webSearchEnabled,
+      sharedAuthRequired: true,
       ...(activeTools === undefined ? {} : { activeTools }),
       ...(forgePrompt === undefined ? {} : { forgePrompt }),
     };
@@ -1096,6 +1022,8 @@ export class NativePiRuntime implements AgentRuntime {
       PI_CODING_AGENT_DIR: profileDir,
       PI_OFFLINE: "1",
       PI_TELEMETRY: "0",
+      HITCH_SHARED_AUTH_PATH: this.sharedAuthPath,
+      HITCH_SHARED_AUTH_REQUIRED: "1",
       HITCH_P0_WORKSPACE: context.workspace,
       HITCH_P0_INBOX: context.inbox,
       HITCH_P0_PUBLISH_ROOT: context.publishRoot,

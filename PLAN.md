@@ -171,3 +171,17 @@ Hitch deterministic check: 97 passed / 12 opt-in skipped; dedicated Pi RPC:
 12/12. The local Forge prerelease passed its full main-package verification.
 Mode A is not yet deployed; schema 4 requires an attended backup/migration.
 Desktop Forge, subagents, regex/history rewrite, Mode C/D remain excluded.
+
+
+## Post-MVP AUTH-1 — shared operator OAuth persistence (code-accepted)
+
+`docs/shared-auth-plan.md` records the one-authority store, controller-only
+public ModelRuntime bootstrap and non-auth profile preparation. Pi stays 0.84.1;
+no provider protocol rewrite, credential platform, schema/config addition,
+pi-agy loading or scheduler. Final check: 112 passed / 14 opt-in skipped;
+namespace-scoped real Pi RPC: 14/14. Store/runtime cross-reviews passed.
+The crash-before-rename fixture preserves complete authority JSON; remote
+rotation before local commit can still require re-login. Real credentials,
+online config/service and release builds remain untouched. Attended deployment,
+authority selection/re-login and channel acceptance are pending; combined Mode A
+schema 3→4 deployment has its own rollback/data-loss decision.
