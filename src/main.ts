@@ -173,6 +173,8 @@ async function main(): Promise<void> {
       media,
       undefined,
       (userId) => join(foundation.topology.dataRoot.path, "users", userId),
+      undefined,
+      foundation.topology.users.map((user) => user.id),
     );
     const telegramWorkers = telegramClients.map(
       ({ account, client }) =>

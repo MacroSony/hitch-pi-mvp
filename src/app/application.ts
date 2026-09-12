@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 import type {
   AgentRuntime,
   RuntimeArtifact,
@@ -23,12 +24,16 @@ import {
   type MessageIdentity,
 } from "./store.js";
 import { WakeStore } from "../wake/store.js";
-import type { WakeRecurrence } from "../wake/types.js";
+import type { WakeSchedule, WakeRecurrence } from "../wake/types.js";
 import { nextFireAfter } from "../wake/next-fire.js";
+import { renderWakeTemplate } from "../wake/template.js";
 
 const PROGRESS_FLUSH_MS = 30_000;
 const PROGRESS_MAX_CHARS_PER_MESSAGE = 4000;
 const PROGRESS_MAX_BYTES_PER_TURN = 64 * 1024;
+const WAKE_TICK_MS = 30_000;
+const WAKE_GRACE_MS = 30 * 60_000;
+const WAKE_MAX_SLOTS_PER_TICK = 50;
 
 const WEEKDAY_TOKENS = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
 
@@ -147,6 +152,7 @@ export class HitchApplication {
   readonly #controllers = new Map<string, AbortController>();
   readonly #pumps = new Map<string, Promise<void>>();
   readonly #wakeStores = new Map<string, WakeStore>();
+  #wakeTimer: NodeJS.Timeout | null = null;
   #started = false;
   #stopping = false;
 
@@ -158,6 +164,9 @@ export class HitchApplication {
     readonly progressFlushMs: number = PROGRESS_FLUSH_MS,
     readonly userStateDir?: string | ((userId: string) => string),
     readonly wakeStoreFactory?: (userId: string) => WakeStore,
+    readonly wakeUserIds: readonly string[] = [],
+    readonly wakeTickMs: number = WAKE_TICK_MS,
+    readonly wakeGraceMs: number = WAKE_GRACE_MS,
   ) {}
 
   #resolveUserStateDir(userId: string): string {
@@ -295,6 +304,21 @@ export class HitchApplication {
     this.#started = true;
     for (const userId of this.store.recoverAfterRestart())
       this.#schedule(userId);
+    if (this.wakeUserIds.length > 0) {
+      try {
+        this.runWakeTick();
+      } catch (error) {
+        this.#wakeError("initial wake tick failed", error);
+      }
+      this.#wakeTimer = setInterval(() => {
+        try {
+          this.runWakeTick();
+        } catch (error) {
+          this.#wakeError("wake tick failed", error);
+        }
+      }, this.wakeTickMs);
+      this.#wakeTimer.unref();
+    }
   }
 
   public receiveTelegram(
@@ -545,6 +569,101 @@ export class HitchApplication {
 
   public stop(): void {
     this.#stopping = true;
+    if (this.#wakeTimer !== null) {
+      clearInterval(this.#wakeTimer);
+      this.#wakeTimer = null;
+    }
     for (const controller of this.#controllers.values()) controller.abort();
+  }
+
+  public runWakeTick(nowMs: number = Date.now()): void {
+    for (const userId of this.wakeUserIds) {
+      let wakeStore: WakeStore;
+      try {
+        wakeStore = this.#getWakeStore(userId);
+        wakeStore.reloadIfChanged();
+      } catch (error) {
+        this.#wakeError(`wake store for ${userId} unavailable`, error);
+        continue;
+      }
+      if (wakeStore.fileError !== null) {
+        process.stderr.write(
+          `wake store for ${userId} is unreadable: ${wakeStore.fileError}\n`,
+        );
+        continue;
+      }
+      for (const schedule of wakeStore.list(userId)) {
+        if (!schedule.enabled) continue;
+        this.#fireDueSlots(wakeStore, schedule, nowMs);
+      }
+    }
+  }
+
+  #fireDueSlots(
+    wakeStore: WakeStore,
+    schedule: WakeSchedule,
+    nowMs: number,
+  ): void {
+    let cursor = schedule.lastFiredAt ?? schedule.createdAt;
+    for (let i = 0; i < WAKE_MAX_SLOTS_PER_TICK; i += 1) {
+      const slot = nextFireAfter(schedule, Date.parse(cursor));
+      if (slot === null || slot > nowMs) return;
+      const slotIso = new Date(slot).toISOString();
+      if (nowMs - slot > this.wakeGraceMs) {
+        try {
+          wakeStore.recordSkip(schedule.id, slotIso);
+        } catch (error) {
+          this.#wakeError(`wake ${schedule.id} skip failed`, error);
+          return;
+        }
+        cursor = slotIso;
+        continue;
+      }
+      // Record before dispatch: a crash here loses one fire instead of
+      // re-sending a scheduled message after restart.
+      try {
+        wakeStore.recordFire(schedule.id, slotIso);
+      } catch (error) {
+        this.#wakeError(`wake ${schedule.id} record failed`, error);
+        return;
+      }
+      this.#dispatchWake(schedule, slot, slotIso);
+      return;
+    }
+    process.stderr.write(
+      `wake ${schedule.id}: more than ${WAKE_MAX_SLOTS_PER_TICK} due slots in one tick; remaining slots deferred\n`,
+    );
+  }
+
+  #dispatchWake(schedule: WakeSchedule, slotMs: number, slotIso: string): void {
+    const endpoint = this.store.endpointContext(schedule.endpointId);
+    if (endpoint === null) {
+      process.stderr.write(
+        `wake ${schedule.id}: endpoint unavailable; fire recorded but not delivered\n`,
+      );
+      return;
+    }
+    const prompt = renderWakeTemplate(
+      schedule.promptTemplate,
+      schedule.timezone,
+      slotMs,
+    );
+    const identity: MessageIdentity = {
+      endpoint,
+      idempotencyKey: `wake:${schedule.id}:${slotIso}`,
+      contentDigest: createHash("sha256").update(prompt).digest("hex"),
+    };
+    try {
+      this.store.admitPrompt(identity, prompt, [], schedule.sessionId);
+      this.#schedule(schedule.ownerId);
+    } catch (error) {
+      this.#wakeError(`wake ${schedule.id} dispatch failed`, error);
+    }
+  }
+
+  #wakeError(context: string, error: unknown): void {
+    process.stderr.write(
+      `${context}: ${error instanceof Error ? error.message : "unknown"}\n`,
+    );
   }
 }

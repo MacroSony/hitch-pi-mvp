@@ -215,6 +215,34 @@ export class HitchStore {
         };
   }
 
+  public endpointContext(endpointId: string): EndpointContext | null {
+    const row = this.#database
+      .prepare(
+        `SELECT e.id, e.user_id, e.account_id, e.platform_user_id, e.private_chat_id
+         FROM channel_endpoints e
+         JOIN users u ON u.id = e.user_id
+         WHERE e.id = ? AND e.enabled = 1 AND u.enabled = 1`,
+      )
+      .get(endpointId) as
+      | {
+          id: string;
+          user_id: string;
+          account_id: string;
+          platform_user_id: string;
+          private_chat_id: string | null;
+        }
+      | undefined;
+    return row === undefined
+      ? null
+      : {
+          id: row.id,
+          userId: row.user_id,
+          accountId: row.account_id,
+          platformUserId: row.platform_user_id,
+          privateChatId: row.private_chat_id ?? row.platform_user_id,
+        };
+  }
+
   public getTelegramOffset(accountId: string): number {
     const row = this.#database
       .prepare("SELECT value FROM app_meta WHERE key = ?")
@@ -374,19 +402,33 @@ export class HitchStore {
     return { turnId: row.id, userId: row.user_id };
   }
 
+  #pinnedSession(sessionId: string, userId: string): { id: string } | null {
+    const row = this.#database
+      .prepare("SELECT state FROM sessions WHERE id = ? AND user_id = ?")
+      .get(sessionId, userId) as { state: string } | undefined;
+    return row !== undefined && row.state === "active"
+      ? { id: sessionId }
+      : null;
+  }
+
   public admitPrompt(
     identity: MessageIdentity,
     prompt: string,
     artifacts: readonly RuntimeArtifact[] = [],
+    pinnedSessionId?: string,
   ): AdmissionResult {
     return transaction(this.#database, () => {
       const existing = this.#existingMessage(identity);
       if (existing !== null) return { ...existing, duplicate: true };
       this.admissionGuard(identity.endpoint.userId);
-      const session = this.#ensurePromptSession(
-        identity.endpoint.id,
-        identity.endpoint.userId,
-      );
+      const session =
+        (pinnedSessionId !== undefined
+          ? this.#pinnedSession(pinnedSessionId, identity.endpoint.userId)
+          : null) ??
+        this.#ensurePromptSession(
+          identity.endpoint.id,
+          identity.endpoint.userId,
+        );
       const capacity = this.#database
         .prepare(
           "SELECT count(*) AS count FROM turns WHERE user_id = ? AND state IN ('queued', 'starting', 'running')",

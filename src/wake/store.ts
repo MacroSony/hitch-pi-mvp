@@ -611,6 +611,22 @@ export class WakeStore {
     this.#writeToDisk();
   }
 
+  public recordSkip(id: string, skippedSlotUtcIso: string): void {
+    this.reloadIfChanged();
+    this.#assertHealthy();
+
+    const schedule = this.#schedules.find((s) => s.id === id);
+    if (schedule === undefined) {
+      throw new Error(`Schedule not found: ${id}`);
+    }
+    if (!isValidIsoDate(skippedSlotUtcIso)) {
+      throw new Error(`Invalid skippedSlotUtcIso: ${skippedSlotUtcIso}`);
+    }
+
+    schedule.lastFiredAt = skippedSlotUtcIso;
+    this.#writeToDisk();
+  }
+
   public getDefaultTimezone(ownerId: string): string | undefined {
     this.reloadIfChanged();
     if (this.#fileError !== null) {

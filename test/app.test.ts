@@ -1142,3 +1142,166 @@ test("runtime progress enforces per-message and per-Turn bounds", async () => {
   assert.ok(texts.includes("done"));
   environment.foundation.close();
 });
+
+test("endpointContext looks up enabled endpoint by id and returns null for unknown id", () => {
+  const environment = setup();
+  const aliceEndpoint = environment.store.resolveTelegramEndpoint(
+    "primary",
+    "101",
+    "101",
+  );
+  assert.ok(aliceEndpoint !== null);
+
+  const found = environment.store.endpointContext(aliceEndpoint.id);
+  assert.deepEqual(found, {
+    id: aliceEndpoint.id,
+    userId: "alice",
+    accountId: "primary",
+    platformUserId: "101",
+    privateChatId: "101",
+  });
+
+  const notFound = environment.store.endpointContext("non_existent_endpoint");
+  assert.equal(notFound, null);
+
+  environment.foundation.close();
+});
+
+test("admitPrompt routes to pinned session when active and falls back to selected session otherwise", () => {
+  const environment = setup();
+  const endpoint = environment.store.resolveTelegramEndpoint(
+    "primary",
+    "101",
+    "101",
+  );
+  assert.ok(endpoint !== null);
+
+  const identityNewA: MessageIdentity = {
+    endpoint,
+    idempotencyKey: "cmd-new-a",
+    contentDigest: "digest-new-a",
+  };
+  environment.store.executeCommand(
+    identityNewA,
+    { kind: "new", name: "session-a" },
+    "!new session-a",
+  );
+
+  const identityNewB: MessageIdentity = {
+    endpoint,
+    idempotencyKey: "cmd-new-b",
+    contentDigest: "digest-new-b",
+  };
+  environment.store.executeCommand(
+    identityNewB,
+    { kind: "new", name: "session-b" },
+    "!new session-b",
+  );
+
+  const db = environment.foundation.database.connection;
+  const rowA = db
+    .prepare("SELECT id FROM sessions WHERE user_id = ? AND name = ?")
+    .get("alice", "session-a") as { id: string };
+  const rowB = db
+    .prepare("SELECT id FROM sessions WHERE user_id = ? AND name = ?")
+    .get("alice", "session-b") as { id: string };
+  const sessionAId = rowA.id;
+  const sessionBId = rowB.id;
+
+  const identitySwitchA: MessageIdentity = {
+    endpoint,
+    idempotencyKey: "cmd-switch-a",
+    contentDigest: "digest-switch-a",
+  };
+  environment.store.executeCommand(
+    identitySwitchA,
+    { kind: "switch", selector: "session-a" },
+    "!switch session-a",
+  );
+
+  const epRow = db
+    .prepare("SELECT selected_session_id FROM channel_endpoints WHERE id = ?")
+    .get(endpoint.id) as { selected_session_id: string };
+  assert.equal(epRow.selected_session_id, sessionAId);
+
+  const pinnedIdentity: MessageIdentity = {
+    endpoint,
+    idempotencyKey: "pinned-b-1",
+    contentDigest: "digest-pinned-b-1",
+  };
+  const pinnedResult = environment.store.admitPrompt(
+    pinnedIdentity,
+    "prompt for pinned B",
+    [],
+    sessionBId,
+  );
+  assert.equal(pinnedResult.duplicate, false);
+
+  const turnRowPinned = db
+    .prepare("SELECT session_id FROM turns WHERE id = ?")
+    .get(pinnedResult.turnId) as { session_id: string };
+  assert.equal(turnRowPinned.session_id, sessionBId);
+
+  const epRowAfterPinned = db
+    .prepare("SELECT selected_session_id FROM channel_endpoints WHERE id = ?")
+    .get(endpoint.id) as { selected_session_id: string };
+  assert.equal(epRowAfterPinned.selected_session_id, sessionAId);
+
+  db.prepare("UPDATE sessions SET state = 'stopped' WHERE id = ?").run(
+    sessionBId,
+  );
+
+  const stoppedFallbackIdentity: MessageIdentity = {
+    endpoint,
+    idempotencyKey: "pinned-stopped-fallback",
+    contentDigest: "digest-pinned-stopped-fallback",
+  };
+  const stoppedFallbackResult = environment.store.admitPrompt(
+    stoppedFallbackIdentity,
+    "prompt with stopped pinned session",
+    [],
+    sessionBId,
+  );
+  assert.equal(stoppedFallbackResult.duplicate, false);
+
+  const turnRowStoppedFallback = db
+    .prepare("SELECT session_id FROM turns WHERE id = ?")
+    .get(stoppedFallbackResult.turnId) as { session_id: string };
+  assert.equal(turnRowStoppedFallback.session_id, sessionAId);
+
+  const missingFallbackIdentity: MessageIdentity = {
+    endpoint,
+    idempotencyKey: "pinned-missing-fallback",
+    contentDigest: "digest-pinned-missing-fallback",
+  };
+  const missingFallbackResult = environment.store.admitPrompt(
+    missingFallbackIdentity,
+    "prompt with missing pinned session",
+    [],
+    "session_nonexistent_123",
+  );
+  assert.equal(missingFallbackResult.duplicate, false);
+
+  const turnRowMissingFallback = db
+    .prepare("SELECT session_id FROM turns WHERE id = ?")
+    .get(missingFallbackResult.turnId) as { session_id: string };
+  assert.equal(turnRowMissingFallback.session_id, sessionAId);
+
+  const defaultIdentity: MessageIdentity = {
+    endpoint,
+    idempotencyKey: "default-admit",
+    contentDigest: "digest-default-admit",
+  };
+  const defaultResult = environment.store.admitPrompt(
+    defaultIdentity,
+    "prompt without pinnedSessionId",
+  );
+  assert.equal(defaultResult.duplicate, false);
+
+  const turnRowDefault = db
+    .prepare("SELECT session_id FROM turns WHERE id = ?")
+    .get(defaultResult.turnId) as { session_id: string };
+  assert.equal(turnRowDefault.session_id, sessionAId);
+
+  environment.foundation.close();
+});

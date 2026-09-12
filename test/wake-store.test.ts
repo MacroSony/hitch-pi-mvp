@@ -277,6 +277,10 @@ test("corrupted JSON fails closed: fileError set, list/get empty, mutations reje
       /corrupted/,
     );
     assert.throws(
+      () => store.recordSkip("wk_123", "2026-01-01T00:00:00.000Z"),
+      /corrupted/,
+    );
+    assert.throws(
       () => store.setDefaultTimezone("alice", "America/Toronto"),
       /corrupted/,
     );
@@ -474,6 +478,84 @@ test("strict file validation rejects invalid schemas and fields fail-closed", ()
       assert.deepEqual(store.list(), []);
       assert.throws(() => store.remove("wk_12345678"), /corrupted/);
     }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("recordSkip updates lastFiredAt without incrementing fireCount and rejects invalid inputs/corrupted state", () => {
+  const dir = createTempDir();
+  try {
+    const filePath = join(dir, "wake.json");
+    const store = new WakeStore(filePath);
+
+    const schedule = store.add({
+      ownerId: "alice",
+      channel: "telegram",
+      endpointId: "ep_1",
+      sessionId: "sess_1",
+      promptTemplate: "Wake up",
+      recurrence: { kind: "daily" },
+      timeOfDay: "07:00",
+      timezone: "UTC",
+      enabled: true,
+      maxFires: null,
+      until: null,
+    });
+
+    assert.equal(schedule.fireCount, 0);
+    assert.equal(schedule.lastFiredAt, null);
+
+    // Skip a slot
+    const skippedIso1 = "2026-04-01T07:00:00.000Z";
+    store.recordSkip(schedule.id, skippedIso1);
+
+    let updated = store.get(schedule.id);
+    assert.equal(updated?.lastFiredAt, skippedIso1);
+    assert.equal(updated?.fireCount, 0);
+
+    // Fire a slot -> fireCount becomes 1
+    const firedIso = "2026-04-02T07:00:00.000Z";
+    store.recordFire(schedule.id, firedIso);
+    updated = store.get(schedule.id);
+    assert.equal(updated?.lastFiredAt, firedIso);
+    assert.equal(updated?.fireCount, 1);
+
+    // Skip another slot -> lastFiredAt updates, fireCount remains 1
+    const skippedIso2 = "2026-04-03T07:00:00.000Z";
+    store.recordSkip(schedule.id, skippedIso2);
+    updated = store.get(schedule.id);
+    assert.equal(updated?.lastFiredAt, skippedIso2);
+    assert.equal(updated?.fireCount, 1);
+
+    // Reopen with a new WakeStore instance to ensure persistence to disk
+    const store2 = new WakeStore(filePath);
+    const persisted = store2.get(schedule.id);
+    assert.equal(persisted?.lastFiredAt, skippedIso2);
+    assert.equal(persisted?.fireCount, 1);
+
+    // Throws on non-existent id
+    assert.throws(
+      () => store.recordSkip("wk_nonexist", skippedIso2),
+      /Schedule not found: wk_nonexist/,
+    );
+
+    // Throws on invalid ISO timestamp
+    assert.throws(
+      () => store.recordSkip(schedule.id, "invalid-iso-date"),
+      /Invalid skippedSlotUtcIso/,
+    );
+
+    // Corrupt the file
+    const corruptedContent = "NOT VALID JSON";
+    writeFileSync(filePath, corruptedContent, "utf8");
+
+    // Throws on corrupted file without overwriting
+    assert.throws(
+      () => store.recordSkip(schedule.id, "2026-04-04T07:00:00.000Z"),
+      /corrupted/,
+    );
+    assert.equal(readFileSync(filePath, "utf8"), corruptedContent);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
