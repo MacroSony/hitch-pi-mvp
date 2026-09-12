@@ -12,7 +12,7 @@ import type {
   RuntimeTurn,
   ThinkingLevel,
 } from "../runtime/runtime.js";
-import type { Command } from "./commands.js";
+import type { Command, WakeCommand } from "./commands.js";
 import { AppError } from "./errors.js";
 
 const MAX_SESSIONS_PER_USER = 32;
@@ -588,6 +588,11 @@ export class HitchStore {
     sourceText: string,
     models: readonly RuntimeModel[] = [],
     forge?: ForgeCatalog,
+    wakeHandler?: (
+      identity: MessageIdentity,
+      command: WakeCommand,
+      sessionId: string,
+    ) => string,
   ): CommandResult {
     return transaction(this.#database, () => {
       const existing = this.#existingMessage(identity);
@@ -1241,10 +1246,20 @@ export class HitchStore {
             "!thinking <level> - select a thinking level",
             "!preset [list|use <id>|preview <id>|status|clear] - manage preset prompt stacks",
             "!profile [list|use <id>|preview <id>|status|clear] - manage persona profiles",
+            "!wake [add|list|del|pause|resume|tz] - manage scheduled wake-ups",
             "!send <relative-path> - publish a workspace file",
             "!help - show this list",
           ].join("\n");
           break;
+        case "wake": {
+          if (wakeHandler === undefined) {
+            response = "rejected: wake schedules are not available";
+            commandSucceeded = false;
+            break;
+          }
+          response = wakeHandler(identity, command, session.id);
+          break;
+        }
         case "unknown":
           response = `rejected: unknown command !${command.name}`;
           commandSucceeded = false;

@@ -1,3 +1,5 @@
+import { join } from "node:path";
+
 import { HitchApplication } from "./app/application.js";
 import { HitchStore } from "./app/store.js";
 import { directFetcher } from "./channels/direct-fetch.js";
@@ -169,6 +171,8 @@ async function main(): Promise<void> {
       runtime,
       config.mediaMode,
       media,
+      undefined,
+      (userId) => join(foundation.topology.dataRoot.path, "users", userId),
     );
     const telegramWorkers = telegramClients.map(
       ({ account, client }) =>
