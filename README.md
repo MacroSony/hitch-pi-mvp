@@ -8,9 +8,7 @@ statically enrolled user set on one Linux host. Each user receives private
 sessions, one configured workspace, native access to providers authenticated in
 Pi, sandbox-routed tools, and native image/file delivery in both directions.
 
-This repository starts fresh from the product boundary. It may copy small,
-reviewed modules from `../hitch-hub`, but it does not import that repository at
-runtime and does not inherit its generalized v2 domain model.
+This repository is a fresh, narrow rewrite started from the product boundary. It succeeds the earlier, more generalized [hitch-hub](https://github.com/MacroSony/hitch-hub) experiment: small, reviewed modules may be copied over, but nothing is imported at runtime and the generalized v2 domain model is not inherited.
 
 ## Planning documents
 
