@@ -6,6 +6,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -16,6 +17,7 @@ import test from "node:test";
 import {
   preparePiProfile,
   preparePiProfiles,
+  syncPiModelsStore,
   validatePiProfile,
 } from "../src/pi/profile-preparation.js";
 import {
@@ -115,6 +117,55 @@ test("preparePiProfiles stages settings.json and models.json for distinct users 
     assert.deepEqual(
       JSON.parse(readFileSync(join(userADir!, "models-store.json"), "utf8")),
       { cache: { entries: [1, 2] } },
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("native catalog cache synchronizes to every prepared user without copying profile authority", () => {
+  const { root, source } = setupSourceProfile({
+    settings: { userSpecific: true },
+    models: { customProviders: [] },
+    modelsStore: { stale: true },
+  });
+  const profileRoot = join(root, "pi-profiles");
+  try {
+    const prepared = preparePiProfiles(source, profileRoot, [
+      "user-a",
+      "user-b",
+    ]);
+    const catalog = prepared.catalogProfile;
+    const userB = prepared.profiles.get("user-b");
+    assert.notEqual(userB, undefined);
+
+    writeFileSync(
+      join(catalog, "models-store.json"),
+      JSON.stringify({ refreshed: { model: "fixture/new-low" } }),
+      { mode: 0o600 },
+    );
+    writeFileSync(
+      join(userB!, "models-store.json"),
+      JSON.stringify({ old: true }),
+      {
+        mode: 0o600,
+      },
+    );
+
+    syncPiModelsStore(catalog, prepared.profiles);
+
+    assert.equal(
+      readFileSync(join(userB!, "models-store.json"), "utf8"),
+      readFileSync(join(catalog, "models-store.json"), "utf8"),
+    );
+    assert.deepEqual(
+      JSON.parse(readFileSync(join(userB!, "settings.json"), "utf8")),
+      { userSpecific: true },
+    );
+    assert.equal(existsSync(join(userB!, "auth.json")), false);
+    assert.equal(
+      statSync(join(userB!, "models-store.json")).mode & 0o777,
+      0o600,
     );
   } finally {
     rmSync(root, { recursive: true, force: true });

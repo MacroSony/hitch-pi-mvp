@@ -4,7 +4,7 @@ import {
   type CreateModelRuntimeOptions,
 } from "@earendil-works/pi-coding-agent";
 
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 import { SharedCredentialStore } from "./shared-credentials.js";
 
@@ -38,6 +38,29 @@ export function installSharedAuthPreload(): void {
     ) {
       throw new Error(SHARED_AUTH_FAILED);
     }
+    const modelsPath = process.env.HITCH_PI_MODELS_PATH;
+    const modelsStorePath = process.env.HITCH_PI_MODELS_STORE_PATH;
+    if (
+      (modelsPath !== undefined && resolve(modelsPath) !== modelsPath) ||
+      (modelsStorePath !== undefined &&
+        resolve(modelsStorePath) !== modelsStorePath)
+    ) {
+      throw new Error(SHARED_AUTH_FAILED);
+    }
+    if (
+      modelsPath !== undefined &&
+      options?.modelsPath !== undefined &&
+      options.modelsPath !== modelsPath
+    ) {
+      throw new Error(SHARED_AUTH_FAILED);
+    }
+    if (
+      modelsStorePath !== undefined &&
+      options?.modelsStorePath !== undefined &&
+      options.modelsStorePath !== modelsStorePath
+    ) {
+      throw new Error(SHARED_AUTH_FAILED);
+    }
     let credentials: SharedCredentialStore;
     try {
       credentials = new SharedCredentialStore(sharedAuthPath);
@@ -48,6 +71,8 @@ export function installSharedAuthPreload(): void {
       const runtime = await originalCreate.call(ModelRuntime, {
         ...options,
         credentials,
+        ...(modelsPath === undefined ? {} : { modelsPath }),
+        ...(modelsStorePath === undefined ? {} : { modelsStorePath }),
       });
       process.env.HITCH_SHARED_AUTH_INSTALLED = "1";
       return runtime;

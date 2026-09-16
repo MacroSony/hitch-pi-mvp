@@ -1,15 +1,21 @@
 import {
   chmodSync,
+  closeSync,
+  constants as fsConstants,
   existsSync,
+  fsyncSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
   readdirSync,
   realpathSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { randomBytes } from "node:crypto";
+import { dirname, join } from "node:path";
 
 const MAX_PROFILE_JSON_BYTES = 1024 * 1024;
 const MANAGED_FILES = ["settings.json", "models.json"] as const;
@@ -162,6 +168,117 @@ export function preparePiProfile(
 export interface PreparedProfiles {
   readonly profiles: ReadonlyMap<string, string>;
   readonly catalogProfile: string;
+}
+
+function assertPrivateModelsStore(path: string): void {
+  const metadata = lstatSync(path, { bigint: true });
+  const uid = ownerUid();
+  if (
+    !metadata.isFile() ||
+    metadata.isSymbolicLink() ||
+    metadata.nlink !== 1n ||
+    (uid !== undefined && metadata.uid !== uid) ||
+    (metadata.mode & 0o077n) !== 0n ||
+    metadata.size > BigInt(MAX_PROFILE_JSON_BYTES) ||
+    realpathSync(path) !== path
+  ) {
+    throw new Error("Pi models store is unsafe");
+  }
+}
+
+function syncModelsStoreFile(source: string, target: string): void {
+  validateJsonFile(source);
+  assertPrivateModelsStore(source);
+  privateDirectory(dirname(target));
+  if (existsSync(target)) {
+    validateJsonFile(target);
+    assertPrivateModelsStore(target);
+  } else {
+    try {
+      lstatSync(target);
+      throw new Error("Pi models store target is unsafe");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+
+  const content = readFileSync(source);
+  const temporary = `${target}.tmp-${process.pid}-${randomBytes(12).toString("hex")}`;
+  let descriptor: number | undefined;
+  try {
+    descriptor = openSync(
+      temporary,
+      fsConstants.O_WRONLY |
+        fsConstants.O_CREAT |
+        fsConstants.O_EXCL |
+        fsConstants.O_NOFOLLOW,
+      0o600,
+    );
+    writeFileSync(descriptor, content);
+    fsyncSync(descriptor);
+    closeSync(descriptor);
+    descriptor = undefined;
+    renameSync(temporary, target);
+    const parent = openSync(
+      dirname(target),
+      fsConstants.O_RDONLY | fsConstants.O_DIRECTORY,
+    );
+    try {
+      fsyncSync(parent);
+    } finally {
+      closeSync(parent);
+    }
+  } finally {
+    if (descriptor !== undefined) closeSync(descriptor);
+    if (existsSync(temporary)) rmSync(temporary, { force: true });
+  }
+  chmodSync(target, 0o600);
+  assertPrivateModelsStore(target);
+}
+
+function removeStaleModelsStore(path: string): void {
+  if (!existsSync(path)) {
+    try {
+      lstatSync(path);
+      throw new Error("Pi models store target is unsafe");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+  }
+  validateJsonFile(path);
+  assertPrivateModelsStore(path);
+  rmSync(path);
+}
+
+/**
+ * Publish the catalog profile's native cache to each prepared user profile.
+ * This deliberately copies only models-store.json; auth and settings remain
+ * profile-local and are never part of this synchronization boundary.
+ */
+export function syncPiModelsStore(
+  catalogProfile: string,
+  profiles: ReadonlyMap<string, string>,
+): void {
+  privateDirectory(catalogProfile);
+  const source = join(catalogProfile, "models-store.json");
+  if (existsSync(source)) assertPrivateModelsStore(source);
+  else {
+    try {
+      lstatSync(source);
+      throw new Error("Pi models store is unsafe");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+
+  for (const targetProfile of profiles.values()) {
+    privateDirectory(targetProfile);
+    const target = join(targetProfile, "models-store.json");
+    if (target === source) continue;
+    if (existsSync(source)) syncModelsStoreFile(source, target);
+    else removeStaleModelsStore(target);
+  }
 }
 
 export function preparePiProfiles(

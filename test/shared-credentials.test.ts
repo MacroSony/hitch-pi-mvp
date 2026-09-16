@@ -22,6 +22,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   SharedCredentialStore,
+  SharedCredentialUpdateError,
   validateSharedAuthPath,
 } from "../src/pi/shared-credentials.js";
 
@@ -196,6 +197,7 @@ test("modify is durable across a restart, preserves OAuth extensions, and undefi
         throw new Error("callback-dummy-token");
       }),
       (error: unknown) => {
+        assert.ok(error instanceof SharedCredentialUpdateError);
         assertSafeFailure(error, root, "callback-dummy-token");
         return true;
       },

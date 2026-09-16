@@ -701,6 +701,47 @@ test("abort cancels the active fake Turn without quarantining its session", asyn
   environment.foundation.close();
 });
 
+test("known model preflight failures preserve the session and do not quarantine its successor", async () => {
+  const environment = setup();
+  const app = new HitchApplication(
+    environment.store,
+    new FakeAgentRuntime(() => ({
+      outcome: "failed",
+      text: "",
+      error: "model-unavailable",
+      sessionReusable: true,
+    })),
+  );
+  app.start();
+  try {
+    assert.equal(
+      app.receiveTelegram("primary", update(33, "101", "missing model"))
+        .accepted,
+      true,
+    );
+    await app.drain();
+    const database = environment.foundation.database.connection;
+    const session = database
+      .prepare("SELECT state FROM sessions WHERE user_id = ?")
+      .get("alice") as { state: string };
+    const turn = database
+      .prepare("SELECT outcome, result_text FROM turns WHERE user_id = ?")
+      .get("alice") as { outcome: string; result_text: string };
+    assert.equal(session.state, "active");
+    assert.deepEqual(
+      { ...turn },
+      { outcome: "failed", result_text: "model-unavailable" },
+    );
+    assert.equal(
+      app.receiveTelegram("primary", update(34, "101", "next prompt")).accepted,
+      true,
+    );
+    await app.drain();
+  } finally {
+    environment.foundation.close();
+  }
+});
+
 test("a timed-out Turn is terminal and quarantines rather than replaying", async () => {
   const environment = setup();
   const app = new HitchApplication(

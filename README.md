@@ -84,7 +84,7 @@ HITCH_TELEGRAM_PRIMARY_TOKEN=... \
   npm start -- --config /absolute/path/config.json --channels
 ```
 
-Startup pins and checks Pi `0.84.1` plus its dependency closure, validates the
+Startup pins and checks Pi `0.85.1` plus its dependency closure, validates the
 operator profile, clones it into owner-only per-user directories, compiles and
 pins the reviewed sandbox assets, obtains the native Pi model catalog, and
 requires a fresh mandatory-extension/Bubblewrap attestation.

@@ -130,7 +130,7 @@ fresh selected session without transcript reuse or prompt replay.
 
 Each Hitch session owns a stable random Pi session id, a private session
 directory, selected provider/model/thinking, fixed workspace, and extension
-profile digest. Each Turn launches a fresh Pi 0.84.1 RPC controller against
+profile digest. Each Turn launches a fresh Pi 0.85.1 RPC controller against
 that state. Only one Turn per user may touch Pi state.
 
 On first use, the transcript path is provisional: Pi does not create its JSONL
@@ -144,15 +144,25 @@ still prohibits concurrent opens of the same transcript.
 
 The controller retains a private per-user Pi directory at startup
 (`dataRoot/pi-profiles/<user>`). Only settings/models are synchronized from the
-operator profile; models-store is seeded once and retained. All configured users
-intentionally share one operator authority, `piProfileDir/auth.json`; old auth
-clones are ignored. A fixed controller-only Node preload wraps public
-`ModelRuntime.create({credentials})` before the original pinned CLI starts.
-No private Pi imports or generic loader are introduced. Both catalog and turn
-controllers use this store, and mandatory startup attestation proves that the
-auth bootstrap ran. Session model/thinking changes retain the original RPC path.
-Pi still owns provider protocol/refresh; Hitch's small store owns locked and
-atomic persistence, without putting credentials in model or sandbox contexts.
+operator profile; auth is never copied. The first prepared user is the
+canonical catalog profile. Startup performs one bounded (7-second) public Pi
+`ModelRuntime` refresh against that profile, explicitly supplying `modelsPath`
+and `modelsStorePath` plus the shared `SharedCredentialStore`. Pi refreshes
+only configured/authenticated providers and never generates a model Turn.
+Network failures retain Pi's cache or built-ins and emit a content-free
+warning; malformed local state still fails closed. Hitch then safely copies the
+native `models-store.json` to every prepared user profile (without
+auth/settings), and a fresh offline RPC controller reads that same cache for
+the model snapshot. Turn controllers remain offline for the service lifetime,
+so this catalog is not hot updated. All configured users intentionally share
+one operator authority, `piProfileDir/auth.json`; old auth clones are ignored.
+A fixed controller-only Node preload wraps public `ModelRuntime.create` before
+the original pinned CLI starts and pins each controller's catalog paths.
+No private Pi imports or generic loader are introduced. Mandatory startup
+attestation proves that the auth bootstrap ran. Session model/thinking changes
+retain the original RPC path. Pi still owns provider protocol/refresh; Hitch's
+small store owns locked and atomic persistence, without putting credentials in
+model or sandbox contexts.
 
 The MVP admits at most `maxConcurrentTurns` provider-owning Pi controllers
 globally (config, default 2, validated 1–8). The per-user pump still serializes

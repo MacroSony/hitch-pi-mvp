@@ -40,6 +40,14 @@ const LOCK_WAIT_MS = 30_000;
 const STORAGE_ERROR = "shared credential storage failure";
 const ABORT_ERROR = "shared credential operation aborted";
 
+/** A provider callback failed before a credential mutation; never contains its body. */
+export class SharedCredentialUpdateError extends Error {
+  public constructor() {
+    super("shared credential update callback failed");
+    this.name = "SharedCredentialUpdateError";
+  }
+}
+
 function storageError(): Error {
   return new Error(STORAGE_ERROR);
 }
@@ -359,7 +367,9 @@ export class SharedCredentialStore implements CredentialStore {
       failure =
         isAbort(error) || signal?.aborted === true
           ? abortError()
-          : storageError();
+          : error instanceof SharedCredentialUpdateError
+            ? error
+            : storageError();
     } finally {
       if (release !== undefined) {
         try {
@@ -422,7 +432,7 @@ export class SharedCredentialStore implements CredentialStore {
         );
       } catch (error) {
         if (isAbort(error) || signal?.aborted === true) throw abortError();
-        throw storageError();
+        throw new SharedCredentialUpdateError();
       }
       checkAbort(signal);
       if (compromised()) throw storageError();

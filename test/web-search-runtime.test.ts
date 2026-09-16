@@ -377,6 +377,7 @@ async function launchFixture(
     readonly sessionPath?: string;
     /** An absolute auth.json shared by independently launched Pi processes. */
     readonly sharedAuth?: string;
+    readonly modelsStore?: Record<string, unknown>;
     readonly omitSharedAuthPreload?: boolean;
   },
 ): Promise<FixtureRun> {
@@ -410,6 +411,12 @@ async function launchFixture(
         })}\n`,
     { mode: 0o600 },
   );
+  if (options.modelsStore !== undefined)
+    writeFileSync(
+      join(profile, "models-store.json"),
+      JSON.stringify(options.modelsStore),
+      { mode: 0o600 },
+    );
   writeFileSync(join(inbox, "input.txt"), "fixture inbox\n", { mode: 0o600 });
   const log = join(root, "sandbox.log");
   const providerLog = join(root, "provider.log");
@@ -454,6 +461,8 @@ async function launchFixture(
     PI_CODING_AGENT_DIR: profile,
     PI_OFFLINE: "1",
     PI_TELEMETRY: "0",
+    HITCH_PI_MODELS_PATH: join(profile, "models.json"),
+    HITCH_PI_MODELS_STORE_PATH: join(profile, "models-store.json"),
     NODE_OPTIONS: `--import ${preload}`,
     HITCH_B2_FIXTURE_PORT: String(server.port),
     HITCH_B2_PROVIDER_MODE: options.providerMode ?? "web-search",
@@ -542,6 +551,8 @@ async function launchFixture(
         : ["--extension", join(assetsRoot, "pi-antigravity.ts")]
       : ["--extension", provider]),
     "--no-builtin-tools",
+    "--exclude-tools",
+    "powershell",
     "--no-skills",
     "--no-prompt-templates",
     "--no-themes",
@@ -1810,6 +1821,97 @@ test(
         }
       }
     } finally {
+      rmSync(root, { recursive: true, force: true });
+      server.server.close();
+    }
+  },
+);
+
+test(
+  "offline real RPC consumes refreshed native metadata and accepts deepseek-flash + low without inference",
+  {
+    skip: process.env.HITCH_RUN_SANDBOX_TESTS !== "1",
+    timeout: 30_000,
+  },
+  async () => {
+    const server = await startFixtureServer();
+    const root = mkdtempSync(join(tmpdir(), "hitch-cached-rpc-"));
+    privateDirectory(root);
+    const auth = join(root, "auth.json");
+    writeFileSync(
+      auth,
+      JSON.stringify({
+        deepseek: { type: "api_key", key: "fixture-no-provider-transport" },
+      }),
+      { mode: 0o600 },
+    );
+    const run = await launchFixture(server, {
+      web: false,
+      sharedAuth: auth,
+      modelsStore: {
+        deepseek: {
+          checkedAt: Date.now(),
+          lastModified: Date.UTC(2099, 0, 1),
+          models: [
+            {
+              id: "deepseek-flash",
+              provider: "deepseek",
+              name: "Fixture Flash",
+              api: "openai-completions",
+              baseUrl: "http://127.0.0.1:1/no-inference",
+              input: ["text", "image"],
+              reasoning: true,
+              contextWindow: 8192,
+              maxTokens: 1024,
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+              thinkingLevelMap: {
+                off: null,
+                minimal: null,
+                low: "low",
+                medium: null,
+                high: "high",
+                xhigh: null,
+                max: "max",
+              },
+            },
+          ],
+        },
+      },
+    });
+    try {
+      await waitForAttestation(run.rpc, run.context);
+      const catalog = record(
+        (await run.rpc.send({ type: "get_available_models" })).data,
+      );
+      assert.ok(Array.isArray(catalog?.models));
+      assert.ok(
+        catalog.models.some(
+          (value: unknown) => record(value)?.id === "deepseek-flash",
+        ),
+      );
+      assert.equal(
+        (
+          await run.rpc.send({
+            type: "set_model",
+            provider: "deepseek",
+            modelId: "deepseek-flash",
+          })
+        ).success,
+        true,
+      );
+      assert.equal(
+        (await run.rpc.send({ type: "set_thinking_level", level: "low" }))
+          .success,
+        true,
+      );
+      const state = record((await run.rpc.send({ type: "get_state" })).data);
+      assert.equal(record(state?.model)?.id, "deepseek-flash");
+      assert.equal(state?.thinkingLevel, "low");
+      assert.equal(server.requests.length, 0);
+      assert.equal(logEntries(run.providerLog).length, 0);
+      assertNoSecret(run, "fixture-no-provider-transport");
+    } finally {
+      await stopFixture(run);
       rmSync(root, { recursive: true, force: true });
       server.server.close();
     }

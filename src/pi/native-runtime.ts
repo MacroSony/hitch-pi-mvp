@@ -1,4 +1,5 @@
 import { reduceForgeTools } from "@zihanw/pi-forge/service";
+import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import {
   spawn,
   spawnSync,
@@ -32,13 +33,22 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { MediaStore, MAX_OUTBOUND_ARTIFACTS } from "../media/media-store.js";
 import { AsyncSemaphore } from "./semaphore.js";
-import { validateSharedAuthPath } from "./shared-credentials.js";
+import {
+  logPiRuntimeFailure,
+  type RuntimeFailurePhase,
+} from "./runtime-diagnostics.js";
+import {
+  SharedCredentialStore,
+  SharedCredentialUpdateError,
+  validateSharedAuthPath,
+} from "./shared-credentials.js";
 import {
   normalizeProfilePermissions,
   preparePiProfile,
   preparePiProfiles,
   privateDirectory,
   safeSegment,
+  syncPiModelsStore,
   validatePiProfile,
 } from "./profile-preparation.js";
 import type {
@@ -51,18 +61,18 @@ import type {
 } from "../runtime/runtime.js";
 import type { ForgeCatalog, ForgeResolved } from "../forge/types.js";
 
-const PI_VERSION = "0.84.1";
+const PI_VERSION = "0.85.1";
 const PI_TREE_SHA256 =
-  "7298ead16e553a8ffc372ca6a5a17ccfd711ae0887830134255dcea08be55bba";
+  "81f52d5ea162080ebc12efb611c5f82ff57d3c47118fcd7c432ced7e9cb3ec86";
 const PI_DEPENDENCY_CLOSURE_SHA256 =
-  "6d2055eaeef6823fd4b6edc062314e383fc6e233a4634a13e868a86eaebbcec4";
+  "fdfb603d2ddf065ab566ea78acd3902073da1e68c84e719cfabb465d05a26eb1";
 const SANDBOX_ASSET_SHA256 = {
   "hitch-sandbox.ts":
     "dca37b3c08e9ad953bcd25195ff8afa73eb25a632f2b1ca8ff87b951c9292073",
   "pi-web-search.ts":
     "0a503a373523eb1737417865f9e213c8db838b0a0eb5e87b197535cfccef43c7",
   "pi-antigravity.ts":
-    "c3656827c2c8f33277fc2eeed3d7409f8dbe6d34b066d29e536bffbb8a060df2",
+    "d1ee9e5ba9eb827cc93a30f0cdc8babb257a6bf74b9a46a85f1ab118c8343aec",
   "web-search/tavily.js":
     "3fd8c7caeb7226c9fa05e46dfdd4b79c30258ce2844efa932e284e89a9a9d3da",
   "egress/client.js":
@@ -81,6 +91,7 @@ const MAX_MAX_CONCURRENT_TURNS = 8;
 const MAX_RPC_BYTES = 8 * 1024 * 1024;
 const MAX_RPC_COMMAND_BYTES = 32 * 1024 * 1024;
 const MAX_STDERR_BYTES = 64 * 1024;
+const MODEL_CATALOG_REFRESH_TIMEOUT_MS = 7_000;
 const EXPECTED_TOOLS = [
   "bash",
   "edit",
@@ -150,6 +161,7 @@ interface ClosedProcess {
 interface AssistantSnapshot {
   readonly text: string;
   readonly stopReason: string;
+  readonly errorMessage?: string;
 }
 
 interface SandboxBackend {
@@ -295,6 +307,162 @@ function stableDigest(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
+function refreshErrorCode(error: unknown): string | undefined {
+  if (error !== null && typeof error === "object" && "code" in error) {
+    const code = (error as { readonly code?: unknown }).code;
+    return typeof code === "string" ? code : undefined;
+  }
+  return undefined;
+}
+
+function isRecoverableCatalogRefreshError(error: unknown): boolean {
+  // Pi's public refresh API classifies provider fetch and OAuth transport
+  // failures separately from local auth/configuration failures. Some pinned
+  // provider fetchers preserve a raw AbortError/HTTP Error, so recognize only
+  // those transport-shaped errors here; local storage errors fail closed.
+  if (
+    error instanceof SharedCredentialUpdateError ||
+    refreshErrorCode(error) === "model_source" ||
+    refreshErrorCode(error) === "oauth"
+  )
+    return true;
+  if (!(error instanceof Error)) return false;
+  return (
+    error.name === "AbortError" ||
+    error.name === "TimeoutError" ||
+    error instanceof SyntaxError ||
+    /fetch failed|model catalog request failed|invalid model catalog for provider/iu.test(
+      error.message,
+    )
+  );
+}
+
+function warnCatalogRefresh(): void {
+  process.stderr.write(
+    "Pi model catalog refresh warning: using cached or built-in metadata.\n",
+  );
+}
+
+function modelUnavailable(): RuntimeResult {
+  return {
+    outcome: "failed",
+    text: "",
+    error: "model-unavailable",
+    sessionReusable: true,
+  };
+}
+
+interface NativeModelPreflight {
+  readonly model: RuntimeModel;
+  readonly thinkingLevel: ThinkingLevel;
+  readonly forge?: ForgeResolved;
+  readonly activeTools: readonly string[];
+}
+
+/** Model-only validation used before any controller or sandbox is created. */
+export function preflightNativeModel(
+  models: readonly RuntimeModel[],
+  turn: RuntimeTurn,
+  userId: string,
+  forge: ForgeCatalog | undefined,
+  baselineTools: readonly string[],
+): NativeModelPreflight | RuntimeResult {
+  const hasStoredProvider = turn.modelProvider !== undefined;
+  const hasStoredModelId = turn.modelId !== undefined;
+  if (hasStoredProvider !== hasStoredModelId) return modelUnavailable();
+
+  const storedModel =
+    hasStoredProvider && hasStoredModelId
+      ? models.find(
+          (model) =>
+            model.provider === turn.modelProvider && model.id === turn.modelId,
+        )
+      : undefined;
+  if (hasStoredProvider && storedModel === undefined) return modelUnavailable();
+
+  let resolvedForge: ForgeResolved | undefined;
+  if (turn.forgeSelection !== undefined) {
+    if (forge === undefined || !forge.isEnabled(userId)) {
+      return { outcome: "failed", text: "", sessionReusable: true };
+    }
+    try {
+      resolvedForge = forge.resolve(turn.forgeSelection);
+    } catch {
+      return { outcome: "failed", text: "", sessionReusable: true };
+    }
+    if (
+      (resolvedForge.mode !== "replace" &&
+        resolvedForge.mode !== "append" &&
+        resolvedForge.mode !== "prepend") ||
+      typeof resolvedForge.systemPrompt !== "string" ||
+      Buffer.byteLength(resolvedForge.systemPrompt, "utf8") > 32 * 1024
+    ) {
+      return { outcome: "failed", text: "", sessionReusable: true };
+    }
+  }
+
+  // A profile without a persisted model uses its resolved model, or the
+  // first available Pi model when the profile is model-less. This mirrors
+  // the store's selection/fallback rules without starting a controller.
+  const forgeModel = resolvedForge?.model;
+  const selectedModel =
+    storedModel ??
+    (forgeModel === undefined
+      ? models[0]
+      : models.find(
+          (model) =>
+            model.provider === forgeModel.provider &&
+            model.id === forgeModel.id,
+        ));
+  if (selectedModel === undefined) return modelUnavailable();
+
+  let activeTools: readonly string[] = baselineTools;
+  if (resolvedForge !== undefined && turn.forgeSelection !== undefined) {
+    try {
+      activeTools = reduceForgeTools(baselineTools, resolvedForge.tools);
+      resolvedForge = forge!.resolve(turn.forgeSelection, {
+        now: new Date(),
+        activeTools,
+        model: {
+          provider: selectedModel.provider,
+          id: selectedModel.id,
+        },
+      });
+      if (
+        Buffer.byteLength(
+          JSON.stringify({
+            mode: resolvedForge.mode,
+            systemPrompt: resolvedForge.systemPrompt,
+          }),
+          "utf8",
+        ) >
+        64 * 1024
+      )
+        return { outcome: "failed", text: "", sessionReusable: true };
+    } catch {
+      return { outcome: "failed", text: "", sessionReusable: true };
+    }
+  }
+
+  const selectedThinking =
+    turn.thinkingLevel ??
+    resolvedForge?.thinkingLevel ??
+    selectedModel.thinkingLevels[0] ??
+    "off";
+  if (
+    !THINKING_LEVELS.includes(selectedThinking) ||
+    !selectedModel.thinkingLevels.includes(selectedThinking)
+  )
+    return modelUnavailable();
+
+  return {
+    model: selectedModel,
+    thinkingLevel: selectedThinking,
+    activeTools,
+    ...(resolvedForge === undefined ? {} : { forge: resolvedForge }),
+  };
+}
+
 function strictText(value: unknown, maximumBytes: number): string {
   if (
     typeof value !== "string" ||
@@ -318,7 +486,7 @@ function supportedThinkingLevels(model: JsonRecord): readonly ThinkingLevel[] {
   });
 }
 
-function parseCatalog(value: unknown): readonly RuntimeModel[] {
+export function parseCatalog(value: unknown): readonly RuntimeModel[] {
   const data = record(value);
   if (!Array.isArray(data?.models) || data.models.length > 512)
     throw new Error("Pi model catalog is invalid or too large");
@@ -496,6 +664,9 @@ class PiRpcProcess {
               typeof message.stopReason === "string"
                 ? message.stopReason
                 : "unknown",
+            ...(typeof message.errorMessage === "string"
+              ? { errorMessage: message.errorMessage.slice(0, 4096) }
+              : {}),
           };
         }
       }
@@ -643,7 +814,7 @@ function validatePiPackage(cliPath: string): void {
     treeSha256(packageRoot, false) !== PI_TREE_SHA256 ||
     treeSha256(packageRoot, true) !== PI_DEPENDENCY_CLOSURE_SHA256
   ) {
-    throw new Error("pinned Pi 0.84.1 is not installed");
+    throw new Error("pinned Pi 0.85.1 is not installed");
   }
 }
 
@@ -678,6 +849,10 @@ export function controllerArguments(
       ? []
       : ["--extension", providerExtension]),
     "--no-builtin-tools",
+    // 0.85.1 adds an inactive PowerShell builtin to the registry. Exclude it
+    // entirely so exact eight-tool attestation and no-host-fallback stay intact.
+    "--exclude-tools",
+    "powershell",
     "--no-skills",
     "--no-prompt-templates",
     "--no-themes",
@@ -847,6 +1022,46 @@ function syncTranscript(path: string, sessionDirectory: string): string {
   return canonical;
 }
 
+/** Refresh the canonical native catalog once; true means cache fallback was used. */
+export async function refreshPiCatalog(
+  catalogProfile: string,
+  sharedAuthPath: string,
+  options: {
+    readonly timeoutMs?: number;
+    readonly catalogBaseUrl?: string;
+  } = {},
+): Promise<boolean> {
+  // Validate local state before any network fallback can be considered.
+  validatePiProfile(catalogProfile);
+  const signal = AbortSignal.timeout(
+    options.timeoutMs ?? MODEL_CATALOG_REFRESH_TIMEOUT_MS,
+  );
+  const modelsPath = join(catalogProfile, "models.json");
+  const modelsStorePath = join(catalogProfile, "models-store.json");
+  const modelRuntime = await ModelRuntime.create({
+    credentials: new SharedCredentialStore(sharedAuthPath),
+    modelsPath,
+    modelsStorePath,
+    allowModelNetwork: true,
+    refreshOnCreate: false,
+    signal,
+    ...(options.catalogBaseUrl === undefined
+      ? {}
+      : { catalogBaseUrl: options.catalogBaseUrl }),
+  });
+  const local = await modelRuntime.refresh({ allowNetwork: false, signal });
+  if (local.errors.size > 0 || modelRuntime.getError() !== undefined)
+    throw new Error("Pi model catalog local state is invalid");
+  if (local.aborted) return true;
+  const result = await modelRuntime.refresh({ allowNetwork: true, signal });
+  const fatal = [...result.errors.values()].some(
+    (error) => !isRecoverableCatalogRefreshError(error),
+  );
+  if (fatal || modelRuntime.getError() !== undefined)
+    throw new Error("Pi model catalog refresh failed");
+  return result.aborted || result.errors.size > 0;
+}
+
 export class NativePiRuntime implements AgentRuntime {
   readonly models: readonly RuntimeModel[];
   readonly catalogDigest: string;
@@ -963,6 +1178,8 @@ export class NativePiRuntime implements AgentRuntime {
     privateDirectory(temporary.#sessionsRoot);
     if (activeRunCount === 0 && !(await cleanupSandboxUnits(null)))
       throw new Error("sandbox process-tree cleanup could not be confirmed");
+    await temporary.#refreshCatalog();
+    syncPiModelsStore(catalogProfile, profiles);
     const models = await temporary.#loadCatalog();
     if (models.length === 0)
       throw new Error("Pi profile has no authenticated available model");
@@ -1048,6 +1265,8 @@ export class NativePiRuntime implements AgentRuntime {
       PI_TELEMETRY: "0",
       HITCH_SHARED_AUTH_PATH: this.sharedAuthPath,
       HITCH_SHARED_AUTH_REQUIRED: "1",
+      HITCH_PI_MODELS_PATH: join(profileDir, "models.json"),
+      HITCH_PI_MODELS_STORE_PATH: join(profileDir, "models-store.json"),
       HITCH_P0_WORKSPACE: context.workspace,
       HITCH_P0_INBOX: context.inbox,
       HITCH_P0_PUBLISH_ROOT: context.publishRoot,
@@ -1103,6 +1322,11 @@ export class NativePiRuntime implements AgentRuntime {
       environment,
       onTextDelta,
     );
+  }
+
+  async #refreshCatalog(): Promise<void> {
+    if (await refreshPiCatalog(this.#catalogProfile, this.sharedAuthPath))
+      warnCatalogRefresh();
   }
 
   async #loadCatalog(): Promise<readonly RuntimeModel[]> {
@@ -1218,6 +1442,7 @@ export class NativePiRuntime implements AgentRuntime {
       const cleaned = await cleanupSandboxUnits(this.#owner);
       if (!cleaned) {
         this.#poisoned = true;
+        logPiRuntimeFailure({ phase: "cleanup", turnId: turn.turnId });
         throw new Error("sandbox process-tree cleanup could not be confirmed");
       }
       rmSync(context.root, { recursive: true, force: true });
@@ -1241,6 +1466,9 @@ export class NativePiRuntime implements AgentRuntime {
           sessionReusable: true,
         };
       return await this.#runExclusive(turn, signal, onProgress);
+    } catch (error) {
+      logPiRuntimeFailure({ phase: "preflight", turnId: turn.turnId, error });
+      return { outcome: "unknown", text: "", sessionReusable: false };
     } finally {
       releaseSlot();
       activeRunCount -= 1;
@@ -1265,69 +1493,10 @@ export class NativePiRuntime implements AgentRuntime {
       return { outcome: "unknown", text: "", sessionReusable: false };
     }
     const userId = safeSegment(turn.userId, "runtime user id");
-    const selectedModel =
-      turn.modelProvider === undefined && turn.modelId === undefined
-        ? this.models[0]
-        : this.models.find(
-            (model) =>
-              model.provider === turn.modelProvider &&
-              model.id === turn.modelId,
-          );
-    let resolvedForge: ForgeResolved | undefined;
-    if (turn.forgeSelection !== undefined) {
-      if (this.forge === undefined || !this.forge.isEnabled(userId)) {
-        return { outcome: "failed", text: "", sessionReusable: true };
-      }
-      try {
-        resolvedForge = this.forge.resolve(turn.forgeSelection);
-      } catch {
-        return { outcome: "failed", text: "", sessionReusable: true };
-      }
-      if (
-        (resolvedForge.mode !== "replace" &&
-          resolvedForge.mode !== "append" &&
-          resolvedForge.mode !== "prepend") ||
-        typeof resolvedForge.systemPrompt !== "string" ||
-        Buffer.byteLength(resolvedForge.systemPrompt, "utf8") > 32 * 1024
-      ) {
-        return { outcome: "failed", text: "", sessionReusable: true };
-      }
-    }
     const isWebEnabled = this.#webSearchUsers.has(userId);
     const baselineTools = isWebEnabled
       ? [...EXPECTED_TOOLS, "web_search"].sort()
       : [...EXPECTED_TOOLS].sort();
-    let activeTools: readonly string[] = baselineTools;
-    if (resolvedForge !== undefined && turn.forgeSelection !== undefined) {
-      try {
-        activeTools = reduceForgeTools(baselineTools, resolvedForge.tools);
-        resolvedForge = this.forge!.resolve(turn.forgeSelection, {
-          now: new Date(),
-          activeTools,
-          ...(selectedModel === undefined
-            ? {}
-            : {
-                model: {
-                  provider: selectedModel.provider,
-                  id: selectedModel.id,
-                },
-              }),
-        });
-        if (
-          Buffer.byteLength(
-            JSON.stringify({
-              mode: resolvedForge.mode,
-              systemPrompt: resolvedForge.systemPrompt,
-            }),
-            "utf8",
-          ) >
-          64 * 1024
-        )
-          return { outcome: "failed", text: "", sessionReusable: true };
-      } catch {
-        return { outcome: "failed", text: "", sessionReusable: true };
-      }
-    }
     const sessionDirectory = join(this.#sessionsRoot, userId);
     privateDirectory(sessionDirectory);
     const session =
@@ -1342,6 +1511,50 @@ export class NativePiRuntime implements AgentRuntime {
             path: syncTranscript(turn.transcriptPath, sessionDirectory),
             directory: sessionDirectory,
           } as const);
+    const profileDir = this.#profileFor(userId);
+    const inputArtifacts = turn.artifacts ?? [];
+    if (
+      inputArtifacts.length > 8 ||
+      inputArtifacts.some((artifact) => artifact.userId !== turn.userId) ||
+      inputArtifacts.reduce((total, artifact) => total + artifact.bytes, 0) >
+        40 * 1024 * 1024
+    ) {
+      return { outcome: "unknown", text: "", sessionReusable: false };
+    }
+    // File publication does not invoke a model and must work even if its
+    // session's previously selected model has left the current catalog.
+    if (turn.publishPath !== undefined) {
+      const context = this.#context(
+        safeSegment(turn.turnId, "runtime Turn id"),
+        turn.workspace,
+        userId,
+        isWebEnabled,
+      );
+      return await this.#publishOnly(turn, context, signal);
+    }
+    const preflight = preflightNativeModel(
+      this.models,
+      turn,
+      userId,
+      this.forge,
+      baselineTools,
+    );
+    if ("outcome" in preflight) {
+      logPiRuntimeFailure({
+        phase: "resolve-model",
+        turnId: turn.turnId,
+        ...(preflight.error === "model-unavailable"
+          ? { code: "model-unavailable" }
+          : {}),
+      });
+      return preflight;
+    }
+    const {
+      model: selectedModel,
+      thinkingLevel: selectedThinking,
+      activeTools,
+      forge: resolvedForge,
+    } = preflight;
     const forgePrompt =
       resolvedForge === undefined
         ? undefined
@@ -1357,18 +1570,6 @@ export class NativePiRuntime implements AgentRuntime {
       activeTools,
       forgePrompt,
     );
-    const inputArtifacts = turn.artifacts ?? [];
-    if (
-      inputArtifacts.length > 8 ||
-      inputArtifacts.some((artifact) => artifact.userId !== turn.userId) ||
-      inputArtifacts.reduce((total, artifact) => total + artifact.bytes, 0) >
-        40 * 1024 * 1024
-    ) {
-      rmSync(context.root, { recursive: true, force: true });
-      return { outcome: "unknown", text: "", sessionReusable: false };
-    }
-    if (turn.publishPath !== undefined)
-      return await this.#publishOnly(turn, context, signal);
     const nativeImages =
       selectedModel !== undefined && selectedModel.input.includes("image");
     const images: Array<{
@@ -1404,13 +1605,13 @@ export class NativePiRuntime implements AgentRuntime {
       inboxLines.length === 0
         ? turn.prompt
         : `${turn.prompt}\n\nHitch attached these opaque read-only files for this Turn:\n${inboxLines.join("\n")}`;
-    const profileDir = this.#profileFor(userId);
     const controller = this.#controller(
       context,
       session,
       onProgress,
       profileDir,
     );
+    let phase: RuntimeFailurePhase = "attest";
     let timedOut = false;
     let promptSubmitted = false;
     let timer: NodeJS.Timeout | undefined;
@@ -1425,21 +1626,13 @@ export class NativePiRuntime implements AgentRuntime {
     signal.addEventListener("abort", onExternalAbort, { once: true });
     try {
       await waitForAttestation(controller, context);
-      if (selectedModel === undefined)
-        throw new Error("stored model is not in the current Pi catalog");
-      if (turn.modelProvider !== undefined || turn.modelId !== undefined) {
-        if (turn.modelProvider === undefined || turn.modelId === undefined)
-          throw new Error("stored model selection is incomplete");
-      }
+      phase = "set-model";
       await controller.send({
         type: "set_model",
         provider: selectedModel.provider,
         modelId: selectedModel.id,
       });
-      const selectedThinking =
-        turn.thinkingLevel ?? selectedModel.thinkingLevels[0] ?? "off";
-      if (!selectedModel.thinkingLevels.includes(selectedThinking))
-        throw new Error("stored thinking level is unavailable");
+      phase = "set-thinking";
       await controller.send({
         type: "set_thinking_level",
         level: selectedThinking,
@@ -1464,6 +1657,7 @@ export class NativePiRuntime implements AgentRuntime {
       void settled.catch(() => undefined);
       controller.clearAssistantSnapshot();
       promptSubmitted = true;
+      phase = "prompt";
       timer = setTimeout(() => {
         timedOut = true;
         abort();
@@ -1476,6 +1670,7 @@ export class NativePiRuntime implements AgentRuntime {
         },
         Math.min(this.#turnTimeoutMs, 30_000),
       );
+      phase = "settled";
       await settled;
       if (timer !== undefined) clearTimeout(timer);
       if (forcedKill !== undefined) clearTimeout(forcedKill);
@@ -1483,6 +1678,7 @@ export class NativePiRuntime implements AgentRuntime {
       const state = responseData(await controller.send({ type: "get_state" }));
       await controller.closeCleanly();
 
+      phase = "transcript";
       const model = record(state.model);
       const modelProvider =
         model === null ? undefined : strictText(model.provider, 128);
@@ -1526,6 +1722,13 @@ export class NativePiRuntime implements AgentRuntime {
             join(context.publishRoot, name),
           ),
         );
+      if (outcome === "failed") {
+        logPiRuntimeFailure({
+          phase: "settled",
+          turnId: turn.turnId,
+          error: assistant?.errorMessage ?? "provider error",
+        });
+      }
       return {
         outcome,
         text: outcome === "succeeded" ? (assistant?.text ?? "") : "",
@@ -1536,7 +1739,8 @@ export class NativePiRuntime implements AgentRuntime {
         thinkingLevel: thinking as ThinkingLevel,
         ...(promoted.length === 0 ? {} : { artifacts: promoted }),
       };
-    } catch {
+    } catch (error) {
+      logPiRuntimeFailure({ phase, turnId: turn.turnId, error });
       if (timer !== undefined) clearTimeout(timer);
       if (forcedKill !== undefined) clearTimeout(forcedKill);
       controller.kill();
@@ -1548,6 +1752,7 @@ export class NativePiRuntime implements AgentRuntime {
       const cleaned = await cleanupSandboxUnits(this.#owner);
       if (!cleaned) {
         this.#poisoned = true;
+        logPiRuntimeFailure({ phase: "cleanup", turnId: turn.turnId });
         throw new Error("sandbox process-tree cleanup could not be confirmed");
       }
       normalizeProfilePermissions(profileDir);

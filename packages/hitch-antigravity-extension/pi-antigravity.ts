@@ -27,7 +27,7 @@ export default function (pi: ExtensionAPI): void {
     createHash("sha256").update(readFileSync(self)).digest("hex") !==
       process.env.HITCH_ANTIGRAVITY_EXTENSION_SHA256 ||
     JSON.parse(readFileSync(require.resolve("pi-agy/package.json"), "utf8"))
-      .version !== "0.6.1-hitch.1"
+      .version !== "0.6.1-hitch.2"
   )
     fail();
   let registered = false;
