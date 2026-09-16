@@ -56,6 +56,16 @@ separate Pi package-tree and dependency-closure digests, then review and set
 the runtime pins explicitly. The script only reports hashes; it never updates
 or bypasses runtime validation. Historical Phase 0 evidence is not rewritten.
 
+Deployment preparation found that the original development install had not run
+esbuild's postinstall binary optimization. Normal `npm ci` replaces the nested
+`esbuild/bin/esbuild` JS launcher with the exact bundled Linux x64 binary. A
+13,656-file comparison found no other content difference; two clean installs
+agreed on dependency closure
+`bf6e1e05ddd83e48e8453b703f175ea1c9af187e4b930b28465d6eee6e36a1ba`.
+The pin now describes normal `npm ci` (not `--ignore-scripts`), and default tests
+validate the real installed package/closure without starting a runtime or
+sweeping sandbox scopes. This adds one deterministic test to the counts below.
+
 ## Verification, 2026-09-16
 
 - `npm run check`: format/typecheck/build passed; **171 passed, 18 opt-in

@@ -23,6 +23,7 @@ import {
   parseCatalog,
   refreshPiCatalog,
   validatePiProfile,
+  validatePiPackage,
 } from "../src/pi/native-runtime.js";
 import { SharedCredentialStore } from "../src/pi/shared-credentials.js";
 import type { RuntimeModel, RuntimeTurn } from "../src/runtime/runtime.js";
@@ -368,6 +369,20 @@ test("expired OAuth availability is offline; a network refresh failure preserves
     globalThis.fetch = originalFetch;
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("normal npm ci produces the exact pinned Pi package and installed dependency closure", () => {
+  const repository = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+  validatePiPackage(
+    join(
+      repository,
+      "node_modules",
+      "@earendil-works",
+      "pi-coding-agent",
+      "dist",
+      "cli.js",
+    ),
+  );
 });
 
 test("Pi profile validation is content-free and gives the attended recovery path", () => {

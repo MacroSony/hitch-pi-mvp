@@ -65,7 +65,7 @@ const PI_VERSION = "0.85.1";
 const PI_TREE_SHA256 =
   "81f52d5ea162080ebc12efb611c5f82ff57d3c47118fcd7c432ced7e9cb3ec86";
 const PI_DEPENDENCY_CLOSURE_SHA256 =
-  "fdfb603d2ddf065ab566ea78acd3902073da1e68c84e719cfabb465d05a26eb1";
+  "bf6e1e05ddd83e48e8453b703f175ea1c9af187e4b930b28465d6eee6e36a1ba";
 const SANDBOX_ASSET_SHA256 = {
   "hitch-sandbox.ts":
     "dca37b3c08e9ad953bcd25195ff8afa73eb25a632f2b1ca8ff87b951c9292073",
@@ -801,7 +801,7 @@ function piCliPath(): string {
   );
 }
 
-function validatePiPackage(cliPath: string): void {
+export function validatePiPackage(cliPath: string): void {
   const packageRoot = resolve(dirname(cliPath), "..");
   const packagePath = join(packageRoot, "package.json");
   const packageJson = record(
