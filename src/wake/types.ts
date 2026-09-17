@@ -6,7 +6,7 @@ export type WakeRecurrence =
 export interface WakeSchedule {
   id: string;
   ownerId: string;
-  channel: "telegram" | "wechat";
+  channel: "telegram" | "wechat" | "wecom";
   endpointId: string;
   sessionId: string;
   promptTemplate: string;

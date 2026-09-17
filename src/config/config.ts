@@ -19,6 +19,11 @@ export interface WeChatAccountConfig {
   readonly stateDir: string;
 }
 
+export interface WeComAccountConfig {
+  readonly id: string;
+  readonly credentialsFile: string;
+}
+
 export interface TelegramEndpointConfig {
   readonly account: string;
   readonly userId: string;
@@ -30,11 +35,17 @@ export interface WeChatEndpointConfig {
   readonly userId: string;
 }
 
+export interface WeComEndpointConfig {
+  readonly account: string;
+  readonly userId: string;
+}
+
 export interface UserConfig {
   readonly id: string;
   readonly workspace: string;
   readonly telegram?: TelegramEndpointConfig;
   readonly wechat?: WeChatEndpointConfig;
+  readonly wecom?: WeComEndpointConfig;
 }
 
 export type MediaMode = "always-trigger" | "text-trigger";
@@ -59,6 +70,7 @@ export interface AppConfig {
   readonly maxConcurrentTurns: number;
   readonly telegramAccounts: readonly TelegramAccountConfig[];
   readonly wechatAccounts: readonly WeChatAccountConfig[];
+  readonly wecomAccounts: readonly WeComAccountConfig[];
   readonly users: readonly UserConfig[];
   readonly webSearch?: WebSearchConfig;
   readonly forge?: ForgeConfig;
@@ -175,6 +187,19 @@ function parseWeChatAccount(
   };
 }
 
+function parseWeComAccount(value: unknown, index: number): WeComAccountConfig {
+  const path = `config.wecomAccounts[${index}]`;
+  const input = record(value, path);
+  exactKeys(input, ["id", "credentialsFile"], [], path);
+  return {
+    id: identifier(input.id, `${path}.id`),
+    credentialsFile: absolutePath(
+      input.credentialsFile,
+      `${path}.credentialsFile`,
+    ),
+  };
+}
+
 function parseTelegramEndpoint(
   value: unknown,
   path: string,
@@ -203,23 +228,36 @@ function parseWeChatEndpoint(
   };
 }
 
+function parseWeComEndpoint(value: unknown, path: string): WeComEndpointConfig {
+  const input = record(value, path);
+  exactKeys(input, ["account", "userId"], [], path);
+  return {
+    account: identifier(input.account, `${path}.account`),
+    userId: remoteIdentifier(input.userId, `${path}.userId`),
+  };
+}
+
 function parseUser(value: unknown, index: number): UserConfig {
   const path = `config.users[${index}]`;
   const input = record(value, path);
-  exactKeys(input, ["id", "workspace"], ["telegram", "wechat"], path);
+  exactKeys(input, ["id", "workspace"], ["telegram", "wechat", "wecom"], path);
   const telegram = Object.hasOwn(input, "telegram")
     ? parseTelegramEndpoint(input.telegram, `${path}.telegram`)
     : undefined;
   const wechat = Object.hasOwn(input, "wechat")
     ? parseWeChatEndpoint(input.wechat, `${path}.wechat`)
     : undefined;
-  if (telegram === undefined && wechat === undefined)
+  const wecom = Object.hasOwn(input, "wecom")
+    ? parseWeComEndpoint(input.wecom, `${path}.wecom`)
+    : undefined;
+  if (telegram === undefined && wechat === undefined && wecom === undefined)
     fail(path, "must configure at least one private endpoint");
   return {
     id: identifier(input.id, `${path}.id`),
     workspace: absolutePath(input.workspace, `${path}.workspace`),
     ...(telegram === undefined ? {} : { telegram }),
     ...(wechat === undefined ? {} : { wechat }),
+    ...(wecom === undefined ? {} : { wecom }),
   };
 }
 
@@ -236,7 +274,14 @@ export function parseConfig(value: unknown): AppConfig {
       "wechatAccounts",
       "users",
     ],
-    ["mediaMode", "maxConcurrentTurns", "webSearch", "forge", "antigravity"],
+    [
+      "wecomAccounts",
+      "mediaMode",
+      "maxConcurrentTurns",
+      "webSearch",
+      "forge",
+      "antigravity",
+    ],
     "config",
   );
   if (input.schemaVersion !== 1) fail("config.schemaVersion", "expected 1");
@@ -255,6 +300,12 @@ export function parseConfig(value: unknown): AppConfig {
     input.wechatAccounts,
     "config.wechatAccounts",
   ).map(parseWeChatAccount);
+  const wecomAccounts =
+    input.wecomAccounts === undefined
+      ? []
+      : arrayValue(input.wecomAccounts, "config.wecomAccounts").map(
+          parseWeComAccount,
+        );
   const users = arrayValue(input.users, "config.users").map(parseUser);
   if (users.length === 0)
     fail("config.users", "must contain at least one user");
@@ -268,12 +319,17 @@ export function parseConfig(value: unknown): AppConfig {
     "config.wechatAccounts",
   );
   unique(
+    wecomAccounts.map(({ id }) => id),
+    "config.wecomAccounts",
+  );
+  unique(
     users.map(({ id }) => id),
     "config.users",
   );
 
   const telegramAccountIds = new Set(telegramAccounts.map(({ id }) => id));
   const wechatAccountIds = new Set(wechatAccounts.map(({ id }) => id));
+  const wecomAccountIds = new Set(wecomAccounts.map(({ id }) => id));
   const endpointKeys: string[] = [];
   for (const user of users) {
     if (user.telegram !== undefined) {
@@ -301,6 +357,17 @@ export function parseConfig(value: unknown): AppConfig {
       }
       endpointKeys.push(
         JSON.stringify(["wechat", user.wechat.account, user.wechat.userId]),
+      );
+    }
+    if (user.wecom !== undefined) {
+      if (!wecomAccountIds.has(user.wecom.account)) {
+        fail(
+          `config.users.${user.id}.wecom.account`,
+          "references an unknown WeCom account",
+        );
+      }
+      endpointKeys.push(
+        JSON.stringify(["wecom", user.wecom.account, user.wecom.userId]),
       );
     }
   }
@@ -415,6 +482,7 @@ export function parseConfig(value: unknown): AppConfig {
     maxConcurrentTurns,
     telegramAccounts,
     wechatAccounts,
+    wecomAccounts,
     users,
     ...(webSearch === undefined ? {} : { webSearch }),
     ...(forge === undefined ? {} : { forge }),

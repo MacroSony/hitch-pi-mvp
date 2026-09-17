@@ -215,6 +215,37 @@ export class HitchStore {
         };
   }
 
+  public resolveWeComEndpoint(
+    accountId: string,
+    platformUserId: string,
+  ): EndpointContext | null {
+    const row = this.#database
+      .prepare(
+        `SELECT e.id, e.user_id, e.account_id, e.platform_user_id
+         FROM channel_endpoints e
+         JOIN users u ON u.id = e.user_id
+         WHERE e.kind = 'wecom' AND e.account_id = ? AND e.platform_user_id = ?
+           AND e.private_chat_id IS NULL AND e.enabled = 1 AND u.enabled = 1`,
+      )
+      .get(accountId, platformUserId) as
+      | {
+          id: string;
+          user_id: string;
+          account_id: string;
+          platform_user_id: string;
+        }
+      | undefined;
+    return row === undefined
+      ? null
+      : {
+          id: row.id,
+          userId: row.user_id,
+          accountId: row.account_id,
+          platformUserId: row.platform_user_id,
+          privateChatId: row.platform_user_id,
+        };
+  }
+
   public endpointContext(endpointId: string): EndpointContext | null {
     const row = this.#database
       .prepare(
@@ -1740,7 +1771,7 @@ export class HitchStore {
     endpointId: string;
     platformUserId: string;
     privateChatId: string | null;
-    kind: "telegram" | "wechat";
+    kind: "telegram" | "wechat" | "wecom";
   }[] {
     return this.#database
       .prepare(
@@ -1757,7 +1788,7 @@ export class HitchStore {
       endpointId: string;
       platformUserId: string;
       privateChatId: string | null;
-      kind: "telegram" | "wechat";
+      kind: "telegram" | "wechat" | "wecom";
     }[];
   }
 
@@ -1769,7 +1800,7 @@ export class HitchStore {
   }
 
   #pendingOutbox(
-    channel: "telegram" | "wechat",
+    channel: "telegram" | "wechat" | "wecom",
     accountId: string,
     limit: number,
   ): readonly OutboxDelivery[] {
@@ -1854,6 +1885,13 @@ export class HitchStore {
     limit = 16,
   ): readonly OutboxDelivery[] {
     return this.#pendingOutbox("wechat", accountId, limit);
+  }
+
+  public pendingWeComOutbox(
+    accountId: string,
+    limit = 16,
+  ): readonly OutboxDelivery[] {
+    return this.#pendingOutbox("wecom", accountId, limit);
   }
 
   public claimOutbox(delivery: OutboxDelivery): boolean {

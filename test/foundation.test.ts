@@ -443,7 +443,7 @@ test("database composite foreign keys prevent cross-owner state links", () => {
   foundation.close();
 });
 
-test("schema 1 state migrates to media schema 4 without losing Turns or outbox", () => {
+test("schema 1 state migrates to current schema without losing Turns or outbox", () => {
   const setup = fixture();
   privateDirectory(setup.dataRoot);
   const path = join(setup.dataRoot, "hitch.sqlite");
@@ -530,7 +530,7 @@ test("schema 1 state migrates to media schema 4 without losing Turns or outbox",
   const version = migrated.connection.prepare("PRAGMA user_version").get() as {
     user_version: bigint;
   };
-  assert.equal(version.user_version, 4n);
+  assert.equal(version.user_version, 5n);
   const staged = migrated.connection
     .prepare(
       "SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'staged_artifacts'",

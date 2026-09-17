@@ -47,6 +47,49 @@ test("strict config accepts exact JSON and stores only secret references", () =>
   );
 });
 
+test("config parses and validates Enterprise WeChat accounts", () => {
+  const configured = validConfig();
+  configured.wecomAccounts = [
+    { id: "enterprise", credentialsFile: "/srv/hitch/wecom.json" },
+  ];
+  const users = configured.users as Array<Record<string, unknown>>;
+  const user = users[0];
+  assert.ok(user !== undefined);
+  user.wecom = { account: "enterprise", userId: "alice-wecom" };
+  const parsed = parseConfig(configured);
+  assert.equal(
+    parsed.wecomAccounts[0]?.credentialsFile,
+    "/srv/hitch/wecom.json",
+  );
+  assert.equal(parsed.users[0]?.wecom?.userId, "alice-wecom");
+
+  const nonAbsolute = validConfig();
+  nonAbsolute.wecomAccounts = [
+    { id: "enterprise", credentialsFile: "wecom.json" },
+  ];
+  assert.throws(() => parseConfig(nonAbsolute), /normalized absolute path/u);
+
+  const unknownField = validConfig();
+  unknownField.wecomAccounts = [
+    { id: "enterprise", credentialsFile: "/srv/hitch/wecom.json", extra: true },
+  ];
+  assert.throws(() => parseConfig(unknownField), /unknown field/u);
+
+  const missingAccount = validConfig();
+  const missingUsers = missingAccount.users as Array<Record<string, unknown>>;
+  const missingUser = missingUsers[0];
+  assert.ok(missingUser !== undefined);
+  missingUser.wecom = { account: "missing", userId: "alice-wecom" };
+  assert.throws(() => parseConfig(missingAccount), /unknown WeCom account/u);
+
+  const duplicate = validConfig();
+  duplicate.wecomAccounts = [
+    { id: "enterprise", credentialsFile: "/srv/hitch/wecom.json" },
+    { id: "enterprise", credentialsFile: "/srv/hitch/wecom-2.json" },
+  ];
+  assert.throws(() => parseConfig(duplicate), /duplicate value/u);
+});
+
 test("strict config rejects unknown fields and unsafe identifiers", () => {
   const unknown = validConfig();
   unknown.extra = true;

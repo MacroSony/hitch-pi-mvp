@@ -23,7 +23,7 @@ export interface DirectoryIdentity {
 }
 
 export interface PublishedEndpoint {
-  readonly kind: "telegram" | "wechat";
+  readonly kind: "telegram" | "wechat" | "wecom";
   readonly accountId: string;
   readonly platformUserId: string;
   readonly privateChatId: string | null;
@@ -134,6 +134,10 @@ function wechatTuple(accountId: string, userId: string): string {
   return JSON.stringify(["wechat", accountId, userId]);
 }
 
+function wecomTuple(accountId: string, userId: string): string {
+  return JSON.stringify(["wecom", accountId, userId]);
+}
+
 export function validateTopology(config: AppConfig): ValidatedTopology {
   const dataRoot = inspectPrivateDirectory(config.dataRoot, "data root", true);
   const piProfileDir = inspectPrivateDirectory(
@@ -175,6 +179,15 @@ export function validateTopology(config: AppConfig): ValidatedTopology {
         platformUserId: user.wechat.userId,
         privateChatId: null,
         tupleKey: wechatTuple(user.wechat.account, user.wechat.userId),
+      });
+    }
+    if (user.wecom !== undefined) {
+      endpoints.push({
+        kind: "wecom",
+        accountId: user.wecom.account,
+        platformUserId: user.wecom.userId,
+        privateChatId: null,
+        tupleKey: wecomTuple(user.wecom.account, user.wecom.userId),
       });
     }
     return { id: user.id, workspace, endpoints };

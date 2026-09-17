@@ -18,6 +18,7 @@ import {
 import { parseConfig } from "../src/config/config.js";
 import { bootstrapFoundation } from "../src/foundation/bootstrap.js";
 import type { Clock } from "../src/foundation/database.js";
+import { WakeStore } from "../src/wake/store.js";
 import {
   FakeAgentRuntime,
   type AgentRuntime,
@@ -65,11 +66,15 @@ function setup() {
     minimumFreeBytes: 0,
     telegramAccounts: [{ id: "primary", botTokenEnv: "HITCH_TEST_TOKEN" }],
     wechatAccounts: [{ id: "primary", stateDir: paths.wechat }],
+    wecomAccounts: [
+      { id: "enterprise", credentialsFile: join(root, "wecom.json") },
+    ],
     users: [
       {
         id: "alice",
         workspace: paths.alice,
         telegram: { account: "primary", userId: "101", privateChatId: "101" },
+        wecom: { account: "enterprise", userId: "alice-wecom" },
       },
       {
         id: "bob",
@@ -81,7 +86,7 @@ function setup() {
   const foundation = bootstrapFoundation(config);
   const sequence = new Sequence();
   const store = new HitchStore(foundation.database, sequence, sequence);
-  return { foundation, store, paths, sequence };
+  return { foundation, store, paths, sequence, root };
 }
 
 function update(
@@ -103,6 +108,108 @@ function update(
     },
   };
 }
+
+function wecomMessage(
+  msgid: string,
+  text: string,
+  options: {
+    botId?: string;
+    chatType?: string;
+    msgtype?: string;
+    userId?: string;
+  } = {},
+) {
+  return {
+    cmd: "aibot_msg_callback",
+    headers: { req_id: "request-1" },
+    body: {
+      msgid,
+      aibotid: options.botId ?? "bot-1",
+      chattype: options.chatType ?? "single",
+      msgtype: options.msgtype ?? "text",
+      from: { userid: options.userId ?? "alice-wecom" },
+      text: { content: text },
+    },
+  };
+}
+
+test("Enterprise WeChat text ingress admits private messages and rejects unsupported callbacks", async () => {
+  const environment = setup();
+  const calls: RuntimeTurn[] = [];
+  const app = new HitchApplication(
+    environment.store,
+    new FakeAgentRuntime((turn) => {
+      calls.push(turn);
+      return { outcome: "succeeded", text: "ok", sessionReusable: true };
+    }),
+    "always-trigger",
+    undefined,
+    undefined,
+    environment.root,
+  );
+  app.start();
+
+  const accepted = app.receiveWeCom(
+    "enterprise",
+    wecomMessage("wecom-1", "hello"),
+    "bot-1",
+  );
+  assert.equal(accepted.accepted, true);
+  assert.equal(accepted.replyPeerId, "alice-wecom");
+  await app.drain();
+  assert.equal(calls.length, 1);
+  assert.equal(
+    app.receiveWeCom("enterprise", wecomMessage("wecom-1", "hello"), "bot-1")
+      .duplicate,
+    true,
+  );
+  assert.equal(
+    app.receiveWeCom(
+      "enterprise",
+      wecomMessage("wecom-2", "group", { chatType: "group" }),
+      "bot-1",
+    ).category,
+    "rejected",
+  );
+  assert.equal(
+    app.receiveWeCom(
+      "enterprise",
+      wecomMessage("wecom-3", "bad bot", { botId: "wrong" }),
+      "bot-1",
+    ).message,
+    "WeCom callback bot does not match",
+  );
+  const mediaRejected = app.receiveWeCom(
+    "enterprise",
+    wecomMessage("wecom-4", "", { msgtype: "image" }),
+    "bot-1",
+  );
+  assert.equal(
+    mediaRejected.message,
+    "Enterprise WeChat media is not supported yet",
+  );
+  assert.equal(mediaRejected.replyPeerId, "alice-wecom");
+  assert.equal(
+    app.receiveWeCom("enterprise", wecomMessage("wecom-5", "!status"), "bot-1")
+      .accepted,
+    true,
+  );
+  assert.equal(
+    app.receiveWeCom(
+      "enterprise",
+      wecomMessage("wecom-6", "!wake add daily 08:30 Check status"),
+      "bot-1",
+    ).accepted,
+    true,
+  );
+  assert.equal(
+    new WakeStore(join(environment.root, "alice", "schedules.json")).list(
+      "alice",
+    )[0]?.channel,
+    "wecom",
+  );
+  environment.foundation.close();
+});
 
 test("two Telegram users remain isolated and duplicate prompts do not rerun", async () => {
   const environment = setup();

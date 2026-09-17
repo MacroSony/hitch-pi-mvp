@@ -9,8 +9,8 @@ import {
   type ValidatedTopology,
 } from "./filesystem.js";
 
-const SCHEMA_VERSION = 4;
-const SCHEMA_ID = "hitch-pi-mvp-schema-4";
+const SCHEMA_VERSION = 5;
+const SCHEMA_ID = "hitch-pi-mvp-schema-5";
 const EXPECTED_TABLES = [
   "app_meta",
   "artifacts",
@@ -75,7 +75,7 @@ CREATE TABLE channel_endpoints (
   id TEXT PRIMARY KEY,
   tuple_key TEXT NOT NULL UNIQUE,
   user_id TEXT NOT NULL REFERENCES users(id),
-  kind TEXT NOT NULL CHECK (kind IN ('telegram', 'wechat')),
+  kind TEXT NOT NULL CHECK (kind IN ('telegram', 'wechat', 'wecom')),
   account_id TEXT NOT NULL,
   platform_user_id TEXT NOT NULL,
   private_chat_id TEXT,
@@ -87,7 +87,7 @@ CREATE TABLE channel_endpoints (
   FOREIGN KEY (selected_session_id, user_id) REFERENCES sessions(id, user_id),
   CHECK (
     (kind = 'telegram' AND private_chat_id IS NOT NULL) OR
-    (kind = 'wechat' AND private_chat_id IS NULL)
+    (kind IN ('wechat', 'wecom') AND private_chat_id IS NULL)
   )
 ) STRICT;
 
@@ -202,6 +202,37 @@ ALTER TABLE sessions ADD COLUMN forge_id TEXT CHECK (
   (forge_kind IS NULL AND forge_id IS NULL) OR
   (forge_kind IS NOT NULL AND forge_id IS NOT NULL AND length(CAST(forge_id AS BLOB)) BETWEEN 1 AND 64)
 );
+`;
+
+const MIGRATE_4_TO_5 = `
+CREATE TABLE channel_endpoints_new (
+  id TEXT PRIMARY KEY,
+  tuple_key TEXT NOT NULL UNIQUE,
+  user_id TEXT NOT NULL REFERENCES users(id),
+  kind TEXT NOT NULL CHECK (kind IN ('telegram', 'wechat', 'wecom')),
+  account_id TEXT NOT NULL,
+  platform_user_id TEXT NOT NULL,
+  private_chat_id TEXT,
+  selected_session_id TEXT,
+  enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+  published_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE (id, user_id),
+  FOREIGN KEY (selected_session_id, user_id) REFERENCES sessions(id, user_id),
+  CHECK (
+    (kind = 'telegram' AND private_chat_id IS NOT NULL) OR
+    (kind IN ('wechat', 'wecom') AND private_chat_id IS NULL)
+  )
+) STRICT;
+INSERT INTO channel_endpoints_new(
+  id, tuple_key, user_id, kind, account_id, platform_user_id, private_chat_id,
+  selected_session_id, enabled, published_at, updated_at
+)
+SELECT id, tuple_key, user_id, kind, account_id, platform_user_id, private_chat_id,
+       selected_session_id, enabled, published_at, updated_at
+FROM channel_endpoints;
+DROP TABLE channel_endpoints;
+ALTER TABLE channel_endpoints_new RENAME TO channel_endpoints;
 `;
 
 const MIGRATE_1_TO_2 = `
@@ -351,6 +382,7 @@ function verifySchema(connection: DatabaseSync): void {
       throw error;
     }
   } else if (version === 1) {
+    connection.exec("PRAGMA foreign_keys = OFF");
     connection.exec("BEGIN IMMEDIATE");
     try {
       const meta = connection
@@ -366,16 +398,25 @@ function verifySchema(connection: DatabaseSync): void {
       connection.exec(MIGRATE_1_TO_2);
       connection.exec(MIGRATE_2_TO_3);
       connection.exec(MIGRATE_3_TO_4);
+      connection.exec(MIGRATE_4_TO_5);
       connection
         .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
         .run(SCHEMA_ID, "schema_id");
       connection.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
       connection.exec("COMMIT");
+      const violations = connection
+        .prepare("PRAGMA foreign_key_check")
+        .all() as unknown[];
+      if (violations.length > 0)
+        throw new FoundationError("database schema 5 foreign key check failed");
     } catch (error) {
       connection.exec("ROLLBACK");
+      connection.exec("PRAGMA foreign_keys = ON");
       throw error;
     }
+    connection.exec("PRAGMA foreign_keys = ON");
   } else if (version === 2) {
+    connection.exec("PRAGMA foreign_keys = OFF");
     connection.exec("BEGIN IMMEDIATE");
     try {
       const meta = connection
@@ -385,16 +426,25 @@ function verifySchema(connection: DatabaseSync): void {
         throw new FoundationError("database schema 2 identity is unknown");
       connection.exec(MIGRATE_2_TO_3);
       connection.exec(MIGRATE_3_TO_4);
+      connection.exec(MIGRATE_4_TO_5);
       connection
         .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
         .run(SCHEMA_ID, "schema_id");
       connection.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
       connection.exec("COMMIT");
+      const violations = connection
+        .prepare("PRAGMA foreign_key_check")
+        .all() as unknown[];
+      if (violations.length > 0)
+        throw new FoundationError("database schema 5 foreign key check failed");
     } catch (error) {
       connection.exec("ROLLBACK");
+      connection.exec("PRAGMA foreign_keys = ON");
       throw error;
     }
+    connection.exec("PRAGMA foreign_keys = ON");
   } else if (version === 3) {
+    connection.exec("PRAGMA foreign_keys = OFF");
     connection.exec("BEGIN IMMEDIATE");
     try {
       const meta = connection
@@ -403,6 +453,7 @@ function verifySchema(connection: DatabaseSync): void {
       if (meta?.value !== "hitch-pi-mvp-schema-3")
         throw new FoundationError("database schema 3 identity is unknown");
       connection.exec(MIGRATE_3_TO_4);
+      connection.exec(MIGRATE_4_TO_5);
       connection
         .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
         .run(SCHEMA_ID, "schema_id");
@@ -412,6 +463,32 @@ function verifySchema(connection: DatabaseSync): void {
       connection.exec("ROLLBACK");
       throw error;
     }
+  } else if (version === 4) {
+    connection.exec("PRAGMA foreign_keys = OFF");
+    connection.exec("BEGIN IMMEDIATE");
+    try {
+      const meta = connection
+        .prepare("SELECT value FROM app_meta WHERE key = ?")
+        .get("schema_id") as { value?: unknown } | undefined;
+      if (meta?.value !== "hitch-pi-mvp-schema-4")
+        throw new FoundationError("database schema 4 identity is unknown");
+      connection.exec(MIGRATE_4_TO_5);
+      connection
+        .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
+        .run(SCHEMA_ID, "schema_id");
+      connection.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+      connection.exec("COMMIT");
+      const violations = connection
+        .prepare("PRAGMA foreign_key_check")
+        .all() as unknown[];
+      if (violations.length > 0)
+        throw new FoundationError("database schema 5 foreign key check failed");
+    } catch (error) {
+      connection.exec("ROLLBACK");
+      connection.exec("PRAGMA foreign_keys = ON");
+      throw error;
+    }
+    connection.exec("PRAGMA foreign_keys = ON");
   } else if (version !== SCHEMA_VERSION) {
     throw new FoundationError(
       `unsupported database schema version: ${version}`,

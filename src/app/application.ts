@@ -15,6 +15,10 @@ import {
   classifyWeChatIdentity,
   readWeChatContent,
 } from "../channels/wechat-ingress.js";
+import {
+  classifyWeComIdentity,
+  readWeComContent,
+} from "../channels/wecom-ingress.js";
 import { parseCommand, type WakeCommand } from "./commands.js";
 import { AppError, type FailureCategory } from "./errors.js";
 import {
@@ -200,7 +204,7 @@ export class HitchApplication {
   public handleWakeCommand(
     identity: MessageIdentity,
     command: WakeCommand,
-    channel: "telegram" | "wechat",
+    channel: "telegram" | "wechat" | "wecom",
     sessionId: string,
   ): string {
     const userId = identity.endpoint.userId;
@@ -459,6 +463,61 @@ export class HitchApplication {
     }
   }
 
+  public receiveWeCom(
+    accountId: string,
+    message: unknown,
+    expectedBotId: string,
+  ): IngressResult {
+    let replyPeerId: string | undefined;
+    try {
+      if (this.#stopping)
+        throw new AppError("busy", "Hitch is stopping; try again shortly");
+      const ingress = classifyWeComIdentity(expectedBotId, message);
+      const endpoint = this.store.resolveWeComEndpoint(
+        accountId,
+        ingress.platformUserId,
+      );
+      if (endpoint === null)
+        throw new AppError(
+          "rejected",
+          "Enterprise WeChat private endpoint is not configured",
+        );
+      replyPeerId = endpoint.platformUserId;
+      const content = readWeComContent(ingress, message);
+      return {
+        ...this.#receiveAuthorized(
+          endpoint,
+          ingress.idempotencyKey,
+          content.text,
+          content.contentDigest,
+          [],
+          "wecom",
+        ),
+        replyPeerId,
+      };
+    } catch (error) {
+      if (error instanceof AppError) {
+        return {
+          accepted: false,
+          duplicate: false,
+          category: error.category,
+          message: error.message,
+          ...(replyPeerId === undefined ? {} : { replyPeerId }),
+        };
+      }
+      process.stderr.write(
+        `WeCom admission internal error: ${error instanceof Error ? error.message : "unknown"}\n`,
+      );
+      return {
+        accepted: false,
+        duplicate: false,
+        category: "internal-error",
+        message: "internal-error: WeCom message could not be admitted",
+        ...(replyPeerId === undefined ? {} : { replyPeerId }),
+      };
+    }
+  }
+
   #takeStaged(userId: string): RuntimeArtifact[] {
     if (this.mediaMode !== "text-trigger") return [];
     const { artifacts, expired } = this.store.takeStagedArtifacts(
@@ -488,7 +547,7 @@ export class HitchApplication {
     text: string,
     contentDigest: string,
     artifacts: readonly RuntimeArtifact[],
-    channel: "telegram" | "wechat" = "telegram",
+    channel: "telegram" | "wechat" | "wecom" = "telegram",
   ): IngressResult {
     const identity: MessageIdentity = {
       endpoint,

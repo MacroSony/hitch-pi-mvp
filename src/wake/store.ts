@@ -219,7 +219,7 @@ function validateStoreData(data: unknown): ValidationResult {
     }
 
     const channel = scheduleObj.channel;
-    if (channel !== "telegram" && channel !== "wechat") {
+    if (channel !== "telegram" && channel !== "wechat" && channel !== "wecom") {
       return {
         ok: false,
         error: `Invalid schedule channel: ${String(channel)}`,
@@ -500,7 +500,11 @@ export class WakeStore {
     if (typeof input.ownerId !== "string" || input.ownerId.length === 0) {
       throw new Error("Invalid ownerId");
     }
-    if (input.channel !== "telegram" && input.channel !== "wechat") {
+    if (
+      input.channel !== "telegram" &&
+      input.channel !== "wechat" &&
+      input.channel !== "wecom"
+    ) {
       throw new Error(`Invalid channel: ${String(input.channel)}`);
     }
     if (typeof input.endpointId !== "string" || input.endpointId.length === 0) {
