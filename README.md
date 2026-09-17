@@ -1,7 +1,7 @@
 # Hitch Pi MVP
 
 Hitch Pi MVP is a deliberately narrow, self-hosted bridge between private
-Telegram/WeChat conversations and sandboxed Pi coding-agent sessions.
+Telegram, WeChat, and Enterprise WeChat conversations and sandboxed Pi coding-agent sessions.
 
 The first release is an attended concept test for a small, personally trusted,
 statically enrolled user set on one Linux host. Each user receives private
@@ -23,8 +23,8 @@ This repository is a fresh, narrow rewrite started from the product boundary. It
 - [Operator install, recovery, and reset guide](docs/operator-guide.md)
 - [MVP acceptance record](docs/mvp-acceptance.md)
 
-The durable foundation, Telegram and WeChat private-peer paths, native
-Pi/Bubblewrap runtime, bounded media, and artifact outbox are implemented.
+The durable foundation, Telegram, WeChat, and Enterprise WeChat private-peer paths, native
+Pi/Bubblewrap runtime, bounded media, and artifact outbox are implemented. Enterprise WeChat is a text-only, single-chat MVP.
 Earlier Phase 0 evidence under `spikes/` found four real
 hardening gaps. The trusted-personal MVP reset accepts two as attended
 operational risks, excludes the two unsupported operator extensions, and moves

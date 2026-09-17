@@ -1921,6 +1921,14 @@ export class HitchStore {
       .run(this.clock.now(), delivery.id, delivery.userId);
   }
 
+  public markOutboxFailed(delivery: OutboxDelivery, _reason: string): void {
+    this.#database
+      .prepare(
+        "UPDATE outbox SET state = 'failed', updated_at = ? WHERE id = ? AND user_id = ? AND state = 'sending'",
+      )
+      .run(this.clock.now(), delivery.id, delivery.userId);
+  }
+
   public count(
     table: "sessions" | "turns" | "outbox" | "artifacts",
     userId?: string,

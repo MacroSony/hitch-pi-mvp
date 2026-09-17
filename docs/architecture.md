@@ -9,9 +9,9 @@ behavior, providers, models, and extensions. The mandatory Hitch extension
 routes untrusted tool execution to the sandbox backend.
 
 ```text
-Telegram long poll              WeChat iLink
-        |                            |
-        +------ channel ingress -----+
+Telegram long poll              WeChat iLink           Enterprise WeChat WebSocket
+        |                            |                            |
+        +------------- channel ingress ---------------------------+
                        |
           trusted channel identity
                        |
@@ -45,7 +45,7 @@ The trust decision and alternatives are recorded in
 src/
   config/       strict startup configuration and secret references
   db/           schema, transactions, and narrow state operations
-  channels/     Telegram, WeChat, and shared transport interface
+  channels/     Telegram, WeChat, Enterprise WeChat, and shared transport interface
   app/          identity, commands, session routing, Turn admission
   pi/           RPC lifecycle, native model/command/UI projection
   extensions/   manifests, trust profiles, and explicit loading
@@ -87,6 +87,10 @@ Accepted evidence is:
   exact `from.id`, and stable update/message id.
 - WeChat: configured account, exact `from_user_id`, absent/empty `group_id`,
   and stable message id. Send-context tokens bind to the same account/peer.
+- Enterprise WeChat: configured account credentials, exact `body.aibotid`,
+  `body.chattype == "single"`, exact `body.from.userid`, and stable
+  `body.msgid`. The current adapter accepts private text only; media and
+  group callbacks are rejected before content work.
 
 Text, captions, callbacks, filenames, forwards, and extension payloads never
 select identity. Missing, group-scoped, contradictory, or ambiguous updates

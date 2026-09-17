@@ -22,8 +22,8 @@ without pretending the MVP is hardened for adversarial users.
 ### Identity and ownership
 
 - Accept only exact statically configured private-channel tuples derived from
-  authenticated Telegram or WeChat metadata. Reject groups and missing or
-  contradictory identity fields before content or media work.
+  authenticated Telegram, WeChat, or Enterprise WeChat metadata. Reject groups
+  and missing or contradictory identity fields before content or media work.
 - Scope sessions, Turns, selected models, cancellation, artifacts, and outbox
   rows to the authenticated Hitch user.
 - Reject duplicate endpoint tuples, duplicate/nested user workspaces, and

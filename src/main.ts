@@ -5,6 +5,7 @@ import { HitchStore } from "./app/store.js";
 import { directFetcher } from "./channels/direct-fetch.js";
 import { proxyFetcher } from "./channels/proxy-fetch.js";
 import { TelegramBotClient, TelegramWorker } from "./channels/telegram.js";
+import { WeComWorker } from "./channels/wecom.js";
 
 // The pinned WeChat client always uses the global fetch. Route it through
 // the direct HTTPS implementation: the WeChat API returns a content-length
@@ -79,6 +80,7 @@ async function main(): Promise<void> {
               config.piProfileDir,
               ...config.users.map((user) => user.workspace),
               ...config.wechatAccounts.map((account) => account.stateDir),
+              ...config.wecomAccounts.map((account) => account.credentialsFile),
             ],
           })
         : undefined;
@@ -100,7 +102,8 @@ async function main(): Promise<void> {
 
     if (
       config.telegramAccounts.length === 0 &&
-      config.wechatAccounts.length === 0
+      config.wechatAccounts.length === 0 &&
+      config.wecomAccounts.length === 0
     ) {
       throw new Error("channel mode requires at least one configured account");
     }
@@ -190,7 +193,16 @@ async function main(): Promise<void> {
         media,
       );
     });
-    const workers = [...telegramWorkers, ...wechatWorkers];
+    const wecomWorkers = config.wecomAccounts.map(
+      (account) =>
+        new WeComWorker(
+          account.id,
+          account.credentialsFile,
+          application,
+          store,
+        ),
+    );
+    const workers = [...telegramWorkers, ...wechatWorkers, ...wecomWorkers];
     application.start();
     const shutdown = new AbortController();
     const stop = (): void => {
@@ -210,6 +222,7 @@ async function main(): Promise<void> {
           users: foundation.topology.users.length,
           telegramAccounts: telegramWorkers.length,
           wechatAccounts: wechatWorkers.length,
+          wecomAccounts: wecomWorkers.length,
         })}\n`,
       );
       await Promise.all(workers.map((worker) => worker.run(shutdown.signal)));
