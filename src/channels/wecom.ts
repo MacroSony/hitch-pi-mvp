@@ -13,9 +13,10 @@ const CONTROL_PATTERN = /[\u0000-\u001f\u007f]/u;
 
 export interface WebSocketLike {
   send(data: string): void;
+  ping(): void;
   terminate(): void;
   on(
-    event: "open" | "message" | "error" | "close",
+    event: "open" | "message" | "error" | "close" | "pong",
     listener: (...args: unknown[]) => void,
   ): this;
   once(
@@ -62,6 +63,8 @@ export interface WeComClientOptions {
   readonly heartbeatMs?: number;
   readonly ackTimeoutMs?: number;
   readonly sendGapMs?: number;
+  readonly pingMs?: number;
+  readonly livenessLimitMs?: number;
 }
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -138,11 +141,15 @@ export class WeComClient {
   readonly #heartbeatMs: number;
   readonly #ackTimeoutMs: number;
   readonly #sendGapMs: number;
+  readonly #pingMs: number;
+  readonly #livenessLimitMs: number;
   readonly #pending = new Map<string, Pending>();
   #socket: WebSocketLike | undefined;
   #stopped = false;
   #dead = false;
   #heartbeat: ReturnType<typeof setInterval> | undefined;
+  #ping: ReturnType<typeof setInterval> | undefined;
+  #lastLiveness = 0;
   #sendChain: Promise<void> = Promise.resolve();
   #lastSendAt = 0;
   public onMessage: (frame: unknown) => void = () => undefined;
@@ -155,13 +162,21 @@ export class WeComClient {
     this.#heartbeatMs = options.heartbeatMs ?? 30_000;
     this.#ackTimeoutMs = options.ackTimeoutMs ?? 10_000;
     this.#sendGapMs = options.sendGapMs ?? 2_100;
+    this.#pingMs = options.pingMs ?? 10_000;
+    this.#livenessLimitMs = options.livenessLimitMs ?? 25_000;
+  }
+
+  #clearTimers(): void {
+    if (this.#heartbeat !== undefined) clearInterval(this.#heartbeat);
+    this.#heartbeat = undefined;
+    if (this.#ping !== undefined) clearInterval(this.#ping);
+    this.#ping = undefined;
   }
 
   #die(error: WeComError): void {
     if (this.#dead || this.#stopped) return;
     this.#dead = true;
-    if (this.#heartbeat !== undefined) clearInterval(this.#heartbeat);
-    this.#heartbeat = undefined;
+    this.#clearTimers();
     for (const pending of this.#pending.values()) pending.reject(error);
     this.#pending.clear();
     this.onDead(error);
@@ -200,6 +215,7 @@ export class WeComClient {
   }
 
   #receive(data: unknown): void {
+    this.#lastLiveness = Date.now();
     let parsed: unknown;
     try {
       parsed = JSON.parse(
@@ -260,6 +276,9 @@ export class WeComClient {
       socket.once("close", fail);
     });
     socket.on("message", (data) => this.#receive(data));
+    socket.on("pong", () => {
+      this.#lastLiveness = Date.now();
+    });
     socket.on("error", () =>
       this.#die(new WeComError("WeCom transport failed")),
     );
@@ -278,10 +297,25 @@ export class WeComClient {
       this.stop();
       throw error;
     }
+    this.#lastLiveness = Date.now();
     this.#heartbeat = setInterval(
       () => void this.#heartbeatOnce(),
       this.#heartbeatMs,
     );
+    this.#ping = setInterval(() => {
+      if (
+        this.#lastLiveness > 0 &&
+        Date.now() - this.#lastLiveness > this.#livenessLimitMs
+      ) {
+        this.#die(new WeComError("WeCom connection is unresponsive"));
+        return;
+      }
+      try {
+        this.#socket?.ping();
+      } catch {
+        this.#die(new WeComError("WeCom transport failed"));
+      }
+    }, this.#pingMs);
   }
 
   public async sendText(userId: string, text: string): Promise<void> {
@@ -308,8 +342,7 @@ export class WeComClient {
   public stop(): void {
     if (this.#stopped) return;
     this.#stopped = true;
-    if (this.#heartbeat !== undefined) clearInterval(this.#heartbeat);
-    this.#heartbeat = undefined;
+    this.#clearTimers();
     for (const pending of this.#pending.values())
       pending.reject(new WeComError("WeCom client stopped"));
     this.#pending.clear();
@@ -328,6 +361,8 @@ export interface WeComWorkerOptions {
   readonly deliverPollMs?: number;
   readonly sendGapMs?: number;
   readonly reconnectBaseMs?: number;
+  readonly pingMs?: number;
+  readonly livenessLimitMs?: number;
 }
 
 export class WeComWorker {
@@ -350,6 +385,8 @@ export class WeComWorker {
       deliverPollMs: options.deliverPollMs ?? 1_000,
       sendGapMs: options.sendGapMs ?? 2_100,
       reconnectBaseMs: options.reconnectBaseMs ?? 1_000,
+      pingMs: options.pingMs ?? 10_000,
+      livenessLimitMs: options.livenessLimitMs ?? 25_000,
     };
   }
 
@@ -410,6 +447,7 @@ export class WeComWorker {
     while (!activeSignal.aborted) {
       let client: WeComClient | undefined;
       let fail: (error: WeComError) => void = () => undefined;
+      let lostReason = "WeCom connection lost";
       const dead = new Promise<WeComError>((resolve) => {
         fail = resolve;
       });
@@ -424,6 +462,8 @@ export class WeComWorker {
           heartbeatMs: this.#options.heartbeatMs,
           ackTimeoutMs: this.#options.ackTimeoutMs,
           sendGapMs: this.#options.sendGapMs,
+          pingMs: this.#options.pingMs,
+          livenessLimitMs: this.#options.livenessLimitMs,
         });
         client.onDead = fail;
         client.onMessage = (incoming) => {
@@ -438,6 +478,7 @@ export class WeComWorker {
           );
         };
         await client.connect();
+        process.stderr.write(`WeCom connected (account ${this.accountId})\n`);
         const connected: WeComClient = client;
         delay = this.#options.reconnectBaseMs;
         const delivery = (async (): Promise<void> => {
@@ -463,12 +504,22 @@ export class WeComWorker {
         await delivery.catch(() => undefined);
         if (error === undefined || activeSignal.aborted) return;
         if (error.fatal) throw error;
+        lostReason = error.message;
       } catch (error) {
         connectionStop.abort();
         client?.stop();
         if (activeSignal.aborted) return;
-        if (!(error instanceof WeComError) || error.fatal) throw error;
+        if (!(error instanceof WeComError) || error.fatal) {
+          process.stderr.write(
+            `WeCom fatal (account ${this.accountId}): ${error instanceof Error ? error.message : "unknown"}\n`,
+          );
+          throw error;
+        }
+        lostReason = error.message;
       }
+      process.stderr.write(
+        `WeCom reconnecting (account ${this.accountId}): ${lostReason}; retry in ${delay}ms\n`,
+      );
       await Promise.race([wait(delay), stopped]);
       delay = Math.min(delay * 2, 60_000);
     }

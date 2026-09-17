@@ -44,6 +44,8 @@ class FakeWeComSocket extends EventEmitter {
   public readonly sent: Record<string, unknown>[] = [];
   public terminateCalled = false;
   public autoAck = true;
+  public autoPong = true;
+  public pingCount = 0;
   public ackErrcode = 0;
   public subscribeErrcode: number | undefined;
   #opened = false;
@@ -81,6 +83,11 @@ class FakeWeComSocket extends EventEmitter {
         }),
       );
     });
+  }
+
+  public ping(): void {
+    this.pingCount += 1;
+    if (this.autoPong) queueMicrotask(() => this.emit("pong"));
   }
 
   public push(frame: unknown): void {
@@ -198,6 +205,8 @@ function setup() {
     deliverPollMs: 10,
     sendGapMs: 1,
     reconnectBaseMs: 20,
+    pingMs: 15,
+    livenessLimitMs: 60,
   });
   return {
     app,
@@ -514,6 +523,19 @@ test("WeCom treats a missing heartbeat ack as a dead connection", async () => {
   const { controller, done } = await startWorker(environment);
   environment.sockets[0]!.autoAck = false;
   await waitFor(() => environment.sockets.length === 2, "heartbeat reconnect");
+  controller.abort();
+  await done;
+  environment.foundation.close();
+});
+
+test("WeCom treats stale liveness (no pong, no ack) as a dead connection", async () => {
+  const environment = setup();
+  const { controller, done } = await startWorker(environment);
+  const socket = environment.sockets[0]!;
+  await waitFor(() => socket.pingCount > 0, "protocol pings running");
+  socket.autoPong = false;
+  socket.autoAck = false;
+  await waitFor(() => environment.sockets.length === 2, "liveness reconnect");
   controller.abort();
   await done;
   environment.foundation.close();
