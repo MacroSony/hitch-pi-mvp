@@ -206,10 +206,11 @@ function setup(
     }),
   );
   const media = new MediaStore(paths.data);
+  let clockNow = 1_700_000_000_000;
   const store = new HitchStore(
     foundation.database,
     undefined,
-    undefined,
+    { now: () => clockNow },
     (userId) => media.assertAdmissionCapacity(userId),
   );
   const calls: RuntimeTurn[] = [];
@@ -280,6 +281,9 @@ function setup(
     },
     setDownloadFilename(filename: string): void {
       downloadFilename = filename;
+    },
+    advanceClock(ms: number): void {
+      clockNow += ms;
     },
     failNextSubscribe(errcode: number): void {
       nextSubscribeErrcode = errcode;
@@ -935,4 +939,39 @@ test("WeCom credentials require a strict private JSON file", () => {
     () => readWeComCredentials(join(root, "absent.json")),
     WeComError,
   );
+});
+
+test("expired staged WeCom attachments produce a notice before the Turn reply", async () => {
+  const environment = setup({ mediaMode: "text-trigger" });
+  const controller = new AbortController();
+  const done = environment.worker.run(controller.signal);
+  const socket = environment.sockets[0]!;
+  await waitFor(() => socket.sentCmd("aibot_subscribe").length === 1, "sub");
+  socket.push(
+    callback("m-30", "", {
+      msgtype: "file",
+      file: { url: "https://example.test/file", aeskey: MEDIA_AESKEY },
+    }),
+  );
+  await waitFor(
+    () => socket.sentCmd("aibot_send_msg").length === 1,
+    "staging ack",
+  );
+  environment.advanceClock(11 * 60 * 1000);
+  socket.push(callback("m-31", "hi"));
+  await waitFor(() => environment.calls.length === 1, "trigger turn");
+  assert.equal(
+    (environment.calls[0]!.artifacts ?? []).length,
+    0,
+    "expired staged artifacts must not reach the Turn",
+  );
+  await waitFor(
+    () => socket.sentCmd("aibot_send_msg").length === 3,
+    "notice plus reply",
+  );
+  const notice = JSON.stringify(socket.sentCmd("aibot_send_msg")[1]);
+  assert.ok(notice.includes("expired after 10 minutes"), notice);
+  controller.abort();
+  await done;
+  environment.foundation.close();
 });

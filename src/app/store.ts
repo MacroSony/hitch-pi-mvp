@@ -1730,6 +1730,14 @@ export class HitchStore {
     });
   }
 
+  public enqueueSystemNotice(
+    userId: string,
+    endpointId: string,
+    text: string,
+  ): void {
+    this.#insertOutbox(userId, endpointId, null, text);
+  }
+
   public stagedArtifactCount(userId: string): number {
     const row = this.#database
       .prepare(

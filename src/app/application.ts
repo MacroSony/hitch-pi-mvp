@@ -350,7 +350,10 @@ export class HitchApplication {
       replyPrivateChatId = endpoint.privateChatId;
       if (artifacts.some((artifact) => artifact.userId !== endpoint.userId))
         throw new AppError("rejected", "Telegram media owner does not match");
-      const effective = [...this.#takeStaged(endpoint.userId), ...artifacts];
+      const effective = [
+        ...this.#takeStaged(endpoint.userId, endpoint.id),
+        ...artifacts,
+      ];
       const content = readTelegramContent(ingress, effective);
       if (
         this.mediaMode === "text-trigger" &&
@@ -419,7 +422,10 @@ export class HitchApplication {
       replyPeerId = endpoint.platformUserId;
       if (artifacts.some((artifact) => artifact.userId !== endpoint.userId))
         throw new AppError("rejected", "WeChat media owner does not match");
-      const effective = [...this.#takeStaged(endpoint.userId), ...artifacts];
+      const effective = [
+        ...this.#takeStaged(endpoint.userId, endpoint.id),
+        ...artifacts,
+      ];
       const content = readWeChatContent(ingress, effective);
       if (
         this.mediaMode === "text-trigger" &&
@@ -486,7 +492,10 @@ export class HitchApplication {
       replyPeerId = endpoint.platformUserId;
       if (artifacts.some((artifact) => artifact.userId !== endpoint.userId))
         throw new AppError("rejected", "WeCom media owner does not match");
-      const effective = [...this.#takeStaged(endpoint.userId), ...artifacts];
+      const effective = [
+        ...this.#takeStaged(endpoint.userId, endpoint.id),
+        ...artifacts,
+      ];
       const content = readWeComContent(ingress, message);
       if (!content.textProvided && effective.length === 0)
         throw new AppError("rejected", "WeCom media is not attached");
@@ -532,13 +541,19 @@ export class HitchApplication {
     }
   }
 
-  #takeStaged(userId: string): RuntimeArtifact[] {
+  #takeStaged(userId: string, endpointId: string): RuntimeArtifact[] {
     if (this.mediaMode !== "text-trigger") return [];
     const { artifacts, expired } = this.store.takeStagedArtifacts(
       userId,
       this.store.clock.now(),
     );
     for (const artifact of expired) this.media?.discard(artifact);
+    if (expired.length > 0)
+      this.store.enqueueSystemNotice(
+        userId,
+        endpointId,
+        `${expired.length} staged attachment(s) expired after 10 minutes; please resend them with your text.`,
+      );
     return artifacts;
   }
 
