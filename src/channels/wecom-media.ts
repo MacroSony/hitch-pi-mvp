@@ -119,12 +119,15 @@ export async function downloadWeComMedia(url: string): Promise<WeComDownload> {
     chunks.push(chunk);
   }
   const contentType = response.headers.get("content-type");
+  const disposition = response.headers.get("content-disposition");
+  const dispositionPreview =
+    disposition === null
+      ? "absent"
+      : disposition.replace(/[\u0000-\u001f\u007f]/g, "?").slice(0, 200);
   process.stderr.write(
-    `WeCom media download headers: content-type=${contentType ?? "absent"} content-disposition=${response.headers.get("content-disposition") === null ? "absent" : "present"}\n`,
+    `WeCom media download headers: content-type=${contentType ?? "absent"} content-disposition=${dispositionPreview}\n`,
   );
-  const filename = parseWeComDispositionFilename(
-    response.headers.get("content-disposition"),
-  );
+  const filename = parseWeComDispositionFilename(disposition);
   const mime =
     contentType !== null &&
     /^[\x21-\x7e]{1,127}$/.test(contentType) &&
