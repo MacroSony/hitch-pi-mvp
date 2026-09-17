@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createCipheriv } from "node:crypto";
 import { EventEmitter } from "node:events";
 import {
   chmodSync,
@@ -48,6 +49,7 @@ class FakeWeComSocket extends EventEmitter {
   public pingCount = 0;
   public ackErrcode = 0;
   public subscribeErrcode: number | undefined;
+  public ackBodies: Record<string, unknown> = {};
   #opened = false;
 
   public constructor() {
@@ -73,6 +75,8 @@ class FakeWeComSocket extends EventEmitter {
     let errcode = this.ackErrcode;
     if (frame.cmd === "aibot_subscribe" && this.subscribeErrcode !== undefined)
       errcode = this.subscribeErrcode;
+    const body =
+      frame.cmd === undefined ? undefined : this.ackBodies[frame.cmd];
     queueMicrotask(() => {
       this.emit(
         "message",
@@ -80,6 +84,7 @@ class FakeWeComSocket extends EventEmitter {
           headers: { req_id: reqId },
           errcode,
           errmsg: errcode === 0 ? "ok" : "rejected",
+          ...(body === undefined ? {} : { body }),
         }),
       );
     });
@@ -119,6 +124,10 @@ function callback(
     chattype?: string;
     msgtype?: string;
     userId?: string;
+    image?: unknown;
+    file?: unknown;
+    video?: unknown;
+    voice?: unknown;
   } = {},
 ): Record<string, unknown> {
   return {
@@ -131,11 +140,38 @@ function callback(
       msgtype: options.msgtype ?? "text",
       from: { userid: options.userId ?? "wc-alice" },
       text: { content: text },
+      ...(options.image === undefined ? {} : { image: options.image }),
+      ...(options.file === undefined ? {} : { file: options.file }),
+      ...(options.video === undefined ? {} : { video: options.video }),
+      ...(options.voice === undefined ? {} : { voice: options.voice }),
     },
   };
 }
 
-function setup() {
+const MEDIA_KEY = Buffer.alloc(32, 7);
+const MEDIA_AESKEY = MEDIA_KEY.toString("base64");
+
+function encryptMedia(plain: Buffer): Buffer {
+  const padLen = 32 - (plain.length % 32);
+  const padded = Buffer.concat([plain, Buffer.alloc(padLen, padLen)]);
+  const cipher = createCipheriv(
+    "aes-256-cbc",
+    MEDIA_KEY,
+    MEDIA_KEY.subarray(0, 16),
+  );
+  cipher.setAutoPadding(false);
+  return Buffer.concat([cipher.update(padded), cipher.final()]);
+}
+
+// 1x1 PNG.
+const PNG_BYTES = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+  "base64",
+);
+
+function setup(
+  options: { mediaMode?: "always-trigger" | "text-trigger" } = {},
+) {
   const root = mkdtempSync(join(tmpdir(), "hitch-wecom-test-"));
   chmodSync(root, 0o700);
   const paths = {
@@ -182,41 +218,59 @@ function setup() {
       calls.push(turn);
       return { outcome: "succeeded", text: "ok", sessionReusable: true };
     }),
-    "always-trigger",
-    undefined,
+    options.mediaMode ?? "always-trigger",
+    media,
     undefined,
     root,
   );
   app.start();
   const sockets: FakeWeComSocket[] = [];
+  const downloads: string[] = [];
+  let downloadData: Buffer = encryptMedia(PNG_BYTES);
   let nextSubscribeErrcode: number | undefined;
-  const worker = new WeComWorker("enterprise", credentialsFile, app, store, {
-    socketFactory: () => {
-      const socket = new FakeWeComSocket();
-      if (nextSubscribeErrcode !== undefined) {
-        socket.subscribeErrcode = nextSubscribeErrcode;
-        nextSubscribeErrcode = undefined;
-      }
-      sockets.push(socket);
-      return socket;
+  const worker = new WeComWorker(
+    "enterprise",
+    credentialsFile,
+    app,
+    store,
+    media,
+    {
+      socketFactory: () => {
+        const socket = new FakeWeComSocket();
+        if (nextSubscribeErrcode !== undefined) {
+          socket.subscribeErrcode = nextSubscribeErrcode;
+          nextSubscribeErrcode = undefined;
+        }
+        sockets.push(socket);
+        return socket;
+      },
+      downloadFn: async (url) => {
+        downloads.push(url);
+        return downloadData;
+      },
+      heartbeatMs: 40,
+      ackTimeoutMs: 200,
+      deliverPollMs: 10,
+      sendGapMs: 1,
+      reconnectBaseMs: 20,
+      pingMs: 15,
+      livenessLimitMs: 120,
     },
-    heartbeatMs: 40,
-    ackTimeoutMs: 200,
-    deliverPollMs: 10,
-    sendGapMs: 1,
-    reconnectBaseMs: 20,
-    pingMs: 15,
-    livenessLimitMs: 60,
-  });
+  );
   return {
     app,
     credentialsFile,
+    downloads,
     foundation,
+    media,
     root,
     sockets,
     store,
     worker,
     calls,
+    setDownloadData(data: Buffer): void {
+      downloadData = data;
+    },
     failNextSubscribe(errcode: number): void {
       nextSubscribeErrcode = errcode;
     },
@@ -326,19 +380,26 @@ test("WeCom inbound text admits a Turn, dedupes, and delivers the result", async
   environment.foundation.close();
 });
 
-test("WeCom rejects unknown users silently and answers known-user media rejections", async () => {
+test("WeCom rejects unknown users silently and mixed messages with a reply", async () => {
   const environment = setup();
   const { controller, done } = await startWorker(environment);
   const socket = environment.sockets[0]!;
-  socket.push(callback("m-2", "hello", { userId: "wc-mallory" }));
+  socket.push(
+    callback("m-2", "", {
+      userId: "wc-mallory",
+      msgtype: "image",
+      image: { url: "https://example.test/x", aeskey: MEDIA_AESKEY },
+    }),
+  );
   await wait(100);
   assert.equal(socket.sentCmd("aibot_send_msg").length, 0);
   assert.equal(environment.calls.length, 0);
+  assert.equal(environment.downloads.length, 0, "no download for unknown user");
 
-  socket.push(callback("m-3", "hello", { msgtype: "image" }));
+  socket.push(callback("m-3", "hello", { msgtype: "mixed" }));
   await waitFor(
     () => socket.sentCmd("aibot_send_msg").length === 1,
-    "media reply",
+    "mixed reply",
   );
   const sent = socket.sentCmd("aibot_send_msg").at(-1) as {
     body: { chatid: string; markdown: { content: string } };
@@ -346,7 +407,7 @@ test("WeCom rejects unknown users silently and answers known-user media rejectio
   assert.equal(sent.body.chatid, "wc-alice");
   assert.match(
     sent.body.markdown.content,
-    /Enterprise WeChat media is not supported yet/,
+    /Enterprise WeChat mixed messages are not supported yet/,
   );
 
   socket.push(callback("m-4", "hello", { chattype: "group" }));
@@ -354,6 +415,212 @@ test("WeCom rejects unknown users silently and answers known-user media rejectio
   await wait(100);
   assert.equal(socket.sentCmd("aibot_send_msg").length, 1);
   assert.equal(environment.calls.length, 0);
+  controller.abort();
+  await done;
+  environment.foundation.close();
+});
+
+test("WeCom downloads, decrypts, and admits image/file/video media", async () => {
+  const environment = setup();
+  const { controller, done } = await startWorker(environment);
+  const socket = environment.sockets[0]!;
+  socket.push(
+    callback("m-10", "", {
+      msgtype: "image",
+      image: { url: "https://example.test/image", aeskey: MEDIA_AESKEY },
+    }),
+  );
+  await waitFor(() => environment.calls.length === 1, "image turn");
+  assert.equal(environment.downloads.length, 1);
+  const imageTurn = environment.calls[0]!;
+  const imageArtifacts = imageTurn.artifacts ?? [];
+  assert.equal(imageArtifacts.length, 1);
+  assert.equal(imageArtifacts[0]!.mediaKind, "image");
+  assert.equal(imageArtifacts[0]!.mimeType, "image/png");
+
+  environment.setDownloadData(encryptMedia(Buffer.from("plain file bytes")));
+  socket.push(
+    callback("m-11", "", {
+      msgtype: "file",
+      file: { url: "https://example.test/file", aeskey: MEDIA_AESKEY },
+    }),
+  );
+  await waitFor(() => environment.calls.length === 2, "file turn");
+  assert.equal((environment.calls[1]!.artifacts ?? [])[0]!.mediaKind, "file");
+
+  socket.push(
+    callback("m-12", "", {
+      msgtype: "video",
+      video: { url: "https://example.test/video", aeskey: MEDIA_AESKEY },
+    }),
+  );
+  await waitFor(() => environment.calls.length === 3, "video turn");
+  assert.equal((environment.calls[2]!.artifacts ?? [])[0]!.mediaKind, "file");
+  controller.abort();
+  await done;
+  environment.foundation.close();
+});
+
+test("WeCom stages media in text-trigger mode until a text arrives", async () => {
+  const environment = setup({ mediaMode: "text-trigger" });
+  const { controller, done } = await startWorker(environment);
+  const socket = environment.sockets[0]!;
+  socket.push(
+    callback("m-20", "", {
+      msgtype: "image",
+      image: { url: "https://example.test/staged", aeskey: MEDIA_AESKEY },
+    }),
+  );
+  await waitFor(() => environment.downloads.length === 1, "download");
+  await wait(100);
+  assert.equal(environment.calls.length, 0, "staged media does not trigger");
+  socket.push(callback("m-21", "看看这张图"));
+  await waitFor(() => environment.calls.length === 1, "trigger turn");
+  assert.equal(environment.calls[0]!.prompt, "看看这张图");
+  assert.equal((environment.calls[0]!.artifacts ?? []).length, 1);
+  controller.abort();
+  await done;
+  environment.foundation.close();
+});
+
+test("WeCom converts voice callbacks to text prompts", async () => {
+  const environment = setup();
+  const { controller, done } = await startWorker(environment);
+  const socket = environment.sockets[0]!;
+  socket.push(
+    callback("m-30", "", {
+      msgtype: "voice",
+      voice: { content: "语音转文字内容" },
+    }),
+  );
+  await waitFor(() => environment.calls.length === 1, "voice turn");
+  assert.equal(environment.calls[0]!.prompt, "语音转文字内容");
+  controller.abort();
+  await done;
+  environment.foundation.close();
+});
+
+test("WeCom reports media failures without admitting a Turn", async () => {
+  const environment = setup();
+  const { controller, done } = await startWorker(environment);
+  const socket = environment.sockets[0]!;
+  environment.setDownloadData(Buffer.from("not encrypted at all"));
+  socket.push(
+    callback("m-40", "", {
+      msgtype: "image",
+      image: { url: "https://example.test/bad", aeskey: MEDIA_AESKEY },
+    }),
+  );
+  await waitFor(
+    () => socket.sentCmd("aibot_send_msg").length === 1,
+    "media failure reply",
+  );
+  const sent = socket.sentCmd("aibot_send_msg")[0] as {
+    body: { markdown: { content: string } };
+  };
+  assert.match(sent.body.markdown.content, /media-invalid/);
+  assert.equal(environment.calls.length, 0);
+  controller.abort();
+  await done;
+  environment.foundation.close();
+});
+
+test("WeCom delivers artifact outbox rows through media upload", async () => {
+  const environment = setup();
+  const { controller, done } = await startWorker(environment);
+  const socket = environment.sockets[0]!;
+  socket.ackBodies = {
+    aibot_upload_media_init: { upload_id: "upload-1" },
+    aibot_upload_media_finish: {
+      type: "file",
+      media_id: "media-1",
+      created_at: "0",
+    },
+  };
+  const fileBytes = Buffer.from("hitch wecom artifact payload");
+  const artifact = await environment.media.ingest(
+    "alice",
+    (async function* () {
+      yield fileBytes;
+    })(),
+    { displayName: "hello.txt", advertisedMime: "text/plain" },
+  );
+  const endpoint = environment.store.resolveWeComEndpoint(
+    "enterprise",
+    "wc-alice",
+  );
+  assert.notEqual(endpoint, null);
+  const now = Date.now();
+  environment.foundation.database.connection
+    .prepare(
+      `INSERT INTO artifacts(
+         id, user_id, storage_key, sha256, bytes, media_kind, mime_type,
+         display_name, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      artifact.id,
+      artifact.userId,
+      artifact.storageKey,
+      artifact.sha256,
+      artifact.bytes,
+      artifact.mediaKind,
+      artifact.mimeType,
+      artifact.displayName,
+      now,
+    );
+  environment.foundation.database.connection
+    .prepare(
+      `INSERT INTO outbox(
+         id, user_id, endpoint_id, turn_id, artifact_id, kind, payload_text,
+         state, attempts, created_at, updated_at
+       ) VALUES ('outbox-media', 'alice', ?, NULL, ?, 'artifact', NULL, 'pending', 0, ?, ?)`,
+    )
+    .run(endpoint!.id, artifact.id, now, now);
+  await waitFor(
+    () => socket.sentCmd("aibot_send_msg").length === 1,
+    "media send",
+  );
+  const init = socket.sentCmd("aibot_upload_media_init")[0] as {
+    body: {
+      type: string;
+      filename: string;
+      total_size: number;
+      total_chunks: number;
+      md5: string;
+    };
+  };
+  assert.deepEqual(
+    [
+      init.body.type,
+      init.body.filename,
+      init.body.total_size,
+      init.body.total_chunks,
+    ],
+    ["file", "hello.txt", fileBytes.length, 1],
+  );
+  assert.match(init.body.md5, /^[0-9a-f]{32}$/);
+  const chunk = socket.sentCmd("aibot_upload_media_chunk")[0] as {
+    body: { upload_id: string; chunk_index: number; base64_data: string };
+  };
+  assert.equal(chunk.body.upload_id, "upload-1");
+  assert.equal(chunk.body.chunk_index, 0);
+  assert.equal(
+    Buffer.from(chunk.body.base64_data, "base64").compare(fileBytes),
+    0,
+  );
+  assert.equal(socket.sentCmd("aibot_upload_media_finish").length, 1);
+  const sent = socket.sentCmd("aibot_send_msg")[0] as {
+    body: { msgtype: string; file: { media_id: string } };
+  };
+  assert.deepEqual(
+    [sent.body.msgtype, sent.body.file.media_id],
+    ["file", "media-1"],
+  );
+  await waitFor(
+    () => outboxState(environment, "outbox-media") === "sent",
+    "artifact outbox sent",
+  );
   controller.abort();
   await done;
   environment.foundation.close();
@@ -407,7 +674,7 @@ test("WeCom outbox chunks long text and marks it sent", async () => {
   environment.foundation.close();
 });
 
-test("WeCom artifact outbox fails clearly instead of hanging", async () => {
+test("WeCom fails artifact outbox rows when the object is missing", async () => {
   const environment = setup();
   const { controller, done } = await startWorker(environment);
   const socket = environment.sockets[0]!;
@@ -523,6 +790,21 @@ test("WeCom treats a missing heartbeat ack as a dead connection", async () => {
   const { controller, done } = await startWorker(environment);
   environment.sockets[0]!.autoAck = false;
   await waitFor(() => environment.sockets.length === 2, "heartbeat reconnect");
+  controller.abort();
+  await done;
+  environment.foundation.close();
+});
+
+test("WeCom keeps the connection when heartbeat acks flow but pongs never arrive", async () => {
+  const environment = setup();
+  const { controller, done } = await startWorker(environment);
+  const socket = environment.sockets[0]!;
+  // The production server ignores RFC6455 pings; heartbeat acks alone must
+  // keep the connection alive.
+  socket.autoPong = false;
+  await wait(200);
+  assert.equal(environment.sockets.length, 1);
+  assert.ok(socket.pingCount > 0, "pings were sent");
   controller.abort();
   await done;
   environment.foundation.close();

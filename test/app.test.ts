@@ -117,6 +117,9 @@ function wecomMessage(
     chatType?: string;
     msgtype?: string;
     userId?: string;
+    image?: unknown;
+    file?: unknown;
+    voice?: unknown;
   } = {},
 ) {
   return {
@@ -129,6 +132,9 @@ function wecomMessage(
       msgtype: options.msgtype ?? "text",
       from: { userid: options.userId ?? "alice-wecom" },
       text: { content: text },
+      ...(options.image === undefined ? {} : { image: options.image }),
+      ...(options.file === undefined ? {} : { file: options.file }),
+      ...(options.voice === undefined ? {} : { voice: options.voice }),
     },
   };
 }
@@ -181,14 +187,26 @@ test("Enterprise WeChat text ingress admits private messages and rejects unsuppo
   );
   const mediaRejected = app.receiveWeCom(
     "enterprise",
-    wecomMessage("wecom-4", "", { msgtype: "image" }),
+    wecomMessage("wecom-4", "", { msgtype: "mixed" }),
     "bot-1",
   );
   assert.equal(
     mediaRejected.message,
-    "Enterprise WeChat media is not supported yet",
+    "Enterprise WeChat mixed messages are not supported yet",
   );
-  assert.equal(mediaRejected.replyPeerId, "alice-wecom");
+  const medialess = app.receiveWeCom(
+    "enterprise",
+    wecomMessage("wecom-4b", "", {
+      msgtype: "image",
+      image: {
+        url: "https://example.test/i",
+        aeskey: Buffer.alloc(32, 7).toString("base64"),
+      },
+    }),
+    "bot-1",
+  );
+  assert.equal(medialess.message, "WeCom media is not attached");
+  assert.equal(medialess.replyPeerId, "alice-wecom");
   assert.equal(
     app.receiveWeCom("enterprise", wecomMessage("wecom-5", "!status"), "bot-1")
       .accepted,

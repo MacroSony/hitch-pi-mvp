@@ -467,6 +467,7 @@ export class HitchApplication {
     accountId: string,
     message: unknown,
     expectedBotId: string,
+    artifacts: readonly RuntimeArtifact[] = [],
   ): IngressResult {
     let replyPeerId: string | undefined;
     try {
@@ -483,14 +484,27 @@ export class HitchApplication {
           "Enterprise WeChat private endpoint is not configured",
         );
       replyPeerId = endpoint.platformUserId;
+      if (artifacts.some((artifact) => artifact.userId !== endpoint.userId))
+        throw new AppError("rejected", "WeCom media owner does not match");
+      const effective = [...this.#takeStaged(endpoint.userId), ...artifacts];
       const content = readWeComContent(ingress, message);
+      if (!content.textProvided && effective.length === 0)
+        throw new AppError("rejected", "WeCom media is not attached");
+      if (
+        this.mediaMode === "text-trigger" &&
+        effective.length > 0 &&
+        !content.textProvided
+      ) {
+        this.#stage(endpoint, effective);
+        return { accepted: true, duplicate: false, replyPeerId };
+      }
       return {
         ...this.#receiveAuthorized(
           endpoint,
           ingress.idempotencyKey,
           content.text,
           content.contentDigest,
-          [],
+          effective,
           "wecom",
         ),
         replyPeerId,

@@ -4,7 +4,20 @@ import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import WebSocket from "ws";
 
 import type { HitchApplication, IngressResult } from "../app/application.js";
+import { AppError } from "../app/errors.js";
 import type { HitchStore, OutboxDelivery } from "../app/store.js";
+import type { MediaStore } from "../media/media-store.js";
+import { classifyWeComIdentity, type WeComIdentity } from "./wecom-ingress.js";
+import {
+  WECOM_FILE_LIMIT_BYTES,
+  WECOM_IMAGE_LIMIT_BYTES,
+  WECOM_MIN_UPLOAD_BYTES,
+  WECOM_UPLOAD_CHUNK_BYTES,
+  decryptWeComMedia,
+  downloadWeComMedia,
+  md5Hex,
+  uploadChunkTotal,
+} from "./wecom-media.js";
 
 const WECOM_URL = "wss://openws.work.weixin.qq.com";
 const MAX_CREDENTIAL_BYTES = 16 * 1024;
@@ -163,7 +176,11 @@ export class WeComClient {
     this.#ackTimeoutMs = options.ackTimeoutMs ?? 10_000;
     this.#sendGapMs = options.sendGapMs ?? 2_100;
     this.#pingMs = options.pingMs ?? 10_000;
-    this.#livenessLimitMs = options.livenessLimitMs ?? 25_000;
+    // Must exceed the heartbeat interval plus its ack timeout: app-level
+    // heartbeat acks count as liveness, and the WeCom server is observed to
+    // ignore RFC6455 pings entirely, so pongs alone cannot keep a connection
+    // alive. Ping/pong only shortens detection when the server answers them.
+    this.#livenessLimitMs = options.livenessLimitMs ?? 45_000;
   }
 
   #clearTimers(): void {
@@ -262,6 +279,29 @@ export class WeComClient {
     }
   }
 
+  #enqueue<T>(task: () => Promise<T>): Promise<T> {
+    const run = async (): Promise<T> => {
+      const remaining = this.#sendGapMs - (Date.now() - this.#lastSendAt);
+      if (remaining > 0) await wait(remaining);
+      this.#lastSendAt = Date.now();
+      return task();
+    };
+    const queued = this.#sendChain.then(run, run);
+    this.#sendChain = queued.then(
+      () => undefined,
+      () => undefined,
+    );
+    return queued;
+  }
+
+  async #pacedRequest(cmd: string, body: unknown): Promise<Frame> {
+    return this.#enqueue(async () => {
+      const response = await this.#request(cmd, body);
+      this.#ackSucceeded(response, "WeCom request");
+      return response;
+    });
+  }
+
   public async connect(): Promise<void> {
     if (this.#stopped) throw new WeComError("WeCom client is stopped");
     const socket = this.#socketFactory(WECOM_URL, {
@@ -321,22 +361,66 @@ export class WeComClient {
   public async sendText(userId: string, text: string): Promise<void> {
     for (let index = 0; index < text.length; index += MAX_TEXT_CHUNK) {
       const content = text.slice(index, index + MAX_TEXT_CHUNK);
-      const send = async (): Promise<void> => {
-        const remaining = this.#sendGapMs - (Date.now() - this.#lastSendAt);
-        if (remaining > 0) await wait(remaining);
-        this.#lastSendAt = Date.now();
-        const response = await this.#request("aibot_send_msg", {
-          chat_type: 1,
-          chatid: userId,
-          msgtype: "markdown",
-          markdown: { content },
-        });
-        this.#ackSucceeded(response, "WeCom message");
-      };
-      const queued = this.#sendChain.then(send, send);
-      this.#sendChain = queued.catch(() => undefined);
-      await queued;
+      await this.#pacedRequest("aibot_send_msg", {
+        chat_type: 1,
+        chatid: userId,
+        msgtype: "markdown",
+        markdown: { content },
+      });
     }
+  }
+
+  public async sendMedia(
+    userId: string,
+    input: {
+      readonly kind: "image" | "file";
+      readonly filename: string;
+      readonly data: Buffer;
+      readonly md5: string;
+    },
+  ): Promise<void> {
+    const totalChunks = uploadChunkTotal(input.data.length);
+    const init = await this.#pacedRequest("aibot_upload_media_init", {
+      type: input.kind,
+      filename: input.filename,
+      total_size: input.data.length,
+      total_chunks: totalChunks,
+      md5: input.md5,
+    });
+    const uploadId = record(init.body)?.upload_id;
+    if (
+      typeof uploadId !== "string" ||
+      uploadId.length === 0 ||
+      Buffer.byteLength(uploadId, "utf8") > 256
+    )
+      throw new WeComError("WeCom media upload was rejected");
+    for (let index = 0; index < totalChunks; index += 1) {
+      const chunk = input.data.subarray(
+        index * WECOM_UPLOAD_CHUNK_BYTES,
+        (index + 1) * WECOM_UPLOAD_CHUNK_BYTES,
+      );
+      await this.#pacedRequest("aibot_upload_media_chunk", {
+        upload_id: uploadId,
+        chunk_index: index,
+        base64_data: chunk.toString("base64"),
+      });
+    }
+    const finish = await this.#pacedRequest("aibot_upload_media_finish", {
+      upload_id: uploadId,
+    });
+    const mediaId = record(finish.body)?.media_id;
+    if (
+      typeof mediaId !== "string" ||
+      mediaId.length === 0 ||
+      Buffer.byteLength(mediaId, "utf8") > 256
+    )
+      throw new WeComError("WeCom media upload finish is invalid");
+    await this.#pacedRequest("aibot_send_msg", {
+      chat_type: 1,
+      chatid: userId,
+      msgtype: input.kind,
+      [input.kind]: { media_id: mediaId },
+    });
   }
 
   public stop(): void {
@@ -356,6 +440,7 @@ export class WeComClient {
 
 export interface WeComWorkerOptions {
   readonly socketFactory?: WeComClientOptions["socketFactory"];
+  readonly downloadFn?: (url: string) => Promise<Buffer>;
   readonly heartbeatMs?: number;
   readonly ackTimeoutMs?: number;
   readonly deliverPollMs?: number;
@@ -367,7 +452,10 @@ export interface WeComWorkerOptions {
 
 export class WeComWorker {
   readonly #credentials: WeComCredentials;
-  readonly #options: Required<Omit<WeComWorkerOptions, "socketFactory">> &
+  readonly #download: (url: string) => Promise<Buffer>;
+  readonly #options: Required<
+    Omit<WeComWorkerOptions, "socketFactory" | "downloadFn">
+  > &
     Pick<WeComWorkerOptions, "socketFactory">;
 
   public constructor(
@@ -375,9 +463,11 @@ export class WeComWorker {
     credentialsFile: string,
     readonly application: HitchApplication,
     readonly store: HitchStore,
+    readonly media: MediaStore,
     options: WeComWorkerOptions = {},
   ) {
     this.#credentials = readWeComCredentials(credentialsFile);
+    this.#download = options.downloadFn ?? downloadWeComMedia;
     this.#options = {
       socketFactory: options.socketFactory,
       heartbeatMs: options.heartbeatMs ?? 30_000,
@@ -386,23 +476,57 @@ export class WeComWorker {
       sendGapMs: options.sendGapMs ?? 2_100,
       reconnectBaseMs: options.reconnectBaseMs ?? 1_000,
       pingMs: options.pingMs ?? 10_000,
-      livenessLimitMs: options.livenessLimitMs ?? 25_000,
+      livenessLimitMs: options.livenessLimitMs ?? 45_000,
     };
   }
 
   async #deliver(client: WeComClient, delivery: OutboxDelivery): Promise<void> {
     if (!this.store.claimOutbox(delivery)) return;
     if (delivery.kind === "artifact") {
-      this.store.markOutboxFailed(
-        delivery,
-        "internal-error: WeCom artifact delivery is not supported yet",
-      );
+      await this.#deliverArtifact(client, delivery);
       return;
     }
     try {
       if (delivery.kind !== "text" || delivery.text === undefined)
         throw new WeComError("WeCom outbox row is invalid");
       await client.sendText(delivery.privateChatId, delivery.text);
+      this.store.markOutboxSent(delivery);
+    } catch (error) {
+      this.store.markOutboxRetryable(delivery);
+      throw error;
+    }
+  }
+
+  async #deliverArtifact(
+    client: WeComClient,
+    delivery: OutboxDelivery,
+  ): Promise<void> {
+    const artifact = delivery.artifact;
+    if (artifact === undefined) {
+      this.store.markOutboxFailed(
+        delivery,
+        "internal-error: WeCom artifact delivery is missing its object",
+      );
+      return;
+    }
+    const kind = artifact.mediaKind === "image" ? "image" : "file";
+    const limit =
+      kind === "image" ? WECOM_IMAGE_LIMIT_BYTES : WECOM_FILE_LIMIT_BYTES;
+    if (artifact.bytes > limit || artifact.bytes < WECOM_MIN_UPLOAD_BYTES) {
+      this.store.markOutboxFailed(
+        delivery,
+        "delivery-failed: artifact exceeds the Enterprise WeChat size limit",
+      );
+      return;
+    }
+    try {
+      const data = readFileSync(this.media.verifiedObjectPath(artifact));
+      await client.sendMedia(delivery.privateChatId, {
+        kind,
+        filename: artifact.displayName,
+        data,
+        md5: md5Hex(data),
+      });
       this.store.markOutboxSent(delivery);
     } catch (error) {
       this.store.markOutboxRetryable(delivery);
@@ -424,11 +548,78 @@ export class WeComWorker {
       return;
     }
     if (parsed?.cmd !== "aibot_msg_callback") return;
+    let identity: WeComIdentity | undefined;
+    try {
+      identity = classifyWeComIdentity(this.#credentials.botId, incoming);
+    } catch {
+      identity = undefined;
+    }
+    if (identity?.media !== undefined) {
+      await this.#handleMedia(client, identity, incoming);
+      return;
+    }
     const result: IngressResult = this.application.receiveWeCom(
       this.accountId,
       incoming,
       this.#credentials.botId,
     );
+    if (
+      !result.accepted &&
+      !result.duplicate &&
+      result.replyPeerId !== undefined
+    )
+      await client.sendText(
+        result.replyPeerId,
+        `${result.category ?? "rejected"}: ${result.message ?? "message rejected"}`,
+      );
+  }
+
+  async #handleMedia(
+    client: WeComClient,
+    identity: WeComIdentity,
+    incoming: unknown,
+  ): Promise<void> {
+    const media_ = identity.media;
+    if (media_ === undefined) return;
+    const endpoint = this.store.resolveWeComEndpoint(
+      this.accountId,
+      identity.platformUserId,
+    );
+    if (endpoint === null) return;
+    const artifacts = [];
+    try {
+      const encrypted = await this.#download(media_.url);
+      const plaintext = decryptWeComMedia(encrypted, media_.aeskey);
+      const artifact = await this.media.ingest(
+        endpoint.userId,
+        (async function* (): AsyncGenerator<Uint8Array> {
+          yield plaintext;
+        })(),
+        {
+          advertisedBytes: plaintext.length,
+          expectImage: media_.kind === "image",
+        },
+      );
+      artifacts.push(artifact);
+    } catch (error) {
+      for (const artifact of artifacts) this.media.discard(artifact);
+      const category =
+        error instanceof AppError ? error.category : "media-invalid";
+      const message =
+        error instanceof AppError
+          ? error.message
+          : "WeCom media could not be downloaded";
+      await client.sendText(endpoint.platformUserId, `${category}: ${message}`);
+      return;
+    }
+    const result = this.application.receiveWeCom(
+      this.accountId,
+      incoming,
+      this.#credentials.botId,
+      artifacts,
+    );
+    if (!result.accepted || result.duplicate)
+      for (const artifact of artifacts) this.media.discard(artifact);
     if (
       !result.accepted &&
       !result.duplicate &&

@@ -200,6 +200,7 @@ async function main(): Promise<void> {
           account.credentialsFile,
           application,
           store,
+          media,
         ),
     );
     const workers = [...telegramWorkers, ...wechatWorkers, ...wecomWorkers];
