@@ -63,6 +63,7 @@ export function uploadChunkTotal(bytes: number): number {
 export interface WeComDownload {
   readonly data: Buffer;
   readonly filename?: string;
+  readonly mime?: string;
 }
 
 // The smart-bot callback carries only url+aeskey; the original filename, when
@@ -117,11 +118,22 @@ export async function downloadWeComMedia(url: string): Promise<WeComDownload> {
       throw new AppError("media-invalid", "WeCom media object is too large");
     chunks.push(chunk);
   }
+  const contentType = response.headers.get("content-type");
+  process.stderr.write(
+    `WeCom media download headers: content-type=${contentType ?? "absent"} content-disposition=${response.headers.get("content-disposition") === null ? "absent" : "present"}\n`,
+  );
   const filename = parseWeComDispositionFilename(
     response.headers.get("content-disposition"),
   );
+  const mime =
+    contentType !== null &&
+    /^[\x21-\x7e]{1,127}$/.test(contentType) &&
+    contentType.includes("/")
+      ? contentType
+      : undefined;
   return {
     data: Buffer.concat(chunks, bytes),
     ...(filename === undefined ? {} : { filename }),
+    ...(mime === undefined ? {} : { mime }),
   };
 }

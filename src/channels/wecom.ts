@@ -607,6 +607,9 @@ export class WeComWorker {
           ...(downloaded.filename === undefined
             ? {}
             : { displayName: downloaded.filename }),
+          ...(downloaded.mime === undefined
+            ? {}
+            : { advertisedMime: downloaded.mime }),
         },
       );
       artifacts.push(artifact);
