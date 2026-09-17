@@ -199,7 +199,7 @@ export class WeComClient {
     this.onDead(error);
   }
 
-  #request(cmd: string, body: unknown): Promise<Frame> {
+  #request(cmd: string, body?: unknown): Promise<Frame> {
     const socket = this.#socket;
     if (socket === undefined || this.#dead || this.#stopped)
       return Promise.reject(new WeComError("WeCom connection is unavailable"));
@@ -220,7 +220,13 @@ export class WeComClient {
         },
       });
       try {
-        socket.send(JSON.stringify({ headers: { req_id: reqId }, cmd, body }));
+        socket.send(
+          JSON.stringify({
+            headers: { req_id: reqId },
+            cmd,
+            ...(body === undefined ? {} : { body }),
+          }),
+        );
       } catch {
         this.#pending.delete(reqId);
         clearTimeout(timeout);
@@ -253,7 +259,7 @@ export class WeComClient {
       pending.resolve(incoming);
       return;
     }
-    if (incoming.cmd === "aibot_heartbeat") return;
+    if (incoming.cmd === "ping") return;
     this.onMessage(parsed);
   }
 
@@ -270,10 +276,9 @@ export class WeComClient {
 
   async #heartbeatOnce(): Promise<void> {
     try {
-      this.#ackSucceeded(
-        await this.#request("aibot_heartbeat", {}),
-        "WeCom heartbeat",
-      );
+      // The protocol heartbeat command is literally "ping" with no body
+      // (per the official SDK); the server never answers "aibot_heartbeat".
+      this.#ackSucceeded(await this.#request("ping"), "WeCom heartbeat");
     } catch {
       this.#die(new WeComError("WeCom heartbeat failed"));
     }

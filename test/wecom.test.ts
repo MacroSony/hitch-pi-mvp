@@ -335,9 +335,11 @@ test("WeCom worker subscribes, heartbeats, and keeps one connection", async () =
     secret: "secret-test",
   });
   await wait(150);
+  const heartbeats = socket.sentCmd("ping");
+  assert.ok(heartbeats.length >= 2, "heartbeat frames repeat");
   assert.ok(
-    socket.sentCmd("aibot_heartbeat").length >= 2,
-    "heartbeat frames repeat",
+    heartbeats.every((frame) => !("body" in frame)),
+    "heartbeat frames carry no body",
   );
   assert.equal(environment.sockets.length, 1);
   controller.abort();
@@ -828,7 +830,7 @@ test("WeCom ignores malformed frames and server-initiated heartbeats", async () 
   const { controller, done } = await startWorker(environment);
   const socket = environment.sockets[0]!;
   socket.pushRaw("this is not json{");
-  socket.push({ cmd: "aibot_heartbeat", headers: { req_id: "ping_1" } });
+  socket.push({ cmd: "ping", headers: { req_id: "ping_1" } });
   socket.push({ headers: {} });
   await wait(100);
   assert.equal(environment.sockets.length, 1);
