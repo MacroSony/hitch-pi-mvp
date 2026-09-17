@@ -24,6 +24,29 @@ import { basename, dirname, join, relative } from "node:path";
 import { AppError } from "../app/errors.js";
 import type { RuntimeArtifact } from "../runtime/runtime.js";
 
+const INBOX_SUFFIX_BY_MIME: Readonly<Record<string, string>> = {
+  "text/plain": ".txt",
+  "text/markdown": ".md",
+  "text/csv": ".csv",
+  "application/json": ".json",
+  "application/pdf": ".pdf",
+  "application/zip": ".zip",
+  "image/jpeg": ".jpg",
+  "image/png": ".png",
+  "image/gif": ".gif",
+  "image/webp": ".webp",
+};
+
+// The inbox name stays generated (ordinal + artifact id); only the suffix is
+// hinted by the sniffed MIME type or the sanitized display-name extension so
+// the model can tell a text file from an opaque blob.
+function inboxSuffix(artifact: RuntimeArtifact): string {
+  const byMime = INBOX_SUFFIX_BY_MIME[artifact.mimeType];
+  if (byMime !== undefined) return byMime;
+  const extension = /\.([A-Za-z0-9]{1,8})$/.exec(artifact.displayName);
+  return extension === null ? ".bin" : `.${extension[1]!.toLowerCase()}`;
+}
+
 export const MAX_INPUT_ARTIFACTS = 8;
 export const MAX_INPUT_ARTIFACT_BYTES = 20 * 1024 * 1024;
 export const MAX_INPUT_TOTAL_BYTES = 40 * 1024 * 1024;
@@ -710,7 +733,7 @@ export class MediaStore {
       ordinal >= MAX_INPUT_ARTIFACTS
     )
       throw new Error("inbox artifact is invalid");
-    const name = `${ordinal + 1}-${artifact.id.slice(-12)}.bin`;
+    const name = `${ordinal + 1}-${artifact.id.slice(-12)}${inboxSuffix(artifact)}`;
     const targetPath = join(inbox, name);
     const source = openSync(
       this.objectPath(artifact),

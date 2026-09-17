@@ -422,3 +422,28 @@ test("configured free-space threshold stops prompt and !send admission", () => {
   assert.equal(store.count("turns"), 0);
   environment.foundation.close();
 });
+
+test("inbox names keep generated ids and hint the file type", async () => {
+  const environment = setup();
+  const inbox = join(environment.dataRoot, "inbox-test");
+  privateDirectory(inbox);
+  const text = await environment.media.ingest("alice", textBytes("notes"), {
+    advertisedBytes: 5,
+    displayName: "notes.txt",
+  });
+  const pdf = await environment.media.ingest("alice", textBytes("pdf-bytes"), {
+    advertisedBytes: 9,
+    advertisedMime: "application/pdf",
+  });
+  const opaque = await environment.media.ingest("alice", textBytes("blob"), {
+    advertisedBytes: 4,
+  });
+  const textName = environment.media.materializeInbox(text, inbox, 0);
+  const pdfName = environment.media.materializeInbox(pdf, inbox, 1);
+  const opaqueName = environment.media.materializeInbox(opaque, inbox, 2);
+  assert.match(textName, /1-[0-9a-f-]{12}\.txt$/);
+  assert.match(pdfName, /2-[0-9a-f-]{12}\.pdf$/);
+  assert.match(opaqueName, /3-[0-9a-f-]{12}\.bin$/);
+  assert.equal(readdirSync(inbox).length, 3);
+  environment.foundation.close();
+});

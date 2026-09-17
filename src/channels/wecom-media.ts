@@ -60,7 +60,43 @@ export function uploadChunkTotal(bytes: number): number {
   return total;
 }
 
-export async function downloadWeComMedia(url: string): Promise<Buffer> {
+export interface WeComDownload {
+  readonly data: Buffer;
+  readonly filename?: string;
+}
+
+// The smart-bot callback carries only url+aeskey; the original filename, when
+// present at all, arrives via the download response's Content-Disposition.
+export function parseWeComDispositionFilename(
+  header: string | null,
+): string | undefined {
+  if (header === null) return undefined;
+  let name: string | undefined;
+  const extended = /filename\*\s*=\s*(?:UTF-8|utf-8)''([^;]+)/.exec(header);
+  if (extended !== null) {
+    try {
+      name = decodeURIComponent(extended[1]!.trim());
+    } catch {
+      return undefined;
+    }
+  } else {
+    const plain = /filename\s*=\s*"([^"]*)"|filename\s*=\s*([^;]+)/.exec(
+      header,
+    );
+    name = plain?.[1] ?? plain?.[2]?.trim();
+  }
+  if (name === undefined) return undefined;
+  const normalized = name.normalize("NFC");
+  if (
+    normalized.length === 0 ||
+    /[\u0000-\u001f\u007f/\\]/.test(normalized) ||
+    Buffer.byteLength(normalized, "utf8") > 128
+  )
+    return undefined;
+  return normalized;
+}
+
+export async function downloadWeComMedia(url: string): Promise<WeComDownload> {
   const response = await fetch(url, { redirect: "follow" });
   if (!response.ok)
     throw new AppError("media-invalid", "WeCom media download was rejected");
@@ -81,5 +117,11 @@ export async function downloadWeComMedia(url: string): Promise<Buffer> {
       throw new AppError("media-invalid", "WeCom media object is too large");
     chunks.push(chunk);
   }
-  return Buffer.concat(chunks, bytes);
+  const filename = parseWeComDispositionFilename(
+    response.headers.get("content-disposition"),
+  );
+  return {
+    data: Buffer.concat(chunks, bytes),
+    ...(filename === undefined ? {} : { filename }),
+  };
 }

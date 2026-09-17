@@ -19,6 +19,7 @@ import {
   WeComWorker,
   readWeComCredentials,
 } from "../src/channels/wecom.js";
+import { parseWeComDispositionFilename } from "../src/channels/wecom-media.js";
 import { parseConfig } from "../src/config/config.js";
 import { bootstrapFoundation } from "../src/foundation/bootstrap.js";
 import { MediaStore } from "../src/media/media-store.js";
@@ -227,6 +228,7 @@ function setup(
   const sockets: FakeWeComSocket[] = [];
   const downloads: string[] = [];
   let downloadData: Buffer = encryptMedia(PNG_BYTES);
+  let downloadFilename: string | undefined;
   let nextSubscribeErrcode: number | undefined;
   const worker = new WeComWorker(
     "enterprise",
@@ -246,7 +248,12 @@ function setup(
       },
       downloadFn: async (url) => {
         downloads.push(url);
-        return downloadData;
+        return {
+          data: downloadData,
+          ...(downloadFilename === undefined
+            ? {}
+            : { filename: downloadFilename }),
+        };
       },
       heartbeatMs: 40,
       ackTimeoutMs: 200,
@@ -270,6 +277,9 @@ function setup(
     calls,
     setDownloadData(data: Buffer): void {
       downloadData = data;
+    },
+    setDownloadFilename(filename: string): void {
+      downloadFilename = filename;
     },
     failNextSubscribe(errcode: number): void {
       nextSubscribeErrcode = errcode;
@@ -441,6 +451,7 @@ test("WeCom downloads, decrypts, and admits image/file/video media", async () =>
   assert.equal(imageArtifacts[0]!.mimeType, "image/png");
 
   environment.setDownloadData(encryptMedia(Buffer.from("plain file bytes")));
+  environment.setDownloadFilename("story.txt");
   socket.push(
     callback("m-11", "", {
       msgtype: "file",
@@ -449,6 +460,10 @@ test("WeCom downloads, decrypts, and admits image/file/video media", async () =>
   );
   await waitFor(() => environment.calls.length === 2, "file turn");
   assert.equal((environment.calls[1]!.artifacts ?? [])[0]!.mediaKind, "file");
+  assert.equal(
+    (environment.calls[1]!.artifacts ?? [])[0]!.displayName,
+    "story.txt",
+  );
 
   socket.push(
     callback("m-12", "", {
@@ -838,6 +853,33 @@ test("WeCom ignores malformed frames and server-initiated heartbeats", async () 
   controller.abort();
   await done;
   environment.foundation.close();
+});
+
+test("WeCom parses Content-Disposition filenames safely", () => {
+  assert.equal(
+    parseWeComDispositionFilename('attachment; filename="report.txt"'),
+    "report.txt",
+  );
+  assert.equal(
+    parseWeComDispositionFilename(
+      "attachment; filename*=UTF-8''%E6%8A%A5%E8%A1%A8.txt",
+    ),
+    "报表.txt",
+  );
+  assert.equal(parseWeComDispositionFilename(null), undefined);
+  assert.equal(parseWeComDispositionFilename("attachment"), undefined);
+  assert.equal(
+    parseWeComDispositionFilename('attachment; filename="../evil.txt"'),
+    undefined,
+  );
+  assert.equal(
+    parseWeComDispositionFilename("attachment; filename*=UTF-8''%zz"),
+    undefined,
+  );
+  assert.equal(
+    parseWeComDispositionFilename(`attachment; filename="${"a".repeat(200)}"`),
+    undefined,
+  );
 });
 
 test("WeCom credentials require a strict private JSON file", () => {

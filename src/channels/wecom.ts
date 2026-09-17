@@ -17,6 +17,7 @@ import {
   downloadWeComMedia,
   md5Hex,
   uploadChunkTotal,
+  type WeComDownload,
 } from "./wecom-media.js";
 
 const WECOM_URL = "wss://openws.work.weixin.qq.com";
@@ -445,7 +446,7 @@ export class WeComClient {
 
 export interface WeComWorkerOptions {
   readonly socketFactory?: WeComClientOptions["socketFactory"];
-  readonly downloadFn?: (url: string) => Promise<Buffer>;
+  readonly downloadFn?: (url: string) => Promise<WeComDownload>;
   readonly heartbeatMs?: number;
   readonly ackTimeoutMs?: number;
   readonly deliverPollMs?: number;
@@ -457,7 +458,7 @@ export interface WeComWorkerOptions {
 
 export class WeComWorker {
   readonly #credentials: WeComCredentials;
-  readonly #download: (url: string) => Promise<Buffer>;
+  readonly #download: (url: string) => Promise<WeComDownload>;
   readonly #options: Required<
     Omit<WeComWorkerOptions, "socketFactory" | "downloadFn">
   > &
@@ -593,8 +594,8 @@ export class WeComWorker {
     if (endpoint === null) return;
     const artifacts = [];
     try {
-      const encrypted = await this.#download(media_.url);
-      const plaintext = decryptWeComMedia(encrypted, media_.aeskey);
+      const downloaded = await this.#download(media_.url);
+      const plaintext = decryptWeComMedia(downloaded.data, media_.aeskey);
       const artifact = await this.media.ingest(
         endpoint.userId,
         (async function* (): AsyncGenerator<Uint8Array> {
@@ -603,6 +604,9 @@ export class WeComWorker {
         {
           advertisedBytes: plaintext.length,
           expectImage: media_.kind === "image",
+          ...(downloaded.filename === undefined
+            ? {}
+            : { displayName: downloaded.filename }),
         },
       );
       artifacts.push(artifact);
