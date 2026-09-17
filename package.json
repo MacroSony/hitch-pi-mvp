@@ -21,6 +21,7 @@
   },
   "devDependencies": {
     "@types/node": "24.10.1",
+    "@types/ws": "8.18.1",
     "prettier": "3.6.2",
     "typescript": "5.9.3"
   },
@@ -31,6 +32,7 @@
     "pi-agy": "file:vendor/pi-agy-0.6.1-hitch.2.tgz",
     "proper-lockfile": "4.1.2",
     "undici": "8.9.0",
-    "wechat-ilink-client": "0.1.0"
+    "wechat-ilink-client": "0.1.0",
+    "ws": "8.21.3"
   }
 }
