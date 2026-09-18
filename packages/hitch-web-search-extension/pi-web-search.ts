@@ -120,7 +120,6 @@ export default function (pi: ExtensionAPI): void {
     parameters: querySchema,
     async execute(_id, input, signal) {
       try {
-        attest(pi);
         if (!activeSubsetSet.has("web_search")) {
           throw new Error("web_search is disabled");
         }
