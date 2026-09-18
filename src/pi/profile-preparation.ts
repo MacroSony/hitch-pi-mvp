@@ -18,7 +18,7 @@ import { randomBytes } from "node:crypto";
 import { dirname, join } from "node:path";
 
 const MAX_PROFILE_JSON_BYTES = 1024 * 1024;
-const MANAGED_FILES = ["settings.json", "models.json"] as const;
+const MANAGED_FILES = ["settings.json", "models.json", "mcp.json"] as const;
 const CACHE_FILES = ["models-store.json"] as const;
 
 function ownerUid(): bigint | undefined {

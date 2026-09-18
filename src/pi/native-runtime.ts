@@ -1082,6 +1082,7 @@ export class NativePiRuntime implements AgentRuntime {
   readonly #webSearchKey: string | undefined;
   readonly #webSearchUsers: ReadonlySet<string>;
   readonly #antigravity: boolean;
+  readonly #sharedProfileDir: string;
   #poisoned = false;
 
   private constructor(
@@ -1112,6 +1113,7 @@ export class NativePiRuntime implements AgentRuntime {
     this.#webSearchKey = options.webSearch?.apiKey;
     this.#webSearchUsers = new Set(options.webSearch?.enabledUsers ?? []);
     this.#antigravity = options.antigravity === true;
+    this.#sharedProfileDir = options.piProfileDir;
   }
 
   public static async create(
@@ -1251,16 +1253,19 @@ export class NativePiRuntime implements AgentRuntime {
     const webSearchExtension = join(this.#assets, "pi-web-search.ts");
     const antigravityExtension = join(this.#assets, "pi-antigravity.ts");
     // Opt-in MCP support: the vendored pi-mcp-adapter and its mcp.json config
-    // live in the (release-independent) profile directory. Both must exist.
+    // live in the (release-independent) shared profile directory; the per-user
+    // profile clone receives mcp.json through the managed sync boundary. The
+    // extension itself loads by absolute path from the shared profile.
     const mcpExtension = join(
-      profileDir,
+      this.#sharedProfileDir,
       "mcp",
       "node_modules",
       "pi-mcp-adapter",
       "index.ts",
     );
     const mcpEnabled =
-      existsSync(mcpExtension) && existsSync(join(profileDir, "mcp.json"));
+      existsSync(mcpExtension) &&
+      existsSync(join(this.#sharedProfileDir, "mcp.json"));
     const worker = join(this.#assets, "sandbox-worker.mjs");
     const helper = join(this.#assets, "secure-bwrap-helper");
     const baseline = [

@@ -210,7 +210,7 @@ function setup(
   const store = new HitchStore(
     foundation.database,
     undefined,
-    { now: () => clockNow },
+    { now: () => (clockNow += 1) },
     (userId) => media.assertAdmissionCapacity(userId),
   );
   const calls: RuntimeTurn[] = [];

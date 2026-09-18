@@ -269,6 +269,32 @@ test("preparePiProfiles removes stale managed files when deleted from source", (
   }
 });
 
+test("preparePiProfiles stages mcp.json when present and removes it when deleted", () => {
+  const { root, source } = setupSourceProfile({
+    settings: { active: true },
+  });
+  const profileRoot = join(root, "pi-profiles");
+  try {
+    const mcpConfig = { mcpServers: { astock: { command: "/x/python" } } };
+    writeFileSync(join(source, "mcp.json"), `${JSON.stringify(mcpConfig)}\n`, {
+      mode: 0o600,
+    });
+    chmodSync(join(source, "mcp.json"), 0o600);
+    preparePiProfiles(source, profileRoot, ["user-a"]);
+    const userADir = join(profileRoot, "user-a");
+    const staged = join(userADir, "mcp.json");
+    assert.equal(existsSync(staged), true);
+    assert.deepEqual(JSON.parse(readFileSync(staged, "utf8")), mcpConfig);
+    assert.equal(statSync(staged).mode & 0o777, 0o600);
+
+    rmSync(join(source, "mcp.json"));
+    preparePiProfiles(source, profileRoot, ["user-a"]);
+    assert.equal(existsSync(staged), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("preparePiProfile directly prepares a target profile directory", () => {
   const { root, source } = setupSourceProfile({
     settings: { direct: true },
