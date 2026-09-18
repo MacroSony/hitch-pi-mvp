@@ -568,3 +568,34 @@ test("waitForAttestation strictly verifies antigravity attestation and fails clo
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("controllerArguments accepts 5th optional MCP extension after the provider extension", () => {
+  const sandboxExt = "/dist/sandbox/hitch-sandbox.ts";
+  const mcpExt = "/profile/mcp/node_modules/pi-mcp-adapter/index.ts";
+  const args = controllerArguments(
+    sandboxExt,
+    undefined,
+    { kind: "none" },
+    undefined,
+    mcpExt,
+  );
+  assert.deepEqual(args, [
+    "--mode",
+    "rpc",
+    "--offline",
+    "--no-extensions",
+    "--extension",
+    sandboxExt,
+    "--extension",
+    mcpExt,
+    "--no-builtin-tools",
+    "--exclude-tools",
+    "powershell",
+    "--no-skills",
+    "--no-prompt-templates",
+    "--no-themes",
+    "--no-context-files",
+    "--no-approve",
+    "--no-session",
+  ]);
+});

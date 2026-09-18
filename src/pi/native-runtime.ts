@@ -68,7 +68,7 @@ const PI_DEPENDENCY_CLOSURE_SHA256 =
   "bf6e1e05ddd83e48e8453b703f175ea1c9af187e4b930b28465d6eee6e36a1ba";
 const SANDBOX_ASSET_SHA256 = {
   "hitch-sandbox.ts":
-    "dca37b3c08e9ad953bcd25195ff8afa73eb25a632f2b1ca8ff87b951c9292073",
+    "0e9514f1d37042b0195f69a7751cc9ecf79eabaa5d056c1f926efe0c1d4fd76b",
   "pi-web-search.ts":
     "0a503a373523eb1737417865f9e213c8db838b0a0eb5e87b197535cfccef43c7",
   "pi-antigravity.ts":
@@ -834,6 +834,7 @@ export function controllerArguments(
         readonly directory: string;
       },
   providerExtension?: string,
+  mcpExtension?: string,
 ): readonly string[] {
   const arguments_ = [
     "--mode",
@@ -848,6 +849,7 @@ export function controllerArguments(
     ...(providerExtension === undefined
       ? []
       : ["--extension", providerExtension]),
+    ...(mcpExtension === undefined ? [] : ["--extension", mcpExtension]),
     "--no-builtin-tools",
     // 0.85.1 adds an inactive PowerShell builtin to the registry. Exclude it
     // entirely so exact eight-tool attestation and no-host-fallback stay intact.
@@ -1248,11 +1250,25 @@ export class NativePiRuntime implements AgentRuntime {
     const extension = join(this.#assets, "hitch-sandbox.ts");
     const webSearchExtension = join(this.#assets, "pi-web-search.ts");
     const antigravityExtension = join(this.#assets, "pi-antigravity.ts");
+    // Opt-in MCP support: the vendored pi-mcp-adapter and its mcp.json config
+    // live in the (release-independent) profile directory. Both must exist.
+    const mcpExtension = join(
+      profileDir,
+      "mcp",
+      "node_modules",
+      "pi-mcp-adapter",
+      "index.ts",
+    );
+    const mcpEnabled =
+      existsSync(mcpExtension) && existsSync(join(profileDir, "mcp.json"));
     const worker = join(this.#assets, "sandbox-worker.mjs");
     const helper = join(this.#assets, "secure-bwrap-helper");
-    const baseline = context.webSearchEnabled
-      ? [...EXPECTED_TOOLS, "web_search"].sort()
-      : [...EXPECTED_TOOLS].sort();
+    const baseline = [
+      ...(context.webSearchEnabled
+        ? [...EXPECTED_TOOLS, "web_search"]
+        : [...EXPECTED_TOOLS]),
+      ...(mcpEnabled ? ["mcp"] : []),
+    ].sort();
     const activeTools = context.activeTools ?? baseline;
     const environment: NodeJS.ProcessEnv = {
       PATH: "/usr/bin:/bin",
@@ -1309,6 +1325,13 @@ export class NativePiRuntime implements AgentRuntime {
               SANDBOX_ASSET_SHA256["pi-antigravity.ts"],
           }
         : {}),
+      ...(mcpEnabled
+        ? {
+            HITCH_MCP_ENABLED: "1",
+            HITCH_MCP_EXTENSION_PATH: mcpExtension,
+            HITCH_MCP_EXTENSION_SHA256: sha256File(mcpExtension),
+          }
+        : {}),
     };
     return new PiRpcProcess(
       this.#cli,
@@ -1317,6 +1340,7 @@ export class NativePiRuntime implements AgentRuntime {
         context.webSearchEnabled ? webSearchExtension : undefined,
         session,
         context.antigravityRequired ? antigravityExtension : undefined,
+        mcpEnabled ? mcpExtension : undefined,
       ),
       context.workspace,
       environment,

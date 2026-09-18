@@ -25,9 +25,22 @@ if (webSearchPath !== undefined && !webSearchPath.startsWith("/")) {
 if (webSearchDigest !== undefined && !/^[a-f0-9]{64}$/.test(webSearchDigest)) {
 	throw new Error("Hitch web-search extension digest is invalid");
 }
-const expectedTools = webSearchEnabled
-	? [...EXPECTED_TOOLS, "web_search"]
-	: [...EXPECTED_TOOLS];
+const mcpEnabled = process.env.HITCH_MCP_ENABLED === "1";
+const mcpPath = process.env.HITCH_MCP_EXTENSION_PATH;
+const mcpDigest = process.env.HITCH_MCP_EXTENSION_SHA256;
+if (mcpEnabled !== (mcpPath !== undefined && mcpDigest !== undefined)) {
+	throw new Error("Hitch MCP configuration is incomplete");
+}
+if (mcpPath !== undefined && !mcpPath.startsWith("/")) {
+	throw new Error("Hitch MCP extension path is invalid");
+}
+if (mcpDigest !== undefined && !/^[a-f0-9]{64}$/.test(mcpDigest)) {
+	throw new Error("Hitch MCP extension digest is invalid");
+}
+const expectedTools = [
+	...(webSearchEnabled ? [...EXPECTED_TOOLS, "web_search"] : [...EXPECTED_TOOLS]),
+	...(mcpEnabled ? ["mcp"] : []),
+];
 const selfPath = fileURLToPath(import.meta.url);
 const requiredEnvironment = [
 	"HITCH_P0_WORKSPACE",
@@ -140,6 +153,8 @@ if (
 	sha256(selfPath) !== process.env.HITCH_P0_EXTENSION_SHA256 ||
 	sha256(backendPath) !== process.env.HITCH_P0_BACKEND_SHA256
 ) throw new Error("Hitch sandbox extension digest mismatch");
+if (mcpEnabled && sha256(mcpPath!) !== mcpDigest)
+	throw new Error("Hitch MCP extension digest mismatch");
 
 const backendConfiguration = Object.freeze({
 	workspace: process.env.HITCH_P0_WORKSPACE!,
@@ -243,7 +258,9 @@ export default function (pi: ExtensionAPI): void {
 			JSON.stringify(active) !== JSON.stringify(expectedActive) ||
 			all.some((tool) => tool.name === "web_search"
 				? tool.path !== webSearchPath
-				: tool.path !== selfPath)
+				: tool.name === "mcp"
+					? tool.path !== mcpPath
+					: tool.path !== selfPath)
 		) throw new Error("Hitch sandbox tool attestation failed");
 		return {
 			schemaDigest: stableDigest(all.map(({ name, parameters }) => ({ name, parameters }))),
