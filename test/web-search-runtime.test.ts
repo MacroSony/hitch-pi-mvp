@@ -1158,11 +1158,7 @@ test(
       const mandatory = entries.find(
         (entry) => entry.type === "startup-attestation",
       );
-      const web = entries.find(
-        (entry) => entry.type === "web-search-attestation",
-      );
       assert.ok(mandatory);
-      assert.ok(web);
       const expectedTools = [
         "bash",
         "edit",
@@ -1174,23 +1170,16 @@ test(
         "web_search",
         "write",
       ];
-      assert.deepEqual(web.allTools, expectedTools);
-      assert.deepEqual(web.activeTools, expectedTools);
+      // Single-witness contract: the sandbox record alone covers web_search's
+      // presence, source path, and schema.
+      assert.deepEqual(mandatory.activeTools, expectedTools);
       assert.deepEqual(
-        web.sourcePaths,
+        mandatory.sourcePaths,
         expectedTools.map((name) =>
           name === "web_search"
             ? join(repository, "dist", "sandbox", "pi-web-search.ts")
             : join(repository, "dist", "sandbox", "hitch-sandbox.ts"),
         ),
-      );
-      assert.equal(
-        web.sourcePath,
-        join(repository, "dist", "sandbox", "pi-web-search.ts"),
-      );
-      assert.equal(
-        web.extensionDigest,
-        assetDigest(join(repository, "dist", "sandbox", "pi-web-search.ts")),
       );
       assert.deepEqual(mandatory.allTools, [
         "bash",

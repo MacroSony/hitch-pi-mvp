@@ -113,6 +113,7 @@ export function logPiRuntimeFailure(input: PiRuntimeFailure): string {
     code: RuntimeErrorCode;
     turnId?: string;
     httpStatus?: number;
+    detail?: string;
   } = {
     event: "pi-runtime-failure",
     phase,
@@ -122,6 +123,21 @@ export function logPiRuntimeFailure(input: PiRuntimeFailure): string {
     failure.turnId = input.turnId;
   if (classified.httpStatus !== undefined)
     failure.httpStatus = classified.httpStatus;
+  // Bounded detail for the operator: single-machine journald is already
+  // operator-only, and debugging world/attestation failures from bare codes
+  // repeatedly cost hours. Keep the classified code as the contract; cap the
+  // excerpt so logs stay bounded.
+  if (input.error !== undefined) {
+    const raw =
+      input.error instanceof Error ? input.error.message : String(input.error);
+    const detail = raw
+      .replace(/Bearer\s+\S+/gi, "Bearer <redacted>")
+      .replace(/(api[-_]?key|access[-_]?token)=\S+/gi, "$1=<redacted>")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 1_024);
+    if (detail !== "") failure.detail = detail;
+  }
   const line = JSON.stringify(failure);
   console.error(line);
   return line;

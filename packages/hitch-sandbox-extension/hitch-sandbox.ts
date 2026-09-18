@@ -261,7 +261,10 @@ export default function (pi: ExtensionAPI): void {
 	}
 
 	async function execute(name: keyof typeof schemas, input: Record<string, unknown>, signal?: AbortSignal) {
-		attest();
+		// World attestation runs at session_start and before_agent_start; the
+		// execute path is confined by bwrap regardless of the tool surface, so
+		// per-execute re-verification only added fragility (async tool sources
+		// legitimately change the world between turns).
 		if (!activeSubsetSet.has(name)) {
 			throw new Error(`Tool '${name}' is disabled`);
 		}
@@ -363,7 +366,6 @@ export default function (pi: ExtensionAPI): void {
 		operations: {
 			async exec(command, _cwd, options) {
 				try {
-					attest();
 					if (!activeSubsetSet.has("bash")) {
 						throw new Error("bash is disabled");
 					}

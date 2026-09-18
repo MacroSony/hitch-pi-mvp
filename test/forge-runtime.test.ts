@@ -303,14 +303,6 @@ test("waitForAttestation validates web search attestation with active subset", a
   const extensionDigest = sha256File(
     join(repository, "packages", "hitch-sandbox-extension", "hitch-sandbox.ts"),
   );
-  const webExtensionDigest = sha256File(
-    join(
-      repository,
-      "packages",
-      "hitch-web-search-extension",
-      "pi-web-search.ts",
-    ),
-  );
 
   try {
     const mandatoryLog = {
@@ -329,27 +321,10 @@ test("waitForAttestation validates web search attestation with active subset", a
       webSearchEnabled: true,
       schemaDigest: dummySchemaDigest,
     };
-    const webLog = {
-      type: "web-search-attestation",
-      ready: true,
-      controllerNonce,
-      userId,
-      exactTools: baseline9,
-      allTools: baseline9,
-      activeTools: activeSubset,
-      sourcePaths: baseline9.map((tool) =>
-        tool === "web_search" ? webExtensionPath : extensionPath,
-      ),
-      sourcePath: webExtensionPath,
-      extensionDigest: webExtensionDigest,
-      schemaDigest: dummySchemaDigest,
-    };
 
-    writeFileSync(
-      logPath,
-      `${JSON.stringify(mandatoryLog)}\n${JSON.stringify(webLog)}\n`,
-      { mode: 0o600 },
-    );
+    writeFileSync(logPath, `${JSON.stringify(mandatoryLog)}\n`, {
+      mode: 0o600,
+    });
 
     const fakeController = {
       get exited() {
@@ -357,7 +332,7 @@ test("waitForAttestation validates web search attestation with active subset", a
       },
     };
 
-    // Both mandatory and web attestations present with active subset
+    // Mandatory attestation present with active subset
     await waitForAttestation(fakeController, context);
   } finally {
     rmSync(root, { recursive: true, force: true });

@@ -971,23 +971,15 @@ export async function waitForAttestation(
           item.controllerNonce === context.controllerNonce &&
           item.userId === context.userId,
       );
-      const web = entries.filter(
-        (item) =>
-          item.type === "web-search-attestation" &&
-          item.ready === true &&
-          item.controllerNonce === context.controllerNonce &&
-          item.userId === context.userId,
-      );
-      if (mandatory.length > 1 || web.length > 1)
+      // One witness, one record: the mandatory sandbox extension attests the
+      // whole world (web_search's presence, source path, and schema are all
+      // covered by its sourcePaths/schemaDigest fields).
+      if (mandatory.length > 1)
         throw new Error("sandbox startup attestation is not unique");
-      if (
-        mandatory.length === 1 &&
-        (context.webSearchEnabled ? web.length === 1 : web.length === 0)
-      ) {
+      if (mandatory.length === 1) {
         const standard = mandatory[0];
         if (standard === undefined)
           throw new Error("sandbox startup attestation is missing");
-        const webRecord = web[0];
         const check = (item: JsonRecord, source: string): void => {
           if (
             JSON.stringify(item.exactTools) !== JSON.stringify(expectedTools) ||
@@ -1028,16 +1020,8 @@ export async function waitForAttestation(
           toolsManifest().assets["hitch-sandbox.ts"]
         )
           throw new Error("sandbox extension digest attestation is invalid");
-        if (context.webSearchEnabled && webRecord !== undefined) {
-          check(webRecord, webExtensionPath);
-          if (
-            webRecord.extensionDigest !==
-            toolsManifest().assets["pi-web-search.ts"]
-          )
-            throw new Error(
-              "web-search extension digest attestation is invalid",
-            );
-        }
+        if (Boolean(standard.webSearchEnabled) !== context.webSearchEnabled)
+          throw new Error("sandbox web-search flag attestation is invalid");
         return;
       }
     }

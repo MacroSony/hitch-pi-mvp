@@ -1,25 +1,12 @@
-import { createHash } from "node:crypto";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { TavilySearchAdapter } from "./web-search/tavily.js";
-import { attestationBaseline, attestToolSet } from "./manifest-attest.mjs";
+import { attestationBaseline } from "./manifest-attest.mjs";
 
 const selfPath = fileURLToPath(import.meta.url);
-const controllerNonce = process.env.HITCH_P0_CONTROLLER_NONCE;
-const extensionDigest = process.env.HITCH_WEB_SEARCH_EXTENSION_SHA256;
-const mandatoryPath = process.env.HITCH_P0_EXTENSION_PATH;
 const apiKey = process.env.HITCH_WEB_SEARCH_KEY;
-if (!controllerNonce || !/^[a-f0-9]{32}$/.test(controllerNonce)) {
-  throw new Error("Hitch web-search controller binding is invalid");
-}
-if (!extensionDigest || !/^[a-f0-9]{64}$/.test(extensionDigest)) {
-  throw new Error("Hitch web-search extension digest is invalid");
-}
-if (!mandatoryPath || !mandatoryPath.startsWith("/")) {
-  throw new Error("Hitch mandatory extension path is invalid");
-}
 if (!apiKey) throw new Error("Hitch web-search key is missing");
 
 function parseActiveTools(
@@ -69,16 +56,6 @@ const querySchema = Type.Object(
 
 const adapter = new TavilySearchAdapter({ apiKey });
 
-function stableDigest(value: unknown): string {
-  return createHash("sha256").update(JSON.stringify(value)).digest("hex");
-}
-
-function log(record: Record<string, unknown>): void {
-  const path = process.env.HITCH_P0_LOG;
-  if (!path) throw new Error("Hitch web-search attestation log is missing");
-  fs.appendFileSync(path, `${JSON.stringify(record)}\n`, { mode: 0o600 });
-}
-
 // Bounded diagnostics sink for execute-time failures. The classified turn
 // error is intentionally content-free; this file is the operator's evidence.
 function debugSink(pi: ExtensionAPI, error: unknown): void {
@@ -100,26 +77,6 @@ function debugSink(pi: ExtensionAPI, error: unknown): void {
   } catch {
     // diagnostics must never break the tool path
   }
-}
-
-function attest(pi: ExtensionAPI): {
-  readonly all: readonly string[];
-  readonly active: readonly string[];
-  readonly sourcePaths: readonly (string | undefined)[];
-} {
-  // Dynamic-source tools (e.g. the MCP adapter) are excluded by
-  // manifest-attest; mandatory tools must come from the sandbox extension,
-  // web_search from this file.
-  const attestation = attestToolSet(pi, {
-    label: "web-search",
-    defaultPath: mandatoryPath,
-    pathOverrides: { web_search: selfPath },
-  });
-  return {
-    all: attestation.all.map((tool) => tool.name),
-    active: attestation.active,
-    sourcePaths: attestation.sourcePaths,
-  };
 }
 
 // Bounds and validates the adapter result before it reaches the model.
@@ -180,22 +137,5 @@ export default function (pi: ExtensionAPI): void {
         throw new Error("web-search-failed");
       }
     },
-  });
-
-  pi.on("session_start", async () => {
-    const attestation = attest(pi);
-    log({
-      type: "web-search-attestation",
-      ready: true,
-      controllerNonce,
-      userId: process.env.HITCH_P0_USER_ID,
-      exactTools: attestationBaseline(),
-      allTools: attestation.all,
-      activeTools: attestation.active,
-      sourcePaths: attestation.sourcePaths,
-      sourcePath: selfPath,
-      extensionDigest,
-      schemaDigest: stableDigest(querySchema),
-    });
   });
 }

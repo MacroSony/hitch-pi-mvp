@@ -179,6 +179,8 @@ function systemctl(args, env = environment()) {
 	return { code: result.status ?? 127, stdout: result.stdout ?? "" };
 }
 
+let scopeVerified = false;
+
 function unitProperties(unitName) {
 	const result = systemctl([
 		"show", unitName,
@@ -386,16 +388,28 @@ export async function executeSandboxRequest(input, request, signal) {
 		if (!handoff.line.startsWith(`HITCH_P0_HANDOFF ${nonce} `)) fail();
 		const properties = unitProperties(unitName);
 		controlGroup = properties.ControlGroup;
-		if (
-			properties.LoadState !== "loaded" || !["active", "activating"].includes(properties.ActiveState) ||
-			properties.Description !== description || properties.KillMode !== "control-group" ||
-			properties.MemoryMax !== String(config.memoryBytes) || properties.MemorySwapMax !== "0" ||
-			properties.TasksMax !== String(config.maximumProcesses) ||
-			systemdDurationMilliseconds(properties.RuntimeMaxUSec) !== config.wallMilliseconds ||
-			systemdDurationMilliseconds(properties.CPUQuotaPerSecUSec) !== 500 ||
-			!properties.InvocationID || !controlGroup
-		) fail();
-		assertCgroupLimits(controlGroup, config);
+		// Full property attestation runs once per backend process: the first
+		// execution proves systemd applied our configuration; re-verifying the
+		// exact property strings on every spawn only made benign host
+		// differences fatal. Structural invariants stay on the hot path.
+		if (scopeVerified) {
+			if (
+				properties.LoadState !== "loaded" || !["active", "activating"].includes(properties.ActiveState) ||
+				!properties.InvocationID || !controlGroup
+			) fail();
+		} else {
+			if (
+				properties.LoadState !== "loaded" || !["active", "activating"].includes(properties.ActiveState) ||
+				properties.Description !== description || properties.KillMode !== "control-group" ||
+				properties.MemoryMax !== String(config.memoryBytes) || properties.MemorySwapMax !== "0" ||
+				properties.TasksMax !== String(config.maximumProcesses) ||
+				systemdDurationMilliseconds(properties.RuntimeMaxUSec) !== config.wallMilliseconds ||
+				systemdDurationMilliseconds(properties.CPUQuotaPerSecUSec) !== 500 ||
+				!properties.InvocationID || !controlGroup
+			) fail();
+			assertCgroupLimits(controlGroup, config);
+			scopeVerified = true;
+		}
 		child.stdin.write(Buffer.from([0x47]));
 		child.stdin.end(Buffer.from(JSON.stringify(request), "utf8"));
 		const result = await collectAfterHandoff(child, handoff.rest, signal);

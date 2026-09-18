@@ -20,23 +20,38 @@ function logged(input: Parameters<typeof logPiRuntimeFailure>[0]): string {
   }
 }
 
-test("runtime diagnostics never echo secrets or newline-controlled input", () => {
+test("runtime diagnostics carry bounded detail but redact bearer tokens", () => {
   const secret = "Bearer top-secret\nforged-log";
   const line = logged({
     phase: "prompt",
     turnId: "turn-1\nforged",
     error: new Error(`HTTP 401 Authorization: ${secret} /private/path`),
   });
-  assert.equal(line.includes(secret), false);
-  assert.equal(line.includes("forged"), false);
-  assert.equal(line.includes("/private/path"), false);
+  // turnId still refuses newline-controlled input (dropped by TURN_ID).
+  assert.equal(line.includes("turn-1"), false);
+  // No raw newlines in the emitted line.
   assert.equal(line.includes("\n"), false);
-  assert.deepEqual(JSON.parse(line), {
-    event: "pi-runtime-failure",
+  const parsed = JSON.parse(line) as Record<string, unknown>;
+  assert.equal(parsed.event, "pi-runtime-failure");
+  assert.equal(parsed.phase, "prompt");
+  assert.equal(parsed.code, "auth");
+  assert.equal(parsed.httpStatus, 401);
+  // Detail is present and content-bearing, but the bearer token is redacted
+  // and newlines are collapsed.
+  assert.equal(typeof parsed.detail, "string");
+  assert.equal((parsed.detail as string).includes("top-secret"), false);
+  assert.equal((parsed.detail as string).includes("Bearer <redacted>"), true);
+  assert.equal((parsed.detail as string).includes("/private/path"), true);
+  assert.equal((parsed.detail as string).includes("\n"), false);
+});
+
+test("runtime diagnostics bound detail length", () => {
+  const line = logged({
     phase: "prompt",
-    code: "auth",
-    httpStatus: 401,
+    error: new Error("x".repeat(8_192)),
   });
+  const parsed = JSON.parse(line) as Record<string, unknown>;
+  assert.equal((parsed.detail as string).length, 1_024);
 });
 
 test("runtime diagnostics do not emit unknown supplied codes", () => {
