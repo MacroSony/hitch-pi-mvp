@@ -37,10 +37,9 @@ if (mcpPath !== undefined && !mcpPath.startsWith("/")) {
 if (mcpDigest !== undefined && !/^[a-f0-9]{64}$/.test(mcpDigest)) {
 	throw new Error("Hitch MCP extension digest is invalid");
 }
-const expectedTools = [
-	...(webSearchEnabled ? [...EXPECTED_TOOLS, "web_search"] : [...EXPECTED_TOOLS]),
-	...(mcpEnabled ? ["mcp"] : []),
-];
+const expectedTools = webSearchEnabled
+	? [...EXPECTED_TOOLS, "web_search"]
+	: [...EXPECTED_TOOLS];
 const selfPath = fileURLToPath(import.meta.url);
 const requiredEnvironment = [
 	"HITCH_P0_WORKSPACE",
@@ -245,12 +244,26 @@ function resultText(result: Record<string, unknown>): string {
 
 export default function (pi: ExtensionAPI): void {
 	function attest(): { schemaDigest: string; allTools: readonly string[]; activeTools: readonly string[]; sourcePaths: readonly (string | undefined)[] } {
-		const all = pi.getAllTools().map((tool) => ({
-			name: tool.name,
-			path: tool.sourceInfo?.path,
-			parameters: tool.parameters,
-		})).sort((left, right) => left.name.localeCompare(right.name));
-		const active = pi.getActiveTools().slice().sort();
+		// Adapter-owned tools (pi-mcp-adapter) are excluded from attestation:
+		// they register asynchronously relative to this extension, and they never
+		// route through the sandboxed execute() path anyway.
+		const adapterNames = new Set(
+			pi.getAllTools()
+				.filter((tool) => mcpEnabled && tool.sourceInfo?.path === mcpPath)
+				.map((tool) => tool.name),
+		);
+		const all = pi.getAllTools()
+			.filter((tool) => !adapterNames.has(tool.name))
+			.map((tool) => ({
+				name: tool.name,
+				path: tool.sourceInfo?.path,
+				parameters: tool.parameters,
+			}))
+			.sort((left, right) => left.name.localeCompare(right.name));
+		const active = pi.getActiveTools()
+			.filter((name) => !adapterNames.has(name))
+			.slice()
+			.sort();
 		const expectedAll = expectedTools.slice().sort();
 		const expectedActive = activeSubset.slice().sort();
 		if (
@@ -258,9 +271,7 @@ export default function (pi: ExtensionAPI): void {
 			JSON.stringify(active) !== JSON.stringify(expectedActive) ||
 			all.some((tool) => tool.name === "web_search"
 				? tool.path !== webSearchPath
-				: tool.name === "mcp"
-					? tool.path !== mcpPath
-					: tool.path !== selfPath)
+				: tool.path !== selfPath)
 		) throw new Error("Hitch sandbox tool attestation failed");
 		return {
 			schemaDigest: stableDigest(all.map(({ name, parameters }) => ({ name, parameters }))),

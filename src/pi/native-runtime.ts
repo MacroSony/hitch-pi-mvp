@@ -68,7 +68,7 @@ const PI_DEPENDENCY_CLOSURE_SHA256 =
   "bf6e1e05ddd83e48e8453b703f175ea1c9af187e4b930b28465d6eee6e36a1ba";
 const SANDBOX_ASSET_SHA256 = {
   "hitch-sandbox.ts":
-    "0e9514f1d37042b0195f69a7751cc9ecf79eabaa5d056c1f926efe0c1d4fd76b",
+    "5b1313ea9ccb875a13490ba352881d49b3b9aa30926ee9e31db9e47e0227ea1b",
   "pi-web-search.ts":
     "0a503a373523eb1737417865f9e213c8db838b0a0eb5e87b197535cfccef43c7",
   "pi-antigravity.ts":
@@ -615,6 +615,10 @@ class PiRpcProcess {
     });
   }
 
+  public get stderrTail(): string {
+    return this.#stderrText.trim().slice(-1500);
+  }
+
   public get exited(): boolean {
     return this.#closedState !== null;
   }
@@ -902,7 +906,7 @@ export function controllerArguments(
 }
 
 export async function waitForAttestation(
-  controller: { readonly exited: boolean },
+  controller: { readonly exited: boolean; readonly stderrTail?: string },
   context: ControllerContext,
 ): Promise<void> {
   const expectedTools = context.webSearchEnabled
@@ -999,7 +1003,9 @@ export async function waitForAttestation(
       }
     }
     if (controller.exited || Date.now() >= deadline)
-      throw new Error("sandbox startup attestation did not arrive");
+      throw new Error(
+        `sandbox startup attestation did not arrive; controller stderr: ${controller.stderrTail ?? "(none)"}`,
+      );
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
   }
 }
@@ -1290,12 +1296,9 @@ export class NativePiRuntime implements AgentRuntime {
       existsSync(join(this.#sharedProfileDir, "mcp.json"));
     const worker = join(this.#assets, "sandbox-worker.mjs");
     const helper = join(this.#assets, "secure-bwrap-helper");
-    const baseline = [
-      ...(context.webSearchEnabled
-        ? [...EXPECTED_TOOLS, "web_search"]
-        : [...EXPECTED_TOOLS]),
-      ...(mcpEnabled ? ["mcp"] : []),
-    ].sort();
+    const baseline = context.webSearchEnabled
+      ? [...EXPECTED_TOOLS, "web_search"].sort()
+      : [...EXPECTED_TOOLS].sort();
     const activeTools = context.activeTools ?? baseline;
     const environment: NodeJS.ProcessEnv = {
       PATH: "/usr/bin:/bin",
