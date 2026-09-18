@@ -11,8 +11,8 @@ import {
 	assertSandboxBackendReady,
 	executeSandboxRequest,
 } from "./sandbox-backend.mjs";
+import { attestationBaseline, attestToolSet } from "./manifest-attest.mjs";
 
-const EXPECTED_TOOLS = ["read", "write", "edit", "ls", "grep", "find", "bash", "hitch_publish"] as const;
 const webSearchEnabled = process.env.HITCH_WEB_SEARCH_ENABLED === "1";
 const webSearchPath = process.env.HITCH_WEB_SEARCH_EXTENSION_PATH;
 const webSearchDigest = process.env.HITCH_WEB_SEARCH_EXTENSION_SHA256;
@@ -25,21 +25,7 @@ if (webSearchPath !== undefined && !webSearchPath.startsWith("/")) {
 if (webSearchDigest !== undefined && !/^[a-f0-9]{64}$/.test(webSearchDigest)) {
 	throw new Error("Hitch web-search extension digest is invalid");
 }
-const mcpEnabled = process.env.HITCH_MCP_ENABLED === "1";
-const mcpPath = process.env.HITCH_MCP_EXTENSION_PATH;
-const mcpDigest = process.env.HITCH_MCP_EXTENSION_SHA256;
-if (mcpEnabled !== (mcpPath !== undefined && mcpDigest !== undefined)) {
-	throw new Error("Hitch MCP configuration is incomplete");
-}
-if (mcpPath !== undefined && !mcpPath.startsWith("/")) {
-	throw new Error("Hitch MCP extension path is invalid");
-}
-if (mcpDigest !== undefined && !/^[a-f0-9]{64}$/.test(mcpDigest)) {
-	throw new Error("Hitch MCP extension digest is invalid");
-}
-const expectedTools = webSearchEnabled
-	? [...EXPECTED_TOOLS, "web_search"]
-	: [...EXPECTED_TOOLS];
+const expectedTools = attestationBaseline();
 const selfPath = fileURLToPath(import.meta.url);
 const requiredEnvironment = [
 	"HITCH_P0_WORKSPACE",
@@ -152,8 +138,18 @@ if (
 	sha256(selfPath) !== process.env.HITCH_P0_EXTENSION_SHA256 ||
 	sha256(backendPath) !== process.env.HITCH_P0_BACKEND_SHA256
 ) throw new Error("Hitch sandbox extension digest mismatch");
-if (mcpEnabled && sha256(mcpPath!) !== mcpDigest)
-	throw new Error("Hitch MCP extension digest mismatch");
+const mcpExtensionPath = process.env.HITCH_MCP_EXTENSION_PATH;
+const mcpExtensionDigest = process.env.HITCH_MCP_EXTENSION_SHA256;
+if ((mcpExtensionPath !== undefined) !== (mcpExtensionDigest !== undefined))
+	throw new Error("Hitch MCP configuration is incomplete");
+if (mcpExtensionPath !== undefined) {
+	if (!mcpExtensionPath.startsWith("/"))
+		throw new Error("Hitch MCP extension path is invalid");
+	if (mcpExtensionDigest === undefined || !/^[a-f0-9]{64}$/.test(mcpExtensionDigest))
+		throw new Error("Hitch MCP extension digest is invalid");
+	if (sha256(mcpExtensionPath) !== mcpExtensionDigest)
+		throw new Error("Hitch MCP extension digest mismatch");
+}
 
 const backendConfiguration = Object.freeze({
 	workspace: process.env.HITCH_P0_WORKSPACE!,
@@ -244,40 +240,23 @@ function resultText(result: Record<string, unknown>): string {
 
 export default function (pi: ExtensionAPI): void {
 	function attest(): { schemaDigest: string; allTools: readonly string[]; activeTools: readonly string[]; sourcePaths: readonly (string | undefined)[] } {
-		// Adapter-owned tools (pi-mcp-adapter) are excluded from attestation:
-		// they register asynchronously relative to this extension, and they never
-		// route through the sandboxed execute() path anyway.
-		const adapterNames = new Set(
-			pi.getAllTools()
-				.filter((tool) => mcpEnabled && tool.sourceInfo?.path === mcpPath)
-				.map((tool) => tool.name),
-		);
-		const all = pi.getAllTools()
-			.filter((tool) => !adapterNames.has(tool.name))
-			.map((tool) => ({
-				name: tool.name,
-				path: tool.sourceInfo?.path,
-				parameters: tool.parameters,
-			}))
-			.sort((left, right) => left.name.localeCompare(right.name));
-		const active = pi.getActiveTools()
-			.filter((name) => !adapterNames.has(name))
-			.slice()
-			.sort();
-		const expectedAll = expectedTools.slice().sort();
-		const expectedActive = activeSubset.slice().sort();
-		if (
-			JSON.stringify(all.map((tool) => tool.name)) !== JSON.stringify(expectedAll) ||
-			JSON.stringify(active) !== JSON.stringify(expectedActive) ||
-			all.some((tool) => tool.name === "web_search"
-				? tool.path !== webSearchPath
-				: tool.path !== selfPath)
-		) throw new Error("Hitch sandbox tool attestation failed");
+		// Dynamic-source tools (e.g. the MCP adapter) are excluded from
+		// attestation by manifest-attest: they register and activate
+		// asynchronously, and never route through the sandboxed execute() path.
+		const attestation = attestToolSet(pi, {
+			label: "sandbox",
+			defaultPath: selfPath,
+			pathOverrides:
+				webSearchEnabled && webSearchPath !== undefined
+					? { web_search: webSearchPath }
+					: {},
+			});
+		const { all, active } = attestation;
 		return {
 			schemaDigest: stableDigest(all.map(({ name, parameters }) => ({ name, parameters }))),
 			allTools: all.map((tool) => tool.name),
 			activeTools: active,
-			sourcePaths: all.map((tool) => tool.path),
+			sourcePaths: attestation.sourcePaths,
 		};
 	}
 

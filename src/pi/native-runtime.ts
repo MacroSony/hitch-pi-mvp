@@ -66,24 +66,74 @@ const PI_TREE_SHA256 =
   "81f52d5ea162080ebc12efb611c5f82ff57d3c47118fcd7c432ced7e9cb3ec86";
 const PI_DEPENDENCY_CLOSURE_SHA256 =
   "bf6e1e05ddd83e48e8453b703f175ea1c9af187e4b930b28465d6eee6e36a1ba";
-const SANDBOX_ASSET_SHA256 = {
-  "hitch-sandbox.ts":
-    "5b1313ea9ccb875a13490ba352881d49b3b9aa30926ee9e31db9e47e0227ea1b",
-  "pi-web-search.ts":
-    "1cec24d62123de848c8dba316aa83d0a3656da1bb0f6e535c4502923b24116bf",
-  "pi-antigravity.ts":
-    "d1ee9e5ba9eb827cc93a30f0cdc8babb257a6bf74b9a46a85f1ab118c8343aec",
-  "web-search/tavily.js":
-    "3fd8c7caeb7226c9fa05e46dfdd4b79c30258ce2844efa932e284e89a9a9d3da",
-  "egress/client.js":
-    "31a1ca0255e64076ff3037a4663be8c72d337ecc2dbec5622eb4c0204cfc8599",
-  "sandbox-backend.mjs":
-    "44a694871cf8396e9db3b8775b0adbb48381a92b2de3e90c8caa47a108c8ac73",
-  "sandbox-worker.mjs":
-    "7c591aeaa72ca63ddb09db42ee0562505ea3f416264f64870e69e9d8970f2cd9",
-  "secure-bwrap-helper":
-    "9428f425beb6a544616920f66b74c6d7d4b2b92e9ccf3923a55f9796cf513027",
-} as const;
+interface ToolsManifest {
+  readonly schemaVersion: 1;
+  readonly staticTools: readonly string[];
+  readonly optionalTools: Readonly<Record<string, { readonly asset: string }>>;
+  readonly assets: Readonly<Record<string, string>>;
+}
+
+let toolsManifestCache: ToolsManifest | undefined;
+
+// The build-generated manifest is the single source of truth for the
+// attestation baseline and the sandbox asset digests. It ships inside the
+// release directory, which is the same trust domain as the compiled runtime
+// itself (operator-owned, mode 0444 files under a 0700 tree).
+function toolsManifest(): ToolsManifest {
+  if (toolsManifestCache !== undefined) return toolsManifestCache;
+  const path = join(assetRoot(), "tools-manifest.json");
+  if (!existsSync(path))
+    throw new Error("sandbox tools manifest is missing; run npm run build");
+  const metadata = lstatSync(path, { bigint: true });
+  const uid = process.getuid?.();
+  if (
+    !metadata.isFile() ||
+    metadata.isSymbolicLink() ||
+    metadata.nlink !== 1n ||
+    (uid !== undefined && metadata.uid !== BigInt(uid)) ||
+    (metadata.mode & 0o222n) !== 0n
+  )
+    throw new Error("sandbox tools manifest has unsafe properties");
+  const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+  const candidate = parsed as Partial<ToolsManifest>;
+  if (
+    candidate === null ||
+    typeof candidate !== "object" ||
+    candidate.schemaVersion !== 1 ||
+    !Array.isArray(candidate.staticTools) ||
+    candidate.staticTools.length === 0 ||
+    candidate.staticTools.length > 64 ||
+    candidate.staticTools.some(
+      (tool) => typeof tool !== "string" || !/^[a-z_]+$/.test(tool),
+    ) ||
+    new Set(candidate.staticTools).size !== candidate.staticTools.length ||
+    candidate.assets === null ||
+    typeof candidate.assets !== "object" ||
+    Object.keys(candidate.assets).length === 0 ||
+    Object.entries(candidate.assets).some(
+      ([name, digest]) =>
+        name.length === 0 ||
+        name.length > 128 ||
+        typeof digest !== "string" ||
+        !/^[a-f0-9]{64}$/.test(digest),
+    ) ||
+    candidate.optionalTools === null ||
+    typeof candidate.optionalTools !== "object"
+  )
+    throw new Error("sandbox tools manifest is malformed");
+  toolsManifestCache = candidate as ToolsManifest;
+  return toolsManifestCache;
+}
+
+function expectedToolNames(webSearchEnabled: boolean): string[] {
+  const manifest = toolsManifest();
+  const base = manifest.staticTools;
+  if (!webSearchEnabled) return [...base].sort();
+  if (manifest.optionalTools["web_search"] === undefined)
+    throw new Error("sandbox tools manifest is missing web_search");
+  return [...base, "web_search"].sort();
+}
+
 const PI_PROFILE_ROOT = "pi-profiles";
 const DEFAULT_MAX_CONCURRENT_TURNS = 2;
 const MIN_MAX_CONCURRENT_TURNS = 1;
@@ -92,16 +142,6 @@ const MAX_RPC_BYTES = 8 * 1024 * 1024;
 const MAX_RPC_COMMAND_BYTES = 32 * 1024 * 1024;
 const MAX_STDERR_BYTES = 64 * 1024;
 const MODEL_CATALOG_REFRESH_TIMEOUT_MS = 7_000;
-const EXPECTED_TOOLS = [
-  "bash",
-  "edit",
-  "find",
-  "grep",
-  "hitch_publish",
-  "ls",
-  "read",
-  "write",
-] as const;
 const THINKING_LEVELS: readonly ThinkingLevel[] = [
   "off",
   "minimal",
@@ -183,7 +223,7 @@ function sha256File(path: string): string {
 }
 
 function validateSandboxAssets(assets: string): void {
-  for (const [name, expectedDigest] of Object.entries(SANDBOX_ASSET_SHA256)) {
+  for (const [name, expectedDigest] of Object.entries(toolsManifest().assets)) {
     const path = join(assets, name);
     if (!existsSync(path))
       throw new Error("sandbox build assets are missing; run npm run build");
@@ -909,9 +949,7 @@ export async function waitForAttestation(
   controller: { readonly exited: boolean; readonly stderrTail?: string },
   context: ControllerContext,
 ): Promise<void> {
-  const expectedTools = context.webSearchEnabled
-    ? [...EXPECTED_TOOLS, "web_search"].sort()
-    : [...EXPECTED_TOOLS].sort();
+  const expectedTools = expectedToolNames(context.webSearchEnabled);
   const expectedActiveTools = context.activeTools ?? expectedTools;
   const extensionPath = join(assetRoot(), "hitch-sandbox.ts");
   const webExtensionPath = join(assetRoot(), "pi-web-search.ts");
@@ -986,14 +1024,15 @@ export async function waitForAttestation(
         )
           throw new Error("antigravity provider attestation unexpected");
         if (
-          standard.extensionDigest !== SANDBOX_ASSET_SHA256["hitch-sandbox.ts"]
+          standard.extensionDigest !==
+          toolsManifest().assets["hitch-sandbox.ts"]
         )
           throw new Error("sandbox extension digest attestation is invalid");
         if (context.webSearchEnabled && webRecord !== undefined) {
           check(webRecord, webExtensionPath);
           if (
             webRecord.extensionDigest !==
-            SANDBOX_ASSET_SHA256["pi-web-search.ts"]
+            toolsManifest().assets["pi-web-search.ts"]
           )
             throw new Error(
               "web-search extension digest attestation is invalid",
@@ -1304,9 +1343,7 @@ export class NativePiRuntime implements AgentRuntime {
       existsSync(join(this.#sharedProfileDir, "mcp.json"));
     const worker = join(this.#assets, "sandbox-worker.mjs");
     const helper = join(this.#assets, "secure-bwrap-helper");
-    const baseline = context.webSearchEnabled
-      ? [...EXPECTED_TOOLS, "web_search"].sort()
-      : [...EXPECTED_TOOLS].sort();
+    const baseline = expectedToolNames(context.webSearchEnabled);
     const activeTools = context.activeTools ?? baseline;
     const environment: NodeJS.ProcessEnv = {
       PATH: "/usr/bin:/bin",
@@ -1332,11 +1369,15 @@ export class NativePiRuntime implements AgentRuntime {
       HITCH_P0_USER_ID: context.userId,
       HITCH_P0_EXTENSION_PATH: extension,
       HITCH_P0_UNIT_PREFIX: this.#owner,
-      HITCH_P0_WORKER_SHA256: SANDBOX_ASSET_SHA256["sandbox-worker.mjs"],
-      HITCH_P0_HELPER_SHA256: SANDBOX_ASSET_SHA256["secure-bwrap-helper"],
-      HITCH_P0_EXTENSION_SHA256: SANDBOX_ASSET_SHA256["hitch-sandbox.ts"],
-      HITCH_P0_BACKEND_SHA256: SANDBOX_ASSET_SHA256["sandbox-backend.mjs"],
+      HITCH_P0_WORKER_SHA256: toolsManifest().assets["sandbox-worker.mjs"],
+      HITCH_P0_HELPER_SHA256: toolsManifest().assets["secure-bwrap-helper"],
+      HITCH_P0_EXTENSION_SHA256: toolsManifest().assets["hitch-sandbox.ts"],
+      HITCH_P0_BACKEND_SHA256: toolsManifest().assets["sandbox-backend.mjs"],
       HITCH_ACTIVE_TOOLS: JSON.stringify(activeTools),
+      HITCH_EXPECTED_TOOLS: JSON.stringify(baseline),
+      HITCH_DYNAMIC_EXTENSION_PATHS: JSON.stringify(
+        mcpEnabled ? [mcpExtension] : [],
+      ),
       ...(context.forgePrompt !== undefined
         ? {
             HITCH_FORGE_PROMPT: JSON.stringify({
@@ -1351,7 +1392,7 @@ export class NativePiRuntime implements AgentRuntime {
             HITCH_WEB_SEARCH_KEY: this.#webSearchKey ?? "",
             HITCH_WEB_SEARCH_EXTENSION_PATH: webSearchExtension,
             HITCH_WEB_SEARCH_EXTENSION_SHA256:
-              SANDBOX_ASSET_SHA256["pi-web-search.ts"],
+              toolsManifest().assets["pi-web-search.ts"],
           }
         : {}),
       ...(context.antigravityRequired
@@ -1360,7 +1401,7 @@ export class NativePiRuntime implements AgentRuntime {
             ANTIGRAVITY_NO_PREWARM: "1",
             HITCH_ANTIGRAVITY_EXTENSION_PATH: antigravityExtension,
             HITCH_ANTIGRAVITY_EXTENSION_SHA256:
-              SANDBOX_ASSET_SHA256["pi-antigravity.ts"],
+              toolsManifest().assets["pi-antigravity.ts"],
           }
         : {}),
       ...(mcpEnabled
@@ -1445,8 +1486,8 @@ export class NativePiRuntime implements AgentRuntime {
             log: context.log,
             turnHandle: context.turnHandle,
             unitPrefix: this.#owner,
-            workerSha256: SANDBOX_ASSET_SHA256["sandbox-worker.mjs"],
-            helperSha256: SANDBOX_ASSET_SHA256["secure-bwrap-helper"],
+            workerSha256: toolsManifest().assets["sandbox-worker.mjs"],
+            helperSha256: toolsManifest().assets["secure-bwrap-helper"],
             temporaryBytes: 4 * 1024 * 1024,
             memoryBytes: 256 * 1024 * 1024,
             maximumProcesses: 32,
@@ -1556,9 +1597,7 @@ export class NativePiRuntime implements AgentRuntime {
     }
     const userId = safeSegment(turn.userId, "runtime user id");
     const isWebEnabled = this.#webSearchUsers.has(userId);
-    const baselineTools = isWebEnabled
-      ? [...EXPECTED_TOOLS, "web_search"].sort()
-      : [...EXPECTED_TOOLS].sort();
+    const baselineTools = expectedToolNames(isWebEnabled);
     const sessionDirectory = join(this.#sessionsRoot, userId);
     privateDirectory(sessionDirectory);
     const session =

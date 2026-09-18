@@ -168,6 +168,41 @@ retain the original RPC path. Pi still owns provider protocol/refresh; Hitch's
 small store owns locked and atomic persistence, without putting credentials in
 model or sandbox contexts.
 
+### Tool world: build manifest, dynamic sources, and profile policy
+
+The tool attestation baseline is data, not code. `scripts/build-sandbox.mjs`
+emits `dist/sandbox/tools-manifest.json` next to the sandbox assets: the
+static tool list (extracted from the sandbox extension's definition table),
+the optional-tool registry (`web_search`), and the SHA-256 digest of every
+sandbox asset. The runtime loads and validates this manifest (schema version,
+entry shapes, file ownership/permissions like every other pinned asset) and
+derives the expected tool set from it; no tool names or asset digests are
+hardcoded in the runtime. Rebuilding after an extension change regenerates
+the manifest atomically with the assets, so pins can never go stale relative
+to the shipped code.
+
+Both security extensions delegate tool-set verification to one shared module,
+`sandbox/manifest-attest.mjs` (itself a pinned manifest asset). The runtime
+tells each controller the expected world via environment:
+`HITCH_EXPECTED_TOOLS` (exact post-filter set), `HITCH_ACTIVE_TOOLS`
+(policy-reduced active subset), and `HITCH_DYNAMIC_EXTENSION_PATHS`
+(extension paths whose tools are exempt by source). Dynamic sources such as
+the vendored pi-mcp-adapter register and activate tools asynchronously; they
+are excluded from the exact-match comparisons by source path, not by name,
+so late activation can never trip attestation. Dynamic-source tools still
+never route through the sandboxed execute path. Adding a new dynamic source
+is a runtime configuration change; adding a static tool means new extension
+code and therefore a rebuild, which re-anchors the manifest automatically.
+
+Capability policy is layered per persona through Pi Forge: a resolved profile
+may carry an operator glob policy (`tools.allow`/`tools.deny`) which
+`reduceForgeTools` applies to the baseline; profiles without a policy keep
+the full baseline. Policy restricts what a model may invoke; attestation
+independently verifies that the registered world matches the build manifest.
+The `pi-attest-debug` journal event (bounded stderr plus attestation-log
+tail) is emitted when turn-time attestation fails, because the classified
+`pi-runtime-failure` record is intentionally content-free.
+
 The MVP admits at most `maxConcurrentTurns` provider-owning Pi controllers
 globally (config, default 2, validated 1–8). The per-user pump still serializes
 Turns for one user; the semaphore only bounds cross-user parallelism. Shared

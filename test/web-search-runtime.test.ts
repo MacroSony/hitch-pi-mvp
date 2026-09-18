@@ -47,17 +47,15 @@ test("web-search runtime assets are staged read-only with their relative closure
   assert.match(readFileSync(extension, "utf8"), /\.\/web-search\/tavily\.js/u);
   assert.match(readFileSync(adapter, "utf8"), /\.\.\/egress\/client\.js/u);
 
-  const runtime = readFileSync(
-    join(repository, "src", "pi", "native-runtime.ts"),
-    "utf8",
-  );
+  const manifest = JSON.parse(
+    readFileSync(join(assets, "tools-manifest.json"), "utf8"),
+  ) as { assets: Record<string, string> };
   for (const [name, path] of [
     ["pi-web-search.ts", extension],
     ["web-search/tavily.js", adapter],
     ["egress/client.js", egress],
   ] as const) {
-    assert.match(runtime, new RegExp(`"${name.replace("/", "\\/")}"`));
-    assert.match(runtime, new RegExp(sha256(path)));
+    assert.equal(manifest.assets[name], sha256(path), name);
   }
 });
 
@@ -87,10 +85,7 @@ test("web extension is explicit, bounded, and keeps disabled/catalog turns at ei
     join(repository, "src", "pi", "native-runtime.ts"),
     "utf8",
   );
-  assert.match(
-    runtime,
-    /context\.webSearchEnabled\s*\?\s*\[\.\.\.EXPECTED_TOOLS,\s*"web_search"\]/u,
-  );
+  assert.match(runtime, /expectedToolNames\(context\.webSearchEnabled\)/u);
   assert.match(
     runtime,
     /this\.#context\(label, workspace, "catalog", false\)/u,

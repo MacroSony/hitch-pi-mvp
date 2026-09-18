@@ -1,12 +1,15 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   chmodSync,
   copyFileSync,
   mkdirSync,
+  readFileSync,
   renameSync,
   rmSync,
+  writeFileSync,
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,8 +25,19 @@ const antigravitySource = join(
 const destination = join(repository, "dist", "sandbox");
 mkdirSync(destination, { recursive: true, mode: 0o700 });
 
+// The sandbox extension's tool-definition table is the single source of
+// truth for the static tool list. Keep the literal ["name", "..."] format
+// in hitch-sandbox.ts: this extractor depends on it.
+const sandboxSource = readFileSync(join(source, "hitch-sandbox.ts"), "utf8");
+const staticTools = [...sandboxSource.matchAll(/\t\["([a-z_]+)",/g)].map(
+  (match) => match[1],
+);
+if (staticTools.length === 0)
+  throw new Error("failed to extract static tool list from hitch-sandbox.ts");
+
 for (const [from, name] of [
   [join(source, "hitch-sandbox.ts"), "hitch-sandbox.ts"],
+  [join(source, "manifest-attest.mjs"), "manifest-attest.mjs"],
   [join(webSource, "pi-web-search.ts"), "pi-web-search.ts"],
   [join(antigravitySource, "pi-antigravity.ts"), "pi-antigravity.ts"],
   [join(source, "sandbox-backend.mjs"), "sandbox-backend.mjs"],
@@ -83,3 +97,36 @@ if (compiler.status !== 0) {
 }
 chmodSync(temporary, 0o555);
 renameSync(temporary, helper);
+
+// Build-generated tool manifest: the runtime reads this instead of
+// hardcoded tool lists and asset digests. Operator-controlled tool policy
+// (optional tools, dynamic sources, per-profile restrictions) is layered
+// on top at turn time; this file anchors what the build actually shipped.
+const assets = {};
+for (const name of [
+  "hitch-sandbox.ts",
+  "manifest-attest.mjs",
+  "pi-web-search.ts",
+  "pi-antigravity.ts",
+  "sandbox-backend.mjs",
+  "sandbox-worker.mjs",
+  "secure-bwrap-helper",
+  "web-search/tavily.js",
+  "egress/client.js",
+]) {
+  assets[name] = createHash("sha256")
+    .update(readFileSync(join(destination, name)))
+    .digest("hex");
+}
+const manifest = {
+  schemaVersion: 1,
+  staticTools,
+  optionalTools: { web_search: { asset: "pi-web-search.ts" } },
+  assets,
+};
+const manifestPath = join(destination, "tools-manifest.json");
+rmSync(manifestPath, { force: true });
+writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, {
+  mode: 0o444,
+});
+chmodSync(manifestPath, 0o444);

@@ -30,29 +30,63 @@ function sha256File(path: string): string {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
 
-test("mandatory and web-search extension source digests match native runtime constants", () => {
-  const sandboxPath = join(
-    repository,
-    "packages",
-    "hitch-sandbox-extension",
-    "hitch-sandbox.ts",
-  );
-  const webPath = join(
-    repository,
-    "packages",
-    "hitch-web-search-extension",
-    "pi-web-search.ts",
-  );
+test("extension source digests match the build-generated tools manifest", () => {
+  const manifest = JSON.parse(
+    readFileSync(
+      join(repository, "dist", "sandbox", "tools-manifest.json"),
+      "utf8",
+    ),
+  ) as { assets: Record<string, string>; staticTools: string[] };
+  for (const [name, sourcePath] of [
+    [
+      "hitch-sandbox.ts",
+      join(
+        repository,
+        "packages",
+        "hitch-sandbox-extension",
+        "hitch-sandbox.ts",
+      ),
+    ],
+    [
+      "manifest-attest.mjs",
+      join(
+        repository,
+        "packages",
+        "hitch-sandbox-extension",
+        "manifest-attest.mjs",
+      ),
+    ],
+    [
+      "pi-web-search.ts",
+      join(
+        repository,
+        "packages",
+        "hitch-web-search-extension",
+        "pi-web-search.ts",
+      ),
+    ],
+  ] as const) {
+    assert.equal(manifest.assets[name], sha256File(sourcePath), name);
+  }
+  assert.deepEqual([...manifest.staticTools].sort(), [
+    "bash",
+    "edit",
+    "find",
+    "grep",
+    "hitch_publish",
+    "ls",
+    "read",
+    "write",
+  ]);
+  // The runtime must consume the manifest, not hardcoded pins.
   const runtimeSource = readFileSync(
     join(repository, "src", "pi", "native-runtime.ts"),
     "utf8",
   );
-
-  const sandboxHash = sha256File(sandboxPath);
-  const webHash = sha256File(webPath);
-
-  assert.match(runtimeSource, new RegExp(sandboxHash, "u"));
-  assert.match(runtimeSource, new RegExp(webHash, "u"));
+  assert.doesNotMatch(
+    runtimeSource,
+    /\bSANDBOX_ASSET_SHA256\b|\bEXPECTED_TOOLS\b/u,
+  );
 });
 
 test("extension sources contain strict HITCH_ACTIVE_TOOLS and HITCH_FORGE_PROMPT checks", () => {

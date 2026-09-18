@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { TavilySearchAdapter } from "./web-search/tavily.js";
+import { attestationBaseline, attestToolSet } from "./manifest-attest.mjs";
 
 const selfPath = fileURLToPath(import.meta.url);
 const controllerNonce = process.env.HITCH_P0_CONTROLLER_NONCE;
@@ -20,18 +21,6 @@ if (!mandatoryPath || !mandatoryPath.startsWith("/")) {
   throw new Error("Hitch mandatory extension path is invalid");
 }
 if (!apiKey) throw new Error("Hitch web-search key is missing");
-
-const EXPECTED_TOOLS = [
-  "bash",
-  "edit",
-  "find",
-  "grep",
-  "hitch_publish",
-  "ls",
-  "read",
-  "web_search",
-  "write",
-] as const;
 
 function parseActiveTools(
   raw: string | undefined,
@@ -66,7 +55,7 @@ function parseActiveTools(
 
 const activeSubset = parseActiveTools(
   process.env.HITCH_ACTIVE_TOOLS,
-  EXPECTED_TOOLS,
+  attestationBaseline(),
 );
 const activeSubsetSet = new Set(activeSubset);
 
@@ -90,78 +79,58 @@ function log(record: Record<string, unknown>): void {
   fs.appendFileSync(path, `${JSON.stringify(record)}\n`, { mode: 0o600 });
 }
 
-function tools(pi: ExtensionAPI): {
-  readonly all: readonly { name: string; path: string | undefined }[];
-  readonly active: readonly string[];
-} {
-  const mcpEnabled = process.env.HITCH_MCP_ENABLED === "1";
-  const mcpPath = process.env.HITCH_MCP_EXTENSION_PATH;
-  const isAdapterTool = (path: string | undefined): boolean =>
-    mcpEnabled &&
-    typeof mcpPath === "string" &&
-    mcpPath.length > 0 &&
-    path === mcpPath;
-  const rawAll = pi
-    .getAllTools()
-    .map((tool) => ({ name: tool.name, path: tool.sourceInfo?.path }));
-  const adapterNames = new Set(
-    rawAll.filter((tool) => isAdapterTool(tool.path)).map((tool) => tool.name),
-  );
-  const all = rawAll
-    .filter((tool) => !isAdapterTool(tool.path))
-    .sort((left, right) => left.name.localeCompare(right.name));
-  return {
-    all,
-    active: pi
-      .getActiveTools()
-      .filter((name) => !adapterNames.has(name))
-      .sort(),
-  };
+// Bounded diagnostics sink for execute-time failures. The classified turn
+// error is intentionally content-free; this file is the operator's evidence.
+function debugSink(pi: ExtensionAPI, error: unknown): void {
+  try {
+    const path = "/srv/hitch/data/websearch-debug.log";
+    if (fs.existsSync(path) && fs.statSync(path).size > 64 * 1024)
+      fs.truncateSync(path, 0);
+    const snapshot = {
+      at: new Date().toISOString(),
+      error: String(error).slice(0, 300),
+      all: pi
+        .getAllTools()
+        .map((tool) => [tool.name, tool.sourceInfo?.path ?? null]),
+      active: pi.getActiveTools(),
+      expectedEnv: process.env.HITCH_EXPECTED_TOOLS ?? null,
+      dynamicEnv: process.env.HITCH_DYNAMIC_EXTENSION_PATHS ?? null,
+    };
+    fs.appendFileSync(path, `${JSON.stringify(snapshot)}\n`, { mode: 0o600 });
+  } catch {
+    // diagnostics must never break the tool path
+  }
 }
+
 function attest(pi: ExtensionAPI): {
   readonly all: readonly string[];
   readonly active: readonly string[];
   readonly sourcePaths: readonly (string | undefined)[];
 } {
-  const current = tools(pi);
-  const expectedAll = EXPECTED_TOOLS.slice().sort();
-  const expectedActive = activeSubset.slice().sort();
-  if (
-    JSON.stringify(current.all.map((tool) => tool.name)) !==
-      JSON.stringify(expectedAll) ||
-    JSON.stringify(current.active) !== JSON.stringify(expectedActive) ||
-    current.all.some((tool) =>
-      tool.name === "web_search"
-        ? tool.path !== selfPath
-        : tool.path !== mandatoryPath,
-    )
-  ) {
-    throw new Error("Hitch web-search tool attestation failed");
-  }
+  // Dynamic-source tools (e.g. the MCP adapter) are excluded by
+  // manifest-attest; mandatory tools must come from the sandbox extension,
+  // web_search from this file.
+  const attestation = attestToolSet(pi, {
+    label: "web-search",
+    defaultPath: mandatoryPath,
+    pathOverrides: { web_search: selfPath },
+  });
   return {
-    all: current.all.map((tool) => tool.name),
-    active: current.active,
-    sourcePaths: current.all.map((tool) => tool.path),
+    all: attestation.all.map((tool) => tool.name),
+    active: attestation.active,
+    sourcePaths: attestation.sourcePaths,
   };
 }
 
-function boundedResult(value: unknown): string {
-  if (value === null || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("web-search-failed");
-  }
-  const itemsValue = (value as { items?: unknown }).items;
-  if (!Array.isArray(itemsValue) || itemsValue.length > 5) {
-    throw new Error("web-search-failed");
-  }
-  const items = itemsValue.map((item) => {
-    if (item === null || typeof item !== "object" || Array.isArray(item)) {
-      throw new Error("web-search-failed");
-    }
-    const candidate = item as {
-      title?: unknown;
-      url?: unknown;
-      snippet?: unknown;
-    };
+// Bounds and validates the adapter result before it reaches the model.
+function boundedResult(result: {
+  readonly items: readonly {
+    readonly title: string;
+    readonly url: string;
+    readonly snippet: string;
+  }[];
+}): string {
+  const items = result.items.map((candidate) => {
     if (
       typeof candidate.title !== "string" ||
       typeof candidate.url !== "string" ||
@@ -207,15 +176,7 @@ export default function (pi: ExtensionAPI): void {
           details: {},
         };
       } catch (error) {
-        try {
-          fs.appendFileSync(
-            "/srv/hitch/data/websearch-debug.log",
-            `${new Date().toISOString()} ${String(error).slice(0, 500)} ${(error instanceof Error ? (error.stack ?? "") : "").split("\n").slice(0, 4).join(" | ")}\n`,
-            { mode: 0o600 },
-          );
-        } catch {
-          // debug sink unavailable
-        }
+        debugSink(pi, error);
         throw new Error("web-search-failed");
       }
     },
@@ -228,7 +189,7 @@ export default function (pi: ExtensionAPI): void {
       ready: true,
       controllerNonce,
       userId: process.env.HITCH_P0_USER_ID,
-      exactTools: EXPECTED_TOOLS.slice().sort(),
+      exactTools: attestationBaseline(),
       allTools: attestation.all,
       activeTools: attestation.active,
       sourcePaths: attestation.sourcePaths,
