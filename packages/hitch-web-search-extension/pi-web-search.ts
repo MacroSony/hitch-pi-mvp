@@ -97,6 +97,16 @@ function tools(pi: ExtensionAPI): {
   const all = pi
     .getAllTools()
     .map((tool) => ({ name: tool.name, path: tool.sourceInfo?.path }))
+    .filter((tool) => {
+      const mcpEnabled = process.env.HITCH_MCP_ENABLED === "1";
+      const mcpPath = process.env.HITCH_MCP_EXTENSION_PATH;
+      return !(
+        mcpEnabled &&
+        typeof mcpPath === "string" &&
+        mcpPath.length > 0 &&
+        tool.path === mcpPath
+      );
+    })
     .sort((left, right) => left.name.localeCompare(right.name));
   return { all, active: pi.getActiveTools().slice().sort() };
 }
