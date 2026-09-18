@@ -528,7 +528,12 @@ export class WeChatWorker {
       this.accountId,
       identity.platformUserId,
     );
-    if (endpoint === null) return {};
+    if (endpoint === null) {
+      process.stderr.write(
+        `wechat inbound from unbound platform user ${identity.platformUserId}; message dropped\n`,
+      );
+      return {};
+    }
     const contextToken =
       identity.contextToken ?? this.state.context(identity.platformUserId);
     const context =
