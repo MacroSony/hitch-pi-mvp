@@ -94,23 +94,30 @@ function tools(pi: ExtensionAPI): {
   readonly all: readonly { name: string; path: string | undefined }[];
   readonly active: readonly string[];
 } {
-  const all = pi
+  const mcpEnabled = process.env.HITCH_MCP_ENABLED === "1";
+  const mcpPath = process.env.HITCH_MCP_EXTENSION_PATH;
+  const isAdapterTool = (path: string | undefined): boolean =>
+    mcpEnabled &&
+    typeof mcpPath === "string" &&
+    mcpPath.length > 0 &&
+    path === mcpPath;
+  const rawAll = pi
     .getAllTools()
-    .map((tool) => ({ name: tool.name, path: tool.sourceInfo?.path }))
-    .filter((tool) => {
-      const mcpEnabled = process.env.HITCH_MCP_ENABLED === "1";
-      const mcpPath = process.env.HITCH_MCP_EXTENSION_PATH;
-      return !(
-        mcpEnabled &&
-        typeof mcpPath === "string" &&
-        mcpPath.length > 0 &&
-        tool.path === mcpPath
-      );
-    })
+    .map((tool) => ({ name: tool.name, path: tool.sourceInfo?.path }));
+  const adapterNames = new Set(
+    rawAll.filter((tool) => isAdapterTool(tool.path)).map((tool) => tool.name),
+  );
+  const all = rawAll
+    .filter((tool) => !isAdapterTool(tool.path))
     .sort((left, right) => left.name.localeCompare(right.name));
-  return { all, active: pi.getActiveTools().slice().sort() };
+  return {
+    all,
+    active: pi
+      .getActiveTools()
+      .filter((name) => !adapterNames.has(name))
+      .sort(),
+  };
 }
-
 function attest(pi: ExtensionAPI): {
   readonly all: readonly string[];
   readonly active: readonly string[];
@@ -199,7 +206,16 @@ export default function (pi: ExtensionAPI): void {
           content: [{ type: "text", text: boundedResult(result) }],
           details: {},
         };
-      } catch {
+      } catch (error) {
+        try {
+          fs.appendFileSync(
+            "/srv/hitch/data/websearch-debug.log",
+            `${new Date().toISOString()} ${String(error).slice(0, 500)} ${(error instanceof Error ? (error.stack ?? "") : "").split("\n").slice(0, 4).join(" | ")}\n`,
+            { mode: 0o600 },
+          );
+        } catch {
+          // debug sink unavailable
+        }
         throw new Error("web-search-failed");
       }
     },

@@ -70,7 +70,7 @@ const SANDBOX_ASSET_SHA256 = {
   "hitch-sandbox.ts":
     "5b1313ea9ccb875a13490ba352881d49b3b9aa30926ee9e31db9e47e0227ea1b",
   "pi-web-search.ts":
-    "eece37d2d858b7add00ac48960665cf898b957b77d669e11e9453842956aba12",
+    "1cec24d62123de848c8dba316aa83d0a3656da1bb0f6e535c4502923b24116bf",
   "pi-antigravity.ts":
     "d1ee9e5ba9eb827cc93a30f0cdc8babb257a6bf74b9a46a85f1ab118c8343aec",
   "web-search/tavily.js":
