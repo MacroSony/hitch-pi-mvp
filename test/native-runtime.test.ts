@@ -24,6 +24,7 @@ import {
   refreshPiCatalog,
   validatePiProfile,
   validatePiPackage,
+  toolArgPreview,
 } from "../src/pi/native-runtime.js";
 import { SharedCredentialStore } from "../src/pi/shared-credentials.js";
 import type { RuntimeModel, RuntimeTurn } from "../src/runtime/runtime.js";
@@ -525,3 +526,20 @@ test(
     }
   },
 );
+
+test("toolArgPreview prefers primary keys, flattens whitespace, and clips", () => {
+  assert.equal(toolArgPreview(undefined), "");
+  assert.equal(toolArgPreview(null), "");
+  assert.equal(toolArgPreview([]), "");
+  assert.equal(toolArgPreview({}), "");
+  assert.equal(toolArgPreview({ count: 3 }), "");
+  assert.equal(toolArgPreview({ command: "ls  -la\n/tmp" }), " · ls -la /tmp");
+  assert.equal(
+    toolArgPreview({ path: "/tmp/x", command: "echo hi" }),
+    " · echo hi",
+  );
+  const long = toolArgPreview({ query: "q".repeat(120) });
+  assert.ok(long.startsWith(" · "));
+  assert.ok(long.endsWith("…"));
+  assert.equal(Array.from(long).length, 3 + 60 + 1);
+});

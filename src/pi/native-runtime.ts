@@ -212,6 +212,41 @@ interface SandboxBackend {
   ): Promise<unknown>;
 }
 
+const TOOL_PREVIEW_KEYS = [
+  "command",
+  "query",
+  "path",
+  "pattern",
+  "url",
+] as const;
+
+export function toolArgPreview(args: unknown): string {
+  if (args === null || typeof args !== "object" || Array.isArray(args))
+    return "";
+  const input = args as Record<string, unknown>;
+  let candidate: string | undefined;
+  for (const key of TOOL_PREVIEW_KEYS) {
+    const value = input[key];
+    if (typeof value === "string" && value.trim().length > 0) {
+      candidate = value;
+      break;
+    }
+  }
+  if (candidate === undefined) {
+    for (const value of Object.values(input)) {
+      if (typeof value === "string" && value.trim().length > 0) {
+        candidate = value;
+        break;
+      }
+    }
+  }
+  if (candidate === undefined) return "";
+  const flat = candidate.replace(/\s+/g, " ").trim();
+  const chars = Array.from(flat);
+  const clipped = chars.length <= 60 ? flat : `${chars.slice(0, 60).join("")}…`;
+  return ` · ${clipped}`;
+}
+
 function record(value: unknown): JsonRecord | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as JsonRecord)
@@ -745,6 +780,19 @@ class PiRpcProcess {
         ) {
           this.onTextDelta?.(update.delta);
         }
+      }
+      if (
+        event.type === "tool_execution_start" &&
+        typeof event.toolName === "string" &&
+        event.toolName.length > 0
+      ) {
+        // Tool-call visibility for progress messages: a compact synthetic
+        // line flows through the same 30s batched, bounded progress path as
+        // text deltas. Final responses are assembled from the assistant
+        // snapshot, so these lines never contaminate terminal text.
+        this.onTextDelta?.(
+          `⏳ ${event.toolName}${toolArgPreview(event.args)}\n`,
+        );
       }
       if (event.type === "response" && typeof event.id === "string") {
         const pending = this.#pending.get(event.id);
