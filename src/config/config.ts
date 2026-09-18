@@ -43,6 +43,10 @@ export interface WeComEndpointConfig {
 export interface UserConfig {
   readonly id: string;
   readonly workspace: string;
+  /** Default persona profile for sessions without an explicit !profile/!preset
+   *  selection. The fallback re-applies every turn; clearing a selection does
+   *  not permanently defeat it. */
+  readonly forgeProfile?: string;
   readonly telegram?: TelegramEndpointConfig;
   readonly wechat?: WeChatEndpointConfig;
   readonly wecom?: WeComEndpointConfig;
@@ -240,7 +244,12 @@ function parseWeComEndpoint(value: unknown, path: string): WeComEndpointConfig {
 function parseUser(value: unknown, index: number): UserConfig {
   const path = `config.users[${index}]`;
   const input = record(value, path);
-  exactKeys(input, ["id", "workspace"], ["telegram", "wechat", "wecom"], path);
+  exactKeys(
+    input,
+    ["id", "workspace"],
+    ["telegram", "wechat", "wecom", "forgeProfile"],
+    path,
+  );
   const telegram = Object.hasOwn(input, "telegram")
     ? parseTelegramEndpoint(input.telegram, `${path}.telegram`)
     : undefined;
@@ -252,9 +261,13 @@ function parseUser(value: unknown, index: number): UserConfig {
     : undefined;
   if (telegram === undefined && wechat === undefined && wecom === undefined)
     fail(path, "must configure at least one private endpoint");
+  const forgeProfile = Object.hasOwn(input, "forgeProfile")
+    ? identifier(input.forgeProfile, `${path}.forgeProfile`)
+    : undefined;
   return {
     id: identifier(input.id, `${path}.id`),
     workspace: absolutePath(input.workspace, `${path}.workspace`),
+    ...(forgeProfile === undefined ? {} : { forgeProfile }),
     ...(telegram === undefined ? {} : { telegram }),
     ...(wechat === undefined ? {} : { wechat }),
     ...(wecom === undefined ? {} : { wecom }),

@@ -907,6 +907,63 @@ test("a timed-out Turn is terminal and quarantines rather than replaying", async
   environment.foundation.close();
 });
 
+test("forge defaults apply at claim time and yield to explicit session selections", () => {
+  const environment = setup();
+  const store = new HitchStore(
+    environment.foundation.database,
+    environment.sequence,
+    environment.sequence,
+    () => undefined,
+    new Map([
+      ["alice", { kind: "profile" as const, id: "stock-research-dad" }],
+    ]),
+  );
+  const aliceEndpoint = store.resolveTelegramEndpoint("primary", "101", "101");
+  assert.ok(aliceEndpoint !== null);
+  const bobEndpoint = store.resolveTelegramEndpoint("primary", "202", "202");
+  assert.ok(bobEndpoint !== null);
+
+  store.admitPrompt(
+    { endpoint: aliceEndpoint, idempotencyKey: "a1", contentDigest: "da1" },
+    "alice prompt",
+  );
+  const aliceClaimed = store.claimNextTurn("alice");
+  assert.ok(aliceClaimed !== null);
+  assert.deepEqual(aliceClaimed.forgeSelection, {
+    kind: "profile",
+    id: "stock-research-dad",
+  });
+  environment.foundation.database.connection
+    .prepare("UPDATE turns SET state = 'terminal', updated_at = 1 WHERE id = ?")
+    .run(aliceClaimed.turnId);
+
+  store.admitPrompt(
+    { endpoint: bobEndpoint, idempotencyKey: "b1", contentDigest: "db1" },
+    "bob prompt",
+  );
+  const bobClaimed = store.claimNextTurn("bob");
+  assert.ok(bobClaimed !== null);
+  assert.equal(bobClaimed.forgeSelection, undefined);
+
+  // An explicit session selection wins over the user default.
+  environment.foundation.database.connection
+    .prepare(
+      "UPDATE sessions SET forge_kind = 'profile', forge_id = 'other-profile', updated_at = 1 WHERE id = ? AND user_id = 'alice'",
+    )
+    .run(aliceClaimed.sessionId);
+  store.admitPrompt(
+    { endpoint: aliceEndpoint, idempotencyKey: "a2", contentDigest: "da2" },
+    "alice again",
+  );
+  const aliceSecond = store.claimNextTurn("alice");
+  assert.ok(aliceSecond !== null);
+  assert.deepEqual(aliceSecond.forgeSelection, {
+    kind: "profile",
+    id: "other-profile",
+  });
+  environment.foundation.close();
+});
+
 test("restart quarantines running work and never dispatches its queued successor", async () => {
   const environment = setup();
   const endpoint = environment.store.resolveTelegramEndpoint(

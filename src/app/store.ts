@@ -147,6 +147,10 @@ export class HitchStore {
     readonly ids: IdSource = randomIds,
     readonly clock: Clock = { now: () => Date.now() },
     readonly admissionGuard: (userId: string) => void = () => undefined,
+    readonly forgeDefaults: ReadonlyMap<
+      string,
+      { readonly kind: "profile"; readonly id: string }
+    > = new Map(),
   ) {
     this.#database = foundation.connection;
   }
@@ -1446,7 +1450,7 @@ export class HitchStore {
               kind: row.forge_kind,
               id: row.forge_id,
             }
-          : undefined;
+          : this.forgeDefaults.get(row.user_id);
       return {
         turnId: row.id,
         userId: row.user_id,

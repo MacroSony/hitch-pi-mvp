@@ -167,6 +167,14 @@ async function main(): Promise<void> {
       undefined,
       undefined,
       (userId) => media.assertAdmissionCapacity(userId),
+      new Map(
+        config.users
+          .filter((user) => user.forgeProfile !== undefined)
+          .map((user) => [
+            user.id,
+            { kind: "profile" as const, id: user.forgeProfile as string },
+          ]),
+      ),
     );
     media.cleanupUnreferenced(store.artifactStorageKeys());
     const application = new HitchApplication(
