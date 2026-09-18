@@ -619,6 +619,28 @@ class PiRpcProcess {
     return this.#closedState !== null;
   }
 
+  // RPC-mode extensions may emit UI requests. Fire-and-forget methods
+  // (notify/setStatus/setWidget/setTitle/set_editor_text) need no answer and
+  // are dropped by design; dialog methods (select/confirm/input/editor) block
+  // extension-side until answered, so headless sessions always answer
+  // "cancelled" to keep the controller from stalling.
+  static readonly #UI_FIRE_AND_FORGET: ReadonlySet<string> = new Set([
+    "notify",
+    "setStatus",
+    "setWidget",
+    "setTitle",
+    "set_editor_text",
+  ]);
+
+  #answerExtensionUi(event: JsonRecord): void {
+    const method = typeof event.method === "string" ? event.method : "";
+    if (PiRpcProcess.#UI_FIRE_AND_FORGET.has(method)) return;
+    const id = typeof event.id === "string" ? event.id : undefined;
+    if (id === undefined) return;
+    const encoded = `${JSON.stringify({ type: "extension_ui_response", id, cancelled: true })}\n`;
+    this.#child.stdin.write(encoded, () => {});
+  }
+
   #fail(error: Error): void {
     if (this.#fatal === null) this.#fatal = error;
     this.#child.kill("SIGKILL");
@@ -647,7 +669,7 @@ class PiRpcProcess {
         return;
       }
       if (event.type === "extension_ui_request") {
-        this.#fail(new Error("unsupported Pi extension UI request"));
+        this.#answerExtensionUi(event);
         return;
       }
       if (event.type === "message_end") {
