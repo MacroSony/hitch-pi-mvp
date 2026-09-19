@@ -1472,7 +1472,7 @@ test("endpointContext looks up enabled endpoint by id and returns null for unkno
   environment.foundation.close();
 });
 
-test("admitPrompt routes to pinned session when active and falls back to selected session otherwise", () => {
+test("admitPrompt preserves legacy fallback unless strict pinning is requested", () => {
   const environment = setup();
   const endpoint = environment.store.resolveTelegramEndpoint(
     "primary",
@@ -1561,36 +1561,43 @@ test("admitPrompt routes to pinned session when active and falls back to selecte
     idempotencyKey: "pinned-stopped-fallback",
     contentDigest: "digest-pinned-stopped-fallback",
   };
-  const stoppedFallbackResult = environment.store.admitPrompt(
+  const stoppedFallback = environment.store.admitPrompt(
     stoppedFallbackIdentity,
     "prompt with stopped pinned session",
     [],
     sessionBId,
   );
-  assert.equal(stoppedFallbackResult.duplicate, false);
-
-  const turnRowStoppedFallback = db
+  const stoppedFallbackRow = db
     .prepare("SELECT session_id FROM turns WHERE id = ?")
-    .get(stoppedFallbackResult.turnId) as { session_id: string };
-  assert.equal(turnRowStoppedFallback.session_id, sessionAId);
+    .get(stoppedFallback.turnId) as { session_id: string };
+  assert.equal(stoppedFallbackRow.session_id, sessionAId);
+  assert.throws(
+    () =>
+      environment.store.admitPrompt(
+        { ...stoppedFallbackIdentity, idempotencyKey: "strict-stopped" },
+        "strict stopped pinned session",
+        [],
+        sessionBId,
+        true,
+      ),
+    /active owned session/u,
+  );
 
   const missingFallbackIdentity: MessageIdentity = {
     endpoint,
     idempotencyKey: "pinned-missing-fallback",
     contentDigest: "digest-pinned-missing-fallback",
   };
-  const missingFallbackResult = environment.store.admitPrompt(
+  const missingFallback = environment.store.admitPrompt(
     missingFallbackIdentity,
     "prompt with missing pinned session",
     [],
     "session_nonexistent_123",
   );
-  assert.equal(missingFallbackResult.duplicate, false);
-
-  const turnRowMissingFallback = db
+  const missingFallbackRow = db
     .prepare("SELECT session_id FROM turns WHERE id = ?")
-    .get(missingFallbackResult.turnId) as { session_id: string };
-  assert.equal(turnRowMissingFallback.session_id, sessionAId);
+    .get(missingFallback.turnId) as { session_id: string };
+  assert.equal(missingFallbackRow.session_id, sessionAId);
 
   const defaultIdentity: MessageIdentity = {
     endpoint,

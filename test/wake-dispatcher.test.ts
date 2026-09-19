@@ -68,6 +68,12 @@ function setup() {
   const store = new HitchStore(foundation.database, sequence, sequence);
   const endpoint = store.resolveTelegramEndpoint("primary", "101", "101");
   assert.ok(endpoint !== null);
+  foundation.database.connection
+    .prepare(
+      `INSERT INTO sessions(id, user_id, name, pi_session_id, state, created_at, updated_at)
+       VALUES ('session_unbound', 'alice', 'unbound', 'pi_unbound', 'active', 1, 1)`,
+    )
+    .run();
   const wakeStore = new WakeStore(
     join(paths.dataRoot, "users", "alice", "schedules.json"),
   );

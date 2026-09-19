@@ -52,6 +52,7 @@ src/
   sandbox/      extension protocol and selected backend adapter
   media/        private blobs, inbox, publication snapshots
   delivery/     durable outbox and channel attempts
+  local/        optional authenticated Unix control + stdio MCP adapter
   main.ts       composition, health, and shutdown
 packages/
   hitch-sandbox-extension/  mandatory pinned Pi extension
@@ -342,3 +343,14 @@ Terminal text and artifacts enter the outbox before a channel send. One worker
 serializes each endpoint and rechecks its original tuple and owner. Attempts,
 chunking, expiry, and retry are bounded. An ambiguous channel response may
 duplicate delivery after restart, but can never duplicate an agent Turn.
+
+
+## Optional host-local control
+
+The approved [LOCAL-1 increment](local-control.md) routes a trusted external
+agent's stdio MCP calls through an owner-private authenticated Unix socket to
+the running application. Literal messages enter the existing outbox; scheduled
+notify/wake actions reuse WakeStore and the per-user queue. Static caller user
+and action allowlists and request receipts live at this boundary, not in a
+second sender or external SQLite writer. No listener exists unless configured;
+the adapter is not automatically exposed to model workspaces.

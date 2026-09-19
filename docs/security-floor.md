@@ -1,5 +1,11 @@
 # Trusted-personal MVP safety baseline
 
+> **2026-09-19 narrow scope amendment:** the operator-approved
+> [UX/local-notification increment](ux-notifications-plan.md) adds optional
+> host-only notification/scheduling control for trusted static callers. See
+> [local-control boundaries and enablement](local-control.md); it does not
+> authorize a public API, hostile tenants, or exactly-once unattended delivery.
+
 ## Threat model
 
 Hitch is an attended service for a few statically configured people personally

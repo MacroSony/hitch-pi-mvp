@@ -294,3 +294,131 @@ test("config validates optional strict boolean antigravity flag", () => {
     );
   }
 });
+
+test("config validates optional localControl callers strictly", () => {
+  assert.equal(parseConfig(validConfig()).localControl, undefined);
+
+  const configured = validConfig();
+  configured.localControl = {
+    callers: [
+      {
+        id: "operator",
+        tokenEnv: "HITCH_CONTROL_OPERATOR_TOKEN",
+        userIds: ["alice"],
+        actions: ["targets.list", "notify"],
+      },
+    ],
+  };
+  assert.deepEqual(
+    parseConfig(configured).localControl,
+    configured.localControl,
+  );
+
+  const invalid: unknown[] = [
+    { callers: [] },
+    {
+      callers: [
+        {
+          id: "operator",
+          tokenEnv: "raw-token-value",
+          userIds: ["alice"],
+          actions: ["notify"],
+        },
+      ],
+    },
+    {
+      callers: [
+        {
+          id: "operator",
+          tokenEnv: "HITCH_CONTROL_TOKEN",
+          userIds: ["bob"],
+          actions: ["notify"],
+        },
+      ],
+    },
+    {
+      callers: [
+        {
+          id: "operator",
+          tokenEnv: "HITCH_CONTROL_TOKEN",
+          userIds: [],
+          actions: ["notify"],
+        },
+      ],
+    },
+    {
+      callers: [
+        {
+          id: "operator",
+          tokenEnv: "HITCH_CONTROL_TOKEN",
+          userIds: ["alice"],
+          actions: [],
+        },
+      ],
+    },
+    {
+      callers: [
+        {
+          id: "operator",
+          tokenEnv: "HITCH_CONTROL_TOKEN",
+          userIds: ["alice"],
+          actions: ["notify", "notify"],
+        },
+      ],
+    },
+    {
+      callers: [
+        {
+          id: "operator",
+          tokenEnv: "HITCH_CONTROL_TOKEN",
+          userIds: ["alice"],
+          actions: ["not-a-method"],
+        },
+      ],
+    },
+    {
+      callers: [
+        {
+          id: "duplicate",
+          tokenEnv: "HITCH_CONTROL_TOKEN_A",
+          userIds: ["alice"],
+          actions: ["notify"],
+        },
+        {
+          id: "duplicate",
+          tokenEnv: "HITCH_CONTROL_TOKEN_B",
+          userIds: ["alice"],
+          actions: ["notify"],
+        },
+      ],
+    },
+    {
+      callers: [
+        {
+          id: "operator",
+          tokenEnv: "HITCH_CONTROL_TOKEN",
+          userIds: ["alice"],
+          actions: ["notify"],
+          extra: true,
+        },
+      ],
+    },
+  ];
+  for (const localControl of invalid) {
+    assert.throws(
+      () => parseConfig({ ...validConfig(), localControl }),
+      ConfigError,
+    );
+  }
+
+  const tooMany = validConfig();
+  tooMany.localControl = {
+    callers: Array.from({ length: 9 }, (_, index) => ({
+      id: `caller${index}`,
+      tokenEnv: `HITCH_CONTROL_TOKEN_${index}`,
+      userIds: ["alice"],
+      actions: ["notify"],
+    })),
+  };
+  assert.throws(() => parseConfig(tooMany), /at most 8/u);
+});

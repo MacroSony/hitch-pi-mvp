@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
 import { resolve, sep } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
@@ -71,7 +71,27 @@ export interface OutboxDelivery {
   readonly artifact?: RuntimeArtifact;
 }
 
-interface SessionRow {
+export interface LocalTarget {
+  readonly userId: string;
+  readonly endpoints: readonly {
+    readonly endpointId: string;
+    readonly channel: "telegram" | "wechat" | "wecom";
+  }[];
+  readonly sessions: readonly SessionRow[];
+}
+
+export interface LocalEndpoint {
+  readonly endpoint: EndpointContext;
+  readonly channel: "telegram" | "wechat" | "wecom";
+}
+
+export interface LocalRequestReceipt {
+  readonly digest: string;
+  readonly result: unknown;
+  readonly createdAt: number;
+}
+
+export interface SessionRow {
   readonly id: string;
   readonly name: string;
   readonly state: "active" | "stopped" | "quarantined";
@@ -342,6 +362,260 @@ export class HitchStore {
         };
   }
 
+  public localTargets(userIds: readonly string[]): readonly LocalTarget[] {
+    const targets: LocalTarget[] = [];
+    for (const userId of userIds) {
+      const user = this.#database
+        .prepare("SELECT 1 FROM users WHERE id = ? AND enabled = 1")
+        .get(userId);
+      if (user === undefined) continue;
+      const endpoints = this.#database
+        .prepare(
+          "SELECT id AS endpointId, kind AS channel FROM channel_endpoints WHERE user_id = ? AND enabled = 1 ORDER BY id",
+        )
+        .all(userId) as unknown as Array<{
+        endpointId: string;
+        channel: "telegram" | "wechat" | "wecom";
+      }>;
+      const sessions = this.#database
+        .prepare(
+          "SELECT id, name, state FROM sessions WHERE user_id = ? ORDER BY created_at, id",
+        )
+        .all(userId) as unknown as SessionRow[];
+      targets.push({ userId, endpoints, sessions });
+    }
+    return targets;
+  }
+
+  public localEndpointCandidates(userId: string): readonly LocalEndpoint[] {
+    return this.#database
+      .prepare(
+        `SELECT e.id, e.user_id, e.account_id, e.platform_user_id,
+                e.private_chat_id, e.kind
+         FROM channel_endpoints e
+         JOIN users u ON u.id = e.user_id
+         WHERE e.user_id = ? AND e.enabled = 1 AND u.enabled = 1
+         ORDER BY e.id`,
+      )
+      .all(userId)
+      .map((value) => {
+        const row = value as {
+          id: string;
+          user_id: string;
+          account_id: string;
+          platform_user_id: string;
+          private_chat_id: string | null;
+          kind: "telegram" | "wechat" | "wecom";
+        };
+        return {
+          channel: row.kind,
+          endpoint: {
+            id: row.id,
+            userId: row.user_id,
+            accountId: row.account_id,
+            platformUserId: row.platform_user_id,
+            privateChatId: row.private_chat_id ?? row.platform_user_id,
+          },
+        };
+      });
+  }
+
+  public endpointChannel(
+    endpointId: string,
+    userId: string,
+  ): "telegram" | "wechat" | "wecom" | null {
+    const row = this.#database
+      .prepare(
+        "SELECT kind FROM channel_endpoints WHERE id = ? AND user_id = ? AND enabled = 1",
+      )
+      .get(endpointId, userId) as
+      | { kind: "telegram" | "wechat" | "wecom" }
+      | undefined;
+    return row?.kind ?? null;
+  }
+
+  public localDeliveryState(
+    userId: string,
+    deliveryId: string,
+  ): { deliveryId: string; status: string } | null {
+    const row = this.#database
+      .prepare("SELECT id, state FROM outbox WHERE id = ? AND user_id = ?")
+      .get(deliveryId, userId) as { id: string; state: string } | undefined;
+    return row === undefined ? null : { deliveryId: row.id, status: row.state };
+  }
+
+  public localRequest(
+    callerId: string,
+    requestId: string,
+  ): LocalRequestReceipt | null {
+    const row = this.#database
+      .prepare(
+        "SELECT digest, result_json, created_at FROM local_requests WHERE caller_id = ? AND request_id = ?",
+      )
+      .get(callerId, requestId) as
+      | { digest: string; result_json: string; created_at: number }
+      | undefined;
+    if (row === undefined) return null;
+    let result: unknown;
+    try {
+      result = JSON.parse(row.result_json) as unknown;
+    } catch {
+      throw new AppError("internal-error", "local request receipt is invalid");
+    }
+    return { digest: row.digest, result, createdAt: row.created_at };
+  }
+
+  public assertLocalMutationAllowed(callerId: string): void {
+    transaction(this.#database, () => {
+      const since = this.clock.now() - 60_000;
+      const row = this.#database
+        .prepare(
+          "SELECT count(*) AS count FROM local_requests WHERE caller_id = ? AND created_at >= ?",
+        )
+        .get(callerId, since) as { count: bigint };
+      if (Number(row.count) >= 30)
+        throw new AppError("busy", "local mutation rate limit reached");
+    });
+  }
+
+  public recordLocalMutation(
+    callerId: string,
+    requestId: string,
+    digest: string,
+    result: unknown,
+  ): { result: unknown; duplicate: boolean } {
+    return transaction(this.#database, () => {
+      const existing = this.localRequest(callerId, requestId);
+      if (existing !== null) {
+        if (existing.digest !== digest)
+          throw new AppError("rejected", "local request id was reused");
+        return { result: existing.result, duplicate: true };
+      }
+      const now = this.clock.now();
+      this.#database
+        .prepare(
+          "INSERT INTO local_requests(caller_id, request_id, digest, result_json, created_at) VALUES (?, ?, ?, ?, ?)",
+        )
+        .run(callerId, requestId, digest, JSON.stringify(result), now);
+      return { result, duplicate: false };
+    });
+  }
+
+  public localNotify(
+    callerId: string,
+    requestId: string,
+    digest: string,
+    userId: string,
+    endpointId: string,
+    text: string,
+  ): { result: { deliveryId: string; status: "queued" }; duplicate: boolean } {
+    return transaction(this.#database, () => {
+      const existing = this.localRequest(callerId, requestId);
+      if (existing !== null) {
+        if (existing.digest !== digest)
+          throw new AppError("rejected", "local request id was reused");
+        return {
+          result: existing.result as { deliveryId: string; status: "queued" },
+          duplicate: true,
+        };
+      }
+      const endpoint = this.#database
+        .prepare(
+          `SELECT 1 FROM channel_endpoints e JOIN users u ON u.id = e.user_id
+           WHERE e.id = ? AND e.user_id = ? AND e.enabled = 1 AND u.enabled = 1`,
+        )
+        .get(endpointId, userId);
+      if (endpoint === undefined)
+        throw new AppError(
+          "rejected",
+          "local notification endpoint is unavailable",
+        );
+      this.admissionGuard(userId);
+      const deliveryId = this.#insertOutbox(userId, endpointId, null, text);
+      const result = { deliveryId, status: "queued" as const };
+      this.#database
+        .prepare(
+          "INSERT INTO local_requests(caller_id, request_id, digest, result_json, created_at) VALUES (?, ?, ?, ?, ?)",
+        )
+        .run(
+          callerId,
+          requestId,
+          digest,
+          JSON.stringify(result),
+          this.clock.now(),
+        );
+      return { result, duplicate: false };
+    });
+  }
+
+  public getLocalScheduleId(
+    callerId: string,
+    requestId: string,
+    _digest?: string,
+  ): string {
+    const hash = BigInt(
+      `0x${createHash("sha256").update(`${callerId}\0${requestId}`).digest("hex")}`,
+    )
+      .toString(36)
+      .padStart(8, "0");
+    return `wk_${hash.slice(0, 8)}`;
+  }
+
+  public enqueueScheduledNotice(
+    scheduleId: string,
+    slotIso: string,
+    userId: string,
+    endpointId: string,
+    text: string,
+  ): { deliveryId: string; status: "queued"; duplicate: boolean } {
+    return transaction(this.#database, () => {
+      const deliveryId = `schedule_${createHash("sha256")
+        .update(`${userId}\0${endpointId}\0${scheduleId}\0${slotIso}`)
+        .digest("hex")
+        .slice(0, 24)}`;
+      const expectedText = boundedText(text);
+      const existing = this.#database
+        .prepare(
+          "SELECT user_id, endpoint_id, kind, payload_text, state FROM outbox WHERE id = ?",
+        )
+        .get(deliveryId) as
+        | {
+            user_id: string;
+            endpoint_id: string;
+            kind: string;
+            payload_text: string | null;
+            state: string;
+          }
+        | undefined;
+      if (existing !== undefined) {
+        if (
+          existing.user_id !== userId ||
+          existing.endpoint_id !== endpointId ||
+          existing.kind !== "text" ||
+          existing.payload_text !== expectedText
+        ) {
+          throw new AppError("rejected", "scheduled notification id collision");
+        }
+        return { deliveryId, status: "queued", duplicate: true };
+      }
+      this.admissionGuard(userId);
+      this.#database
+        .prepare(
+          `INSERT INTO outbox(id, user_id, endpoint_id, turn_id, kind, payload_text, state, attempts, created_at, updated_at)
+           VALUES (?, ?, ?, NULL, 'text', ?, 'pending', 0, ?, ?)`,
+        )
+        .run(
+          deliveryId,
+          userId,
+          endpointId,
+          boundedText(text),
+          this.clock.now(),
+          this.clock.now(),
+        );
+      return { deliveryId, status: "queued", duplicate: false };
+    });
+  }
+
   public getTelegramOffset(accountId: string): number {
     const row = this.#database
       .prepare("SELECT value FROM app_meta WHERE key = ?")
@@ -550,19 +824,45 @@ export class HitchStore {
     prompt: string,
     artifacts: readonly RuntimeArtifact[] = [],
     pinnedSessionId?: string,
+    requirePinnedSession = false,
   ): AdmissionResult {
     return transaction(this.#database, () => {
       const existing = this.#existingMessage(identity);
       if (existing !== null) return { ...existing, duplicate: true };
       this.admissionGuard(identity.endpoint.userId);
-      const session =
-        (pinnedSessionId !== undefined
-          ? this.#pinnedSession(pinnedSessionId, identity.endpoint.userId)
-          : null) ??
-        this.#ensurePromptSession(
+      let session: SessionRow;
+      if (pinnedSessionId !== undefined) {
+        const pinned = this.#pinnedSession(
+          pinnedSessionId,
+          identity.endpoint.userId,
+        );
+        if (pinned === null && requirePinnedSession)
+          throw new AppError(
+            "rejected",
+            "scheduled session is not an active owned session",
+          );
+        const row =
+          pinned === null
+            ? null
+            : (this.#database
+                .prepare(
+                  "SELECT id, name, state FROM sessions WHERE id = ? AND user_id = ?",
+                )
+                .get(pinned.id, identity.endpoint.userId) as
+                | SessionRow
+                | undefined);
+        session =
+          row ??
+          this.#ensurePromptSession(
+            identity.endpoint.id,
+            identity.endpoint.userId,
+          );
+      } else {
+        session = this.#ensurePromptSession(
           identity.endpoint.id,
           identity.endpoint.userId,
         );
+      }
       const capacity = this.#database
         .prepare(
           "SELECT count(*) AS count FROM turns WHERE user_id = ? AND state IN ('queued', 'starting', 'running')",
@@ -646,23 +946,17 @@ export class HitchStore {
     endpointId: string,
     turnId: string | null,
     text: string,
-  ): void {
+  ): string {
     const now = this.clock.now();
+    const id = this.ids.next("outbox");
     this.#database
       .prepare(
         `INSERT INTO outbox(
            id, user_id, endpoint_id, turn_id, kind, payload_text, state, attempts, created_at, updated_at
          ) VALUES (?, ?, ?, ?, 'text', ?, 'pending', 0, ?, ?)`,
       )
-      .run(
-        this.ids.next("outbox"),
-        userId,
-        endpointId,
-        turnId,
-        boundedText(text),
-        now,
-        now,
-      );
+      .run(id, userId, endpointId, turnId, boundedText(text), now, now);
+    return id;
   }
 
   #insertArtifactOutbox(

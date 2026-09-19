@@ -146,6 +146,10 @@ test("mutations: remove, setEnabled, recordFire", () => {
     let updated = store.get(schedule.id);
     assert.equal(updated?.fireCount, 1);
     assert.equal(updated?.lastFiredAt, firedIso);
+    assert.deepEqual(updated?.lastOutcome, {
+      status: "uncertain",
+      at: firedIso,
+    });
 
     // recordFire second time
     const firedIso2 = "2026-04-02T07:00:00.000Z";
@@ -556,6 +560,53 @@ test("recordSkip updates lastFiredAt without incrementing fireCount and rejects 
       /corrupted/,
     );
     assert.equal(readFileSync(filePath, "utf8"), corruptedContent);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("origin and outcome fields validate strictly", () => {
+  const dir = createTempDir();
+  try {
+    const filePath = join(dir, "wake.json");
+    const store = new WakeStore(filePath);
+    const schedule = store.add({
+      ownerId: "alice",
+      channel: "telegram",
+      endpointId: "ep_1",
+      sessionId: "sess_1",
+      promptTemplate: "Prompt",
+      recurrence: { kind: "daily" },
+      timeOfDay: "09:00",
+      timezone: "UTC",
+      enabled: true,
+      maxFires: null,
+      until: null,
+    });
+    const raw = JSON.parse(readFileSync(filePath, "utf8")) as Record<
+      string,
+      unknown
+    >;
+    const item = (raw.schedules as Array<Record<string, unknown>>)[0]!;
+    item.origin = {
+      callerId: "caller",
+      requestId: "request",
+      digest: "0".repeat(64),
+      extra: true,
+    };
+    writeFileSync(filePath, JSON.stringify(raw) + "\n", "utf8");
+    assert.notEqual(store.fileError, null);
+    assert.equal(store.get(schedule.id), undefined);
+
+    const valid = JSON.parse(readFileSync(filePath, "utf8")) as Record<
+      string,
+      unknown
+    >;
+    const validItem = (valid.schedules as Array<Record<string, unknown>>)[0]!;
+    delete validItem.origin;
+    validItem.lastOutcome = { status: "uncertain", at: "not-a-date" };
+    writeFileSync(filePath, JSON.stringify(valid) + "\n", "utf8");
+    assert.notEqual(store.fileError, null);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

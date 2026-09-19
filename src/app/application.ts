@@ -156,6 +156,7 @@ export class HitchApplication {
   readonly #controllers = new Map<string, AbortController>();
   readonly #pumps = new Map<string, Promise<void>>();
   readonly #wakeStores = new Map<string, WakeStore>();
+  readonly #wakeUsers: Set<string>;
   #wakeTimer: NodeJS.Timeout | null = null;
   #started = false;
   #stopping = false;
@@ -171,7 +172,20 @@ export class HitchApplication {
     readonly wakeUserIds: readonly string[] = [],
     readonly wakeTickMs: number = WAKE_TICK_MS,
     readonly wakeGraceMs: number = WAKE_GRACE_MS,
-  ) {}
+  ) {
+    this.#wakeUsers = new Set(wakeUserIds);
+  }
+
+  public registerWakeUser(userId: string): void {
+    this.#wakeUsers.add(userId);
+  }
+
+  public localWakeStore(userId: string): WakeStore {
+    this.registerWakeUser(userId);
+    const store = this.#getWakeStore(userId);
+    store.reloadIfChanged();
+    return store;
+  }
 
   #resolveUserStateDir(userId: string): string {
     if (typeof this.userStateDir === "function") {
@@ -310,7 +324,7 @@ export class HitchApplication {
     this.#started = true;
     for (const userId of this.store.recoverAfterRestart())
       this.#schedule(userId);
-    if (this.wakeUserIds.length > 0) {
+    if (this.#wakeUsers.size > 0) {
       try {
         this.runWakeTick();
       } catch (error) {
@@ -667,7 +681,7 @@ export class HitchApplication {
   }
 
   public runWakeTick(nowMs: number = Date.now()): void {
-    for (const userId of this.wakeUserIds) {
+    for (const userId of this.#wakeUsers) {
       let wakeStore: WakeStore;
       try {
         wakeStore = this.#getWakeStore(userId);
@@ -683,7 +697,7 @@ export class HitchApplication {
         continue;
       }
       for (const schedule of wakeStore.list(userId)) {
-        if (!schedule.enabled) continue;
+        if (!schedule.enabled || schedule.cancelled === true) continue;
         this.#fireDueSlots(wakeStore, schedule, nowMs);
       }
     }
@@ -702,6 +716,10 @@ export class HitchApplication {
       if (nowMs - slot > this.wakeGraceMs) {
         try {
           wakeStore.recordSkip(schedule.id, slotIso);
+          wakeStore.recordOutcome(schedule.id, {
+            status: "skipped",
+            at: new Date(nowMs).toISOString(),
+          });
         } catch (error) {
           this.#wakeError(`wake ${schedule.id} skip failed`, error);
           return;
@@ -712,7 +730,11 @@ export class HitchApplication {
       // Record before dispatch: a crash here loses one fire instead of
       // re-sending a scheduled message after restart.
       try {
-        wakeStore.recordFire(schedule.id, slotIso);
+        wakeStore.recordFire(
+          schedule.id,
+          slotIso,
+          new Date(this.store.clock.now()).toISOString(),
+        );
       } catch (error) {
         this.#wakeError(`wake ${schedule.id} record failed`, error);
         return;
@@ -727,23 +749,43 @@ export class HitchApplication {
 
   #dispatchWake(schedule: WakeSchedule, slotMs: number, slotIso: string): void {
     const endpoint = this.store.endpointContext(schedule.endpointId);
-    if (endpoint === null) {
-      process.stderr.write(
-        `wake ${schedule.id}: endpoint unavailable; fire recorded but not delivered\n`,
-      );
+    const channel = this.store.endpointChannel(
+      schedule.endpointId,
+      schedule.ownerId,
+    );
+    if (
+      endpoint === null ||
+      endpoint.userId !== schedule.ownerId ||
+      channel !== schedule.channel
+    ) {
+      this.#recordScheduleOutcome(schedule, { status: "failed" });
       return;
     }
-    const prompt = renderWakeTemplate(
-      schedule.promptTemplate,
-      schedule.timezone,
-      slotMs,
-    );
-    const identity: MessageIdentity = {
-      endpoint,
-      idempotencyKey: `wake:${schedule.id}:${slotIso}`,
-      contentDigest: createHash("sha256").update(prompt).digest("hex"),
-    };
     try {
+      if ((schedule.action ?? "wake") === "notify") {
+        const delivery = this.store.enqueueScheduledNotice(
+          schedule.id,
+          slotIso,
+          schedule.ownerId,
+          schedule.endpointId,
+          schedule.promptTemplate,
+        );
+        this.#recordScheduleOutcome(schedule, {
+          status: "queued",
+          deliveryId: delivery.deliveryId,
+        });
+        return;
+      }
+      const prompt = renderWakeTemplate(
+        schedule.promptTemplate,
+        schedule.timezone,
+        slotMs,
+      );
+      const identity: MessageIdentity = {
+        endpoint,
+        idempotencyKey: `wake:${schedule.id}:${slotIso}`,
+        contentDigest: createHash("sha256").update(prompt).digest("hex"),
+      };
       const pinnedSessionId =
         schedule.freshSession === true
           ? this.store.resetSessionPiStateForWake(
@@ -751,10 +793,44 @@ export class HitchApplication {
               schedule.ownerId,
             ).id
           : schedule.sessionId;
-      this.store.admitPrompt(identity, prompt, [], pinnedSessionId);
+      const admitted = this.store.admitPrompt(
+        identity,
+        prompt,
+        [],
+        pinnedSessionId,
+        schedule.origin !== undefined,
+      );
+      this.#recordScheduleOutcome(schedule, {
+        status: "queued",
+        turnId: admitted.turnId,
+      });
       this.#schedule(schedule.ownerId);
     } catch (error) {
+      const status =
+        error instanceof AppError && error.category === "busy"
+          ? "skipped"
+          : "failed";
+      this.#recordScheduleOutcome(schedule, { status });
       this.#wakeError(`wake ${schedule.id} dispatch failed`, error);
+    }
+  }
+
+  #recordScheduleOutcome(
+    schedule: WakeSchedule,
+    outcome: {
+      status: "queued" | "skipped" | "failed" | "uncertain";
+      turnId?: string;
+      deliveryId?: string;
+    },
+  ): void {
+    try {
+      const store = this.#getWakeStore(schedule.ownerId);
+      store.recordOutcome(schedule.id, {
+        ...outcome,
+        at: new Date(this.store.clock.now()).toISOString(),
+      });
+    } catch (error) {
+      this.#wakeError(`wake ${schedule.id} outcome failed`, error);
     }
   }
 

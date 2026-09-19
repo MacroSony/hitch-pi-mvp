@@ -22,6 +22,7 @@ This repository is a fresh, narrow rewrite started from the product boundary. It
 - [Luna implementation handoff](LUNA_HANDOFF.md)
 - [Operator install, recovery, and reset guide](docs/operator-guide.md)
 - [MVP acceptance record](docs/mvp-acceptance.md)
+- [Optional host-only notification/scheduling MCP](docs/local-control.md)
 
 The durable foundation, Telegram, WeChat, and Enterprise WeChat private-peer paths, native
 Pi/Bubblewrap runtime, bounded media, and artifact outbox are implemented. Enterprise WeChat is a text-only, single-chat MVP.

@@ -9,12 +9,13 @@ import {
   type ValidatedTopology,
 } from "./filesystem.js";
 
-const SCHEMA_VERSION = 7;
-const SCHEMA_ID = "hitch-pi-mvp-schema-7";
+const SCHEMA_VERSION = 8;
+const SCHEMA_ID = "hitch-pi-mvp-schema-8";
 const EXPECTED_TABLES = [
   "app_meta",
   "artifacts",
   "channel_endpoints",
+  "local_requests",
   "outbox",
   "sessions",
   "staged_artifacts",
@@ -182,6 +183,16 @@ CREATE INDEX turns_user_state_ordinal ON turns(user_id, state, ordinal);
 CREATE INDEX outbox_endpoint_state ON outbox(endpoint_id, state, created_at);
 CREATE INDEX artifacts_user_created ON artifacts(user_id, created_at);
 CREATE INDEX staged_artifacts_user_created ON staged_artifacts(user_id, created_at);
+
+CREATE TABLE local_requests (
+  caller_id TEXT NOT NULL,
+  request_id TEXT NOT NULL,
+  digest TEXT NOT NULL CHECK (length(digest) = 64 AND digest NOT GLOB '*[^0-9a-f]*'),
+  result_json TEXT NOT NULL CHECK (json_valid(result_json)),
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (caller_id, request_id)
+) STRICT;
+CREATE INDEX local_requests_caller_created ON local_requests(caller_id, created_at);
 `;
 
 const MIGRATE_2_TO_3 = `
@@ -277,11 +288,25 @@ SELECT id, user_id, session_id, endpoint_id, idempotency_key, content_digest,
 FROM turns;
 DROP TABLE turns;
 ALTER TABLE turns_new RENAME TO turns;
+CREATE INDEX turns_user_state_ordinal ON turns(user_id, state, ordinal);
 `;
 
 const MIGRATE_6_TO_7 = `
 ALTER TABLE sessions ADD COLUMN context_usage TEXT
   CHECK (context_usage IS NULL OR json_valid(context_usage));
+`;
+
+const MIGRATE_7_TO_8 = `
+CREATE TABLE local_requests (
+  caller_id TEXT NOT NULL,
+  request_id TEXT NOT NULL,
+  digest TEXT NOT NULL CHECK (length(digest) = 64 AND digest NOT GLOB '*[^0-9a-f]*'),
+  result_json TEXT NOT NULL CHECK (json_valid(result_json)),
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (caller_id, request_id)
+) STRICT;
+CREATE INDEX IF NOT EXISTS local_requests_caller_created ON local_requests(caller_id, created_at);
+CREATE INDEX IF NOT EXISTS turns_user_state_ordinal ON turns(user_id, state, ordinal);
 `;
 
 const MIGRATE_1_TO_2 = `
@@ -450,6 +475,7 @@ function verifySchema(connection: DatabaseSync): void {
       connection.exec(MIGRATE_4_TO_5);
       connection.exec(MIGRATE_5_TO_6);
       connection.exec(MIGRATE_6_TO_7);
+      connection.exec(MIGRATE_7_TO_8);
       connection
         .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
         .run(SCHEMA_ID, "schema_id");
@@ -480,6 +506,7 @@ function verifySchema(connection: DatabaseSync): void {
       connection.exec(MIGRATE_4_TO_5);
       connection.exec(MIGRATE_5_TO_6);
       connection.exec(MIGRATE_6_TO_7);
+      connection.exec(MIGRATE_7_TO_8);
       connection
         .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
         .run(SCHEMA_ID, "schema_id");
@@ -509,6 +536,7 @@ function verifySchema(connection: DatabaseSync): void {
       connection.exec(MIGRATE_4_TO_5);
       connection.exec(MIGRATE_5_TO_6);
       connection.exec(MIGRATE_6_TO_7);
+      connection.exec(MIGRATE_7_TO_8);
       connection
         .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
         .run(SCHEMA_ID, "schema_id");
@@ -530,6 +558,7 @@ function verifySchema(connection: DatabaseSync): void {
       connection.exec(MIGRATE_4_TO_5);
       connection.exec(MIGRATE_5_TO_6);
       connection.exec(MIGRATE_6_TO_7);
+      connection.exec(MIGRATE_7_TO_8);
       connection
         .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
         .run(SCHEMA_ID, "schema_id");
@@ -552,6 +581,7 @@ function verifySchema(connection: DatabaseSync): void {
     try {
       connection.exec(MIGRATE_5_TO_6);
       connection.exec(MIGRATE_6_TO_7);
+      connection.exec(MIGRATE_7_TO_8);
       connection
         .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
         .run(SCHEMA_ID, "schema_id");
@@ -578,6 +608,7 @@ function verifySchema(connection: DatabaseSync): void {
     connection.exec("BEGIN IMMEDIATE");
     try {
       connection.exec(MIGRATE_6_TO_7);
+      connection.exec(MIGRATE_7_TO_8);
       connection
         .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
         .run(SCHEMA_ID, "schema_id");
@@ -589,6 +620,24 @@ function verifySchema(connection: DatabaseSync): void {
       throw error;
     }
     connection.exec("PRAGMA foreign_keys = ON");
+  } else if (version === 7) {
+    const schemaId = connection
+      .prepare("SELECT value FROM app_meta WHERE key = 'schema_id'")
+      .get() as { value: string } | undefined;
+    if (schemaId?.value !== "hitch-pi-mvp-schema-7")
+      throw new FoundationError("database schema 7 identity is unknown");
+    connection.exec("BEGIN IMMEDIATE");
+    try {
+      connection.exec(MIGRATE_7_TO_8);
+      connection
+        .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
+        .run(SCHEMA_ID, "schema_id");
+      connection.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+      connection.exec("COMMIT");
+    } catch (error) {
+      connection.exec("ROLLBACK");
+      throw error;
+    }
   } else if (version !== SCHEMA_VERSION) {
     throw new FoundationError(
       `unsupported database schema version: ${version}`,

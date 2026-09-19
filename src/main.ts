@@ -17,6 +17,8 @@ import { WeChatStateStore } from "./channels/wechat-state.js";
 import { loadConfig, readRequiredSecret } from "./config/config.js";
 import { bootstrapFoundation } from "./foundation/bootstrap.js";
 import { createForgeCatalog } from "./forge/catalog.js";
+import { createLocalHandler } from "./local/control.js";
+import { controlSocketPath, LocalControlServer } from "./local/socket.js";
 import { NativePiRuntime } from "./pi/native-runtime.js";
 import { MediaStore } from "./media/media-store.js";
 import { FakeAgentRuntime, type AgentRuntime } from "./runtime/runtime.js";
@@ -70,6 +72,7 @@ async function main(): Promise<void> {
   const cli = options(process.argv.slice(2));
   const config = loadConfig(cli.configPath);
   const foundation = bootstrapFoundation(config);
+  let localServer: LocalControlServer | undefined;
   try {
     const forge =
       config.forge !== undefined && config.forge.enabledUsers.length > 0
@@ -212,15 +215,34 @@ async function main(): Promise<void> {
         ),
     );
     const workers = [...telegramWorkers, ...wechatWorkers, ...wecomWorkers];
-    application.start();
     const shutdown = new AbortController();
+    let stoppedBySignal = false;
+    let localClosePromise: Promise<void> | null = null;
+    const closeLocalServer = (): Promise<void> => {
+      if (localServer === undefined) return Promise.resolve();
+      localClosePromise ??= localServer.close();
+      return localClosePromise;
+    };
     const stop = (): void => {
+      stoppedBySignal = true;
       shutdown.abort();
       application.stop();
+      void closeLocalServer().catch(() => undefined);
     };
     process.once("SIGINT", stop);
     process.once("SIGTERM", stop);
     try {
+      if (config.localControl !== undefined) {
+        const server = new LocalControlServer({
+          socketPath: controlSocketPath(foundation.topology.dataRoot.path),
+          callers: config.localControl.callers,
+          handler: createLocalHandler(store, application),
+        });
+        localServer = server;
+        await server.listen();
+      }
+      if (shutdown.signal.aborted) return;
+      application.start();
       process.stdout.write(
         `${JSON.stringify({
           status: "running",
@@ -229,16 +251,24 @@ async function main(): Promise<void> {
             ? { catalogDigest: runtime.catalogDigest }
             : {}),
           users: foundation.topology.users.length,
-          telegramAccounts: telegramWorkers.length,
-          wechatAccounts: wechatWorkers.length,
-          wecomAccounts: wecomWorkers.length,
+          telegramAccounts: config.telegramAccounts.length,
+          wechatAccounts: config.wechatAccounts.length,
+          wecomAccounts: config.wecomAccounts.length,
         })}\n`,
       );
       await Promise.all(workers.map((worker) => worker.run(shutdown.signal)));
+      application.stop();
       await application.drain();
+    } catch (error) {
+      shutdown.abort();
+      application.stop();
+      await application.drain();
+      if (stoppedBySignal) return;
+      throw error;
     } finally {
       process.removeListener("SIGINT", stop);
       process.removeListener("SIGTERM", stop);
+      await closeLocalServer();
     }
   } finally {
     foundation.close();

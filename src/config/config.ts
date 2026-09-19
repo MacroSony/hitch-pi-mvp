@@ -1,7 +1,15 @@
 import { readFileSync, statSync } from "node:fs";
 import { isAbsolute, normalize } from "node:path";
 
+import { LOCAL_METHODS } from "../local/types.js";
+import type {
+  LocalCallerConfig,
+  LocalControlConfig,
+  LocalMethod,
+} from "../local/types.js";
+
 const MAX_CONFIG_BYTES = 1024 * 1024;
+const MAX_LOCAL_CONTROL_CALLERS = 8;
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
 const ENV_PATTERN = /^[A-Z][A-Z0-9_]{0,127}$/u;
 const CONTROL_PATTERN = /[\u0000-\u001f\u007f]/u;
@@ -79,6 +87,7 @@ export interface AppConfig {
   readonly webSearch?: WebSearchConfig;
   readonly forge?: ForgeConfig;
   readonly antigravity?: boolean;
+  readonly localControl?: LocalControlConfig;
 }
 
 export class ConfigError extends Error {
@@ -241,6 +250,53 @@ function parseWeComEndpoint(value: unknown, path: string): WeComEndpointConfig {
   };
 }
 
+function parseLocalCaller(
+  value: unknown,
+  index: number,
+  knownUserIds: ReadonlySet<string>,
+): LocalCallerConfig {
+  const path = `config.localControl.callers[${index}]`;
+  const input = record(value, path);
+  exactKeys(input, ["id", "tokenEnv", "userIds", "actions"], [], path);
+
+  const id = identifier(input.id, `${path}.id`);
+  const tokenEnv = stringValue(input.tokenEnv, `${path}.tokenEnv`, 128);
+  if (!ENV_PATTERN.test(tokenEnv)) {
+    fail(
+      `${path}.tokenEnv`,
+      "must name an uppercase environment variable, not contain a raw token",
+    );
+  }
+
+  const rawUserIds = arrayValue(input.userIds, `${path}.userIds`);
+  if (rawUserIds.length === 0)
+    fail(`${path}.userIds`, "must contain at least one user");
+  const userIds = rawUserIds.map((item, userIndex) =>
+    identifier(item, `${path}.userIds[${userIndex}]`),
+  );
+  unique(userIds, `${path}.userIds`);
+  for (const userId of userIds) {
+    if (!knownUserIds.has(userId)) {
+      fail(`${path}.userIds`, `references an unknown user: ${userId}`);
+    }
+  }
+
+  const rawActions = arrayValue(input.actions, `${path}.actions`);
+  if (rawActions.length === 0)
+    fail(`${path}.actions`, "must contain at least one action");
+  const knownMethods = new Set<string>(LOCAL_METHODS);
+  const actions = rawActions.map((item, actionIndex) => {
+    const method = stringValue(item, `${path}.actions[${actionIndex}]`, 64);
+    if (!knownMethods.has(method)) {
+      fail(`${path}.actions[${actionIndex}]`, "is not a local control method");
+    }
+    return method as LocalMethod;
+  });
+  unique(actions, `${path}.actions`);
+
+  return { id, tokenEnv, userIds, actions };
+}
+
 function parseUser(value: unknown, index: number): UserConfig {
   const path = `config.users[${index}]`;
   const input = record(value, path);
@@ -294,6 +350,7 @@ export function parseConfig(value: unknown): AppConfig {
       "webSearch",
       "forge",
       "antigravity",
+      "localControl",
     ],
     "config",
   );
@@ -478,6 +535,33 @@ export function parseConfig(value: unknown): AppConfig {
     };
   }
 
+  let localControl: LocalControlConfig | undefined;
+  if (input.localControl !== undefined) {
+    const control = record(input.localControl, "config.localControl");
+    exactKeys(control, ["callers"], [], "config.localControl");
+    const rawCallers = arrayValue(
+      control.callers,
+      "config.localControl.callers",
+    );
+    if (rawCallers.length === 0)
+      fail("config.localControl.callers", "must contain at least one caller");
+    if (rawCallers.length > MAX_LOCAL_CONTROL_CALLERS) {
+      fail(
+        "config.localControl.callers",
+        `must contain at most ${MAX_LOCAL_CONTROL_CALLERS} callers`,
+      );
+    }
+    const knownUserIds = new Set(users.map((user) => user.id));
+    const callers = rawCallers.map((item, index) =>
+      parseLocalCaller(item, index, knownUserIds),
+    );
+    unique(
+      callers.map((caller) => caller.id),
+      "config.localControl.callers",
+    );
+    localControl = { callers };
+  }
+
   let antigravity: boolean | undefined;
   if (input.antigravity !== undefined) {
     if (typeof input.antigravity !== "boolean") {
@@ -500,6 +584,7 @@ export function parseConfig(value: unknown): AppConfig {
     ...(webSearch === undefined ? {} : { webSearch }),
     ...(forge === undefined ? {} : { forge }),
     antigravity: antigravity ?? false,
+    ...(localControl === undefined ? {} : { localControl }),
   };
 }
 

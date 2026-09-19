@@ -1,6 +1,10 @@
 import { randomInt, randomUUID } from "node:crypto";
 import {
+  chmodSync,
+  closeSync,
+  fsyncSync,
   mkdirSync,
+  openSync,
   readFileSync,
   renameSync,
   statSync,
@@ -61,6 +65,28 @@ function isValidIsoDate(iso: unknown): iso is string {
   }
   const timestamp = Date.parse(iso);
   return !Number.isNaN(timestamp);
+}
+
+function isValidOutcomeDate(iso: unknown): iso is string {
+  return (
+    typeof iso === "string" &&
+    Buffer.byteLength(iso, "utf8") <= 64 &&
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?(?:Z|[+-]\d{2}:\d{2})$/u.test(
+      iso,
+    ) &&
+    isValidIsoDate(iso)
+  );
+}
+
+function boundedNonEmptyString(
+  value: unknown,
+  maximumBytes: number,
+): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    Buffer.byteLength(value, "utf8") <= maximumBytes
+  );
 }
 
 function isValidRecurrence(rec: unknown): rec is WakeRecurrence {
@@ -126,7 +152,13 @@ const SCHEDULE_REQUIRED_KEYS = new Set([
 ]);
 
 // Optional fields may be absent (older files) but are validated when present.
-const SCHEDULE_OPTIONAL_KEYS = new Set(["freshSession"]);
+const SCHEDULE_OPTIONAL_KEYS = new Set([
+  "action",
+  "cancelled",
+  "freshSession",
+  "origin",
+  "lastOutcome",
+]);
 
 const SCHEDULE_ALLOWED_KEYS = new Set([
   ...SCHEDULE_REQUIRED_KEYS,
@@ -242,11 +274,19 @@ function validateStoreData(data: unknown): ValidationResult {
       };
     }
 
+    const action = scheduleObj.action ?? "wake";
+    if (action !== "notify" && action !== "wake") {
+      return { ok: false, error: "Schedule action must be notify or wake" };
+    }
     const sessionId = scheduleObj.sessionId;
-    if (typeof sessionId !== "string" || sessionId.length === 0) {
+    if (
+      typeof sessionId !== "string" ||
+      (action === "wake" && sessionId.length === 0)
+    ) {
       return {
         ok: false,
-        error: "Schedule sessionId must be a non-empty string",
+        error:
+          "Schedule sessionId must be a non-empty string for wake schedules",
       };
     }
 
@@ -283,6 +323,63 @@ function validateStoreData(data: unknown): ValidationResult {
       return { ok: false, error: "Schedule enabled must be a boolean" };
     }
 
+    const cancelled = scheduleObj.cancelled ?? false;
+    if (typeof cancelled !== "boolean") {
+      return { ok: false, error: "Schedule cancelled must be a boolean" };
+    }
+    if (cancelled && enabled) {
+      return { ok: false, error: "Cancelled schedules cannot be enabled" };
+    }
+    const origin = scheduleObj.origin;
+    if (origin !== undefined) {
+      if (
+        typeof origin !== "object" ||
+        origin === null ||
+        Array.isArray(origin)
+      ) {
+        return { ok: false, error: "Invalid schedule origin" };
+      }
+      const originRecord = origin as Record<string, unknown>;
+      const originKeys = Object.keys(originRecord).sort();
+      if (
+        originKeys.join(",") !== "callerId,digest,requestId" ||
+        !boundedNonEmptyString(originRecord.callerId, 128) ||
+        !boundedNonEmptyString(originRecord.requestId, 128) ||
+        typeof originRecord.digest !== "string" ||
+        !/^[0-9a-f]{64}$/u.test(originRecord.digest)
+      ) {
+        return { ok: false, error: "Invalid schedule origin" };
+      }
+    }
+    const lastOutcome = scheduleObj.lastOutcome;
+    if (lastOutcome !== undefined && lastOutcome !== null) {
+      if (typeof lastOutcome !== "object" || Array.isArray(lastOutcome)) {
+        return { ok: false, error: "Invalid schedule lastOutcome" };
+      }
+      const outcomeRecord = lastOutcome as Record<string, unknown>;
+      const outcomeKeys = Object.keys(outcomeRecord).sort();
+      const allowedOutcomeKeys = new Set([
+        "at",
+        "deliveryId",
+        "status",
+        "turnId",
+      ]);
+      if (
+        outcomeKeys.some((key) => !allowedOutcomeKeys.has(key)) ||
+        !outcomeKeys.includes("status") ||
+        !outcomeKeys.includes("at") ||
+        !["queued", "skipped", "failed", "uncertain"].includes(
+          outcomeRecord.status as string,
+        ) ||
+        !isValidOutcomeDate(outcomeRecord.at) ||
+        (outcomeRecord.turnId !== undefined &&
+          !boundedNonEmptyString(outcomeRecord.turnId, 256)) ||
+        (outcomeRecord.deliveryId !== undefined &&
+          !boundedNonEmptyString(outcomeRecord.deliveryId, 256))
+      ) {
+        return { ok: false, error: "Invalid schedule lastOutcome" };
+      }
+    }
     const freshSession = scheduleObj.freshSession;
     if (freshSession !== undefined && typeof freshSession !== "boolean") {
       return { ok: false, error: "Schedule freshSession must be a boolean" };
@@ -342,13 +439,27 @@ function validateStoreData(data: unknown): ValidationResult {
       ownerId,
       channel,
       endpointId,
-      sessionId,
+      ...(action === "wake" || sessionId.length > 0
+        ? { sessionId }
+        : { sessionId: "" }),
+      ...(scheduleObj.action === undefined ? {} : { action }),
       promptTemplate,
       recurrence: scheduleObj.recurrence as WakeRecurrence,
       timeOfDay,
       timezone,
       enabled,
+      ...(cancelled ? { cancelled: true } : {}),
       ...(freshSession === undefined ? {} : { freshSession }),
+      ...(origin === undefined
+        ? {}
+        : { origin: origin as NonNullable<WakeSchedule["origin"]> }),
+      ...(lastOutcome === undefined
+        ? {}
+        : {
+            lastOutcome: lastOutcome as NonNullable<
+              WakeSchedule["lastOutcome"]
+            >,
+          }),
       maxFires,
       until,
       fireCount,
@@ -467,7 +578,7 @@ export class WakeStore {
 
   #writeToDisk(): void {
     const dir = dirname(this.#filePath);
-    mkdirSync(dir, { recursive: true });
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
     const tmpPath = join(
       dir,
       `.${basename(this.#filePath)}.${randomUUID()}.tmp`,
@@ -478,8 +589,21 @@ export class WakeStore {
       schedules: this.#schedules,
     };
     const json = JSON.stringify(data, null, 2) + "\n";
-    writeFileSync(tmpPath, json, "utf8");
+    writeFileSync(tmpPath, json, { encoding: "utf8", mode: 0o600 });
+    chmodSync(tmpPath, 0o600);
+    const fd = openSync(tmpPath, "r");
+    try {
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
     renameSync(tmpPath, this.#filePath);
+    const dirFd = openSync(dir, "r");
+    try {
+      fsyncSync(dirFd);
+    } finally {
+      closeSync(dirFd);
+    }
     const stat = statSync(this.#filePath);
     this.#lastMtimeMs = stat.mtimeMs;
     this.#lastSize = stat.size;
@@ -507,6 +631,7 @@ export class WakeStore {
 
   public add(
     input: Omit<WakeSchedule, "id" | "fireCount" | "lastFiredAt" | "createdAt">,
+    requestedId?: string,
   ): WakeSchedule {
     this.reloadIfChanged();
     this.#assertHealthy();
@@ -524,8 +649,18 @@ export class WakeStore {
     if (typeof input.endpointId !== "string" || input.endpointId.length === 0) {
       throw new Error("Invalid endpointId");
     }
-    if (typeof input.sessionId !== "string" || input.sessionId.length === 0) {
+    if (
+      typeof input.sessionId !== "string" ||
+      ((input.action ?? "wake") === "wake" && input.sessionId.length === 0)
+    ) {
       throw new Error("Invalid sessionId");
+    }
+    if (
+      input.action !== undefined &&
+      input.action !== "notify" &&
+      input.action !== "wake"
+    ) {
+      throw new Error("Invalid action");
     }
     if (typeof input.promptTemplate !== "string") {
       throw new Error("Invalid promptTemplate");
@@ -545,6 +680,9 @@ export class WakeStore {
     if (typeof input.enabled !== "boolean") {
       throw new Error("Invalid enabled flag");
     }
+    if (input.cancelled === true && input.enabled) {
+      throw new Error("Cancelled schedules cannot be enabled");
+    }
     if (
       input.freshSession !== undefined &&
       typeof input.freshSession !== "boolean"
@@ -563,8 +701,15 @@ export class WakeStore {
       throw new Error("Invalid until: must be null or valid YYYY-MM-DD");
     }
 
-    let id = generateWakeId();
-    while (this.#schedules.some((s) => s.id === id)) {
+    let id = requestedId ?? generateWakeId();
+    if (!/^wk_[0-9a-z]{8}$/u.test(id)) throw new Error("Invalid schedule id");
+    if (requestedId !== undefined && this.#schedules.some((s) => s.id === id)) {
+      throw new Error(`Schedule already exists: ${id}`);
+    }
+    while (
+      requestedId === undefined &&
+      this.#schedules.some((s) => s.id === id)
+    ) {
       id = generateWakeId();
     }
 
@@ -574,15 +719,23 @@ export class WakeStore {
       ownerId: input.ownerId,
       channel: input.channel,
       endpointId: input.endpointId,
+      ...(input.action === undefined ? {} : { action: input.action }),
       sessionId: input.sessionId,
       promptTemplate: input.promptTemplate,
       recurrence: structuredClone(input.recurrence),
       timeOfDay: input.timeOfDay,
       timezone: input.timezone,
       enabled: input.enabled,
+      ...(input.cancelled === undefined ? {} : { cancelled: input.cancelled }),
       ...(input.freshSession === undefined
         ? {}
         : { freshSession: input.freshSession }),
+      ...(input.origin === undefined
+        ? {}
+        : { origin: structuredClone(input.origin) }),
+      ...(input.lastOutcome === undefined
+        ? {}
+        : { lastOutcome: structuredClone(input.lastOutcome) }),
       maxFires: input.maxFires,
       until: input.until,
       fireCount: 0,
@@ -616,12 +769,40 @@ export class WakeStore {
     if (schedule === undefined) {
       return false;
     }
+    if (schedule.cancelled === true && enabled) return false;
     schedule.enabled = enabled;
     this.#writeToDisk();
     return true;
   }
 
-  public recordFire(id: string, firedAtUtcIso: string): void {
+  public cancel(id: string): boolean {
+    this.reloadIfChanged();
+    this.#assertHealthy();
+    const schedule = this.#schedules.find((s) => s.id === id);
+    if (schedule === undefined) return false;
+    schedule.cancelled = true;
+    schedule.enabled = false;
+    this.#writeToDisk();
+    return true;
+  }
+
+  public recordOutcome(
+    id: string,
+    outcome: NonNullable<WakeSchedule["lastOutcome"]>,
+  ): void {
+    this.reloadIfChanged();
+    this.#assertHealthy();
+    const schedule = this.#schedules.find((s) => s.id === id);
+    if (schedule === undefined) throw new Error(`Schedule not found: ${id}`);
+    schedule.lastOutcome = structuredClone(outcome);
+    this.#writeToDisk();
+  }
+
+  public recordFire(
+    id: string,
+    firedAtUtcIso: string,
+    outcomeAtIso?: string,
+  ): void {
     this.reloadIfChanged();
     this.#assertHealthy();
 
@@ -632,9 +813,18 @@ export class WakeStore {
     if (!isValidIsoDate(firedAtUtcIso)) {
       throw new Error(`Invalid firedAtUtcIso: ${firedAtUtcIso}`);
     }
+    const outcomeAt =
+      outcomeAtIso ??
+      (isValidOutcomeDate(firedAtUtcIso)
+        ? firedAtUtcIso
+        : new Date().toISOString());
+    if (!isValidOutcomeDate(outcomeAt)) {
+      throw new Error(`Invalid outcomeAtIso: ${outcomeAt}`);
+    }
 
     schedule.fireCount += 1;
     schedule.lastFiredAt = firedAtUtcIso;
+    schedule.lastOutcome = { status: "uncertain", at: outcomeAt };
     this.#writeToDisk();
   }
 
