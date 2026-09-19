@@ -90,8 +90,10 @@ Accepted evidence is:
   and stable message id. Send-context tokens bind to the same account/peer.
 - Enterprise WeChat: configured account credentials, exact `body.aibotid`,
   `body.chattype == "single"`, exact `body.from.userid`, and stable
-  `body.msgid`. The current adapter accepts private text only; media and
-  group callbacks are rejected before content work.
+  `body.msgid`. The adapter accepts private text and supported media ingress
+  (images, files, video, voice); group callbacks are rejected before content
+  work. Blanket native media egress is not claimed or supported across all
+  media types.
 
 Text, captions, callbacks, filenames, forwards, and extension payloads never
 select identity. Missing, group-scoped, contradictory, or ambiguous updates
@@ -103,15 +105,17 @@ the authenticated `user_id` in the same database operation.
 
 ## MVP persistence
 
-| Table | Phase | Purpose |
+| Table | Phase / Schema | Purpose |
 | --- | --- | --- |
 | `users` | 1 | Published users, workspace identity, enabled state |
 | `channel_endpoints` | 1 | Exact private tuple and selected session |
-| `sessions` | 1 | Owner, Pi identity, selected model/thinking, lifecycle |
-| `turns` | 1 | Admission, FIFO ordinal, state, result, idempotency |
+| `sessions` | 1 (Schema 7) | Owner, Pi identity, selected model/thinking, Forge selection, context snapshot, lifecycle |
+| `turns` | 1 (Schema 6) | Admission, FIFO ordinal, operation (`prompt`, `publish`, `compact`), state, result, idempotency |
 | `outbox` | 1 | Text/artifact deliveries and bounded attempts |
 | `artifacts` | 4 | Owner-namespaced immutable inbound/outbound objects |
 | `turn_artifacts` | 4 | Turn, direction, role, display metadata |
+| `staged_artifacts` | Schema 3 | Staged attachments awaiting text trigger |
+| `local_requests` | Schema 8 | Scoped caller idempotency receipts for local control |
 
 Prompt and final assistant text are retained for product recovery. Provider or
 channel credentials, raw extension UI secrets, absolute paths, and raw tool
@@ -353,4 +357,6 @@ the running application. Literal messages enter the existing outbox; scheduled
 notify/wake actions reuse WakeStore and the per-user queue. Static caller user
 and action allowlists and request receipts live at this boundary, not in a
 second sender or external SQLite writer. No listener exists unless configured;
-the adapter is not automatically exposed to model workspaces.
+the adapter is not automatically exposed to model workspaces. Manual stdio MCP
+clients execute `node dist/src/local/mcp.js` directly (rather than running via
+npm) so npm banner output never pollutes protocol stdout.

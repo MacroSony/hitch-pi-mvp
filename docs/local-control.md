@@ -225,3 +225,13 @@ parent integration verification. Production activation, caller enrollment,
 attended IM delivery/formatting tests, and full opt-in sandbox acceptance remain
 separate gates. No live caller/config/credential/service changes are implied by
 this implementation record.
+
+
+### Subsequent attended dogfood
+
+After the initial implementation checks, one explicitly authorized private
+installation was activated. The operator confirmed normal personal-WeChat
+command formatting and receipt of an immediate notification sent through the
+reloaded desktop MCP adapter. See the [dated follow-up acceptance](ux-local-acceptance-20260919.md#subsequent-attended-personal-wechat-dogfood-2026-09-19).
+This is not automatic enrollment for other installations, scheduled-fire
+acceptance, or a guarantee of future delivery through an expired send context.

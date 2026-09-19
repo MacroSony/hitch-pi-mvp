@@ -11,3 +11,4 @@ tmp/
 *.sqlite-wal
 *.log
 .pi/
+/screenshots/

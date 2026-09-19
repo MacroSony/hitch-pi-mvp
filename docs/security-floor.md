@@ -30,6 +30,9 @@ without pretending the MVP is hardened for adversarial users.
 - Accept only exact statically configured private-channel tuples derived from
   authenticated Telegram, WeChat, or Enterprise WeChat metadata. Reject groups
   and missing or contradictory identity fields before content or media work.
+  Enterprise WeChat supports private text and supported media ingress (images,
+  files, video, voice); blanket native media egress across all channels and
+  media types is not claimed.
 - Scope sessions, Turns, selected models, cancellation, artifacts, and outbox
   rows to the authenticated Hitch user.
 - Reject duplicate endpoint tuples, duplicate/nested user workspaces, and
@@ -39,11 +42,11 @@ without pretending the MVP is hardened for adversarial users.
 
 ### Pi and extensions
 
-- Pin Pi and the mandatory Hitch extension. Use a dedicated, host-private Pi
-  operator auth authority shared by the configured users; keep per-user
-  settings/cache directories separate. Never clone auth at startup or mount
-  either auth or profile directories into the tool sandbox. Require shared-auth
-  bootstrap attestation before prompting.
+- Pin Pi 0.85.1 and the mandatory Hitch extension. Use a dedicated,
+  host-private Pi operator auth authority shared by the configured users; keep
+  per-user settings/cache directories separate. Never clone auth at startup or
+  mount either auth or profile directories into the tool sandbox. Require
+  shared-auth bootstrap attestation before prompting.
 - Disable Pi project/global discovery, context files, workspace settings,
   packages, project extensions, skills, prompts, and themes.
 - Disable Pi built-in tools. Before each prompt, attest that `read`, `write`,
@@ -82,8 +85,10 @@ without pretending the MVP is hardened for adversarial users.
 - Run at most `maxConcurrentTurns` provider-owning Pi controllers globally
   (default 2, range 1–8), with per-user Turn serialization preserved by the
   pump.
-- Validate that Pi profile JSON is readable before startup and provide clear
-  backup/re-login recovery if the pinned Pi writer is interrupted.
+- Validate that Pi profile JSON is readable before startup. For auth
+  recovery, never promote or restore a stale auth backup, as doing so can
+  overwrite newly rotated tokens or restore invalid credentials; recovery
+  requires attended host re-login with pinned Pi 0.85.1 while stopped.
 - Resolve model changes only against Pi's current reported model catalog and
   an optional static allowlist.
 
@@ -93,10 +98,13 @@ without pretending the MVP is hardened for adversarial users.
   exclusive owner-private temporaries, generated storage names, hashes, and
   atomic promotion. Never use a supplied filename as a storage path.
 - Mount inbound files read-only. Treat only validated JPEG, PNG, GIF, and WebP
-  objects as native images; other accepted files remain opaque.
+  objects as native images; other accepted files remain opaque. Egress delivery
+  uses originating channel methods, but blanket native media egress across all
+  media types and channels is not claimed.
 - Snapshot outbound workspace files into immutable owner-private artifacts
   through the descriptor-confined Phase 0 publication helper. Delivery never
-  reopens a live workspace path.
+  reopens a live workspace path. Note: `hitch_publish` is the validated
+  model snapshot tool; `!send` has a known suffixed-blob regression in this release.
 - Persist terminal text and artifact deliveries to the owner-bound outbox
   before sending. A channel retry may duplicate delivery, but it must not rerun
   the agent Turn.
@@ -115,12 +123,15 @@ without pretending the MVP is hardened for adversarial users.
 
 ## Accepted MVP risks
 
-- AUTH-1 uses locked atomic persistence around Pi 0.84.1 refresh, but remote
-  rotation and local persistence are not one transaction. A crash between them
-  can require operator re-login; restoring an older backup may not help.
-  External/desktop/plugin writers are not certified by this path and must not
-  run concurrently against the same rotating authorization. Operator auth
-  changes require a stopped service.
+- Shared operator authentication (historical AUTH-1) uses locked atomic
+  persistence around Pi 0.85.1 refresh, but remote rotation and local
+  persistence are not one transaction. A crash between them can require operator
+  re-login; restoring an older auth backup must never be done because it can
+  overwrite newly rotated tokens and invalidate provider sessions. All users
+  share the single authoritative `piProfileDir/auth.json` source; any legacy
+  per-user auth files are ignored and must not be promoted automatically. External/desktop/plugin writers are not
+  certified by this path and must not run concurrently against the same rotating
+  authorization. Operator auth changes require a stopped service.
 - The initial ext4 deployment has no project quota. Configured object/temp
   limits and free-space checks reduce accidental exhaustion, but a runaway
   workspace can consume shared disk. The operator monitors and can stop the
@@ -130,6 +141,9 @@ without pretending the MVP is hardened for adversarial users.
 - Delivery may duplicate after an ambiguous channel response.
 - Audit and retention are operationally useful but not tamper-evident or
   exhaustively crash-tested.
+- Deterministic test passes verify isolation boundaries, but do not constitute
+  a full opt-in sandbox acceptance claim, which remains an attended host
+  verification.
 - Only providers and channel accounts actually available to the operator need
   live MVP acceptance. Unavailable integrations are reported, not simulated as
   live success.

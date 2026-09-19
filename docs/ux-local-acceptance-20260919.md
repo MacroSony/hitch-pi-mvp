@@ -1,6 +1,7 @@
 # UX-1 / LOCAL-1 acceptance — 2026-09-19
 
-Implementation record, **not production activation or attended IM acceptance**.
+Initial implementation record, followed by the later attended dogfood
+confirmation below. Code acceptance alone does not activate an installation.
 
 ## UX-1 (commit be0cfb5)
 
@@ -81,14 +82,16 @@ no evidence and is not counted as a successful review.
 count zero. Only the private clone was migrated and then removed. Live database
 remained schema 6.
 
-## Known gates and limits
+## Initial acceptance gates and remaining limits
 
-- No production service/config/caller/credential change, deployment, real
-  notification or reminder creation in this increment. Existing daemon remained
+- At the initial code-acceptance checkpoint there was no production
+  service/config/caller/credential change, deployment, real notification or
+  reminder creation. Existing daemon remained
   on the earlier path-guidance release when last checked.
-- Need explicit activation approval, narrowly scoped caller enrollment and
-  attended real notification/status/WeChat paragraph tests. Confirm user-visible
-  reception; outbox `sent` alone is insufficient.
+- Activation requires explicit approval, narrowly scoped caller enrollment and
+  attended notification/status/WeChat paragraph tests on each installation.
+  The subsequent dogfood result is recorded below; outbox `sent` alone is
+  insufficient to establish user-visible reception.
 - Full opt-in sandbox acceptance remains outstanding; ordinary suite success is
   not a substitute. Successful main-process signal shutdown with real local
   requests is not yet a dedicated network-free subprocess test.
@@ -102,3 +105,32 @@ remained schema 6.
   automatic isolated task-session provisioning, or public API.
 - Independent `!send` suffixed-blob bug, compact no-op wording, father onboarding
   generator and broad extension CI are not fixed by this increment.
+
+
+## Subsequent attended personal-WeChat dogfood (2026-09-19)
+
+After the implementation checkpoint, the operator authorized an immutable
+release deployment and a caller restricted to their own Hitch user. A private
+stopped backup and rehearsal preceded schema-8 activation; FK/integrity checks
+passed. This installation-specific activation is not a default permission grant
+for other deployments.
+
+The operator then reloaded their desktop MCP adapter and explicitly reported
+that WeChat testing was normal, following the requested help/session/status and
+ordinary-chat checks. This confirms the operator's client experience, not a
+claim that all IM clients/renderers behave identically.
+
+At the operator's request, the reloaded MCP adapter submitted one literal
+notification through the live authenticated local socket to personal WeChat.
+The receipt progressed from queued to sent, and the operator explicitly
+confirmed receipt ("Received!"). That human confirmation, not the outbox label,
+is the evidence of user-visible delivery. The notification did not invoke a
+model. No credentials, platform peer IDs or private installation paths are
+included in this public record.
+
+This closes personal-WeChat paragraph/command experience and immediate local
+notification dogfood for that installation. It does **not** certify scheduled
+notify/wake fires, all WeCom/media paths, or the skipped opt-in sandbox suite.
+The public-release cleanup only removes a one-off web-search diagnostic file
+sink and updates documentation; the running dogfood release was not changed
+as part of preparing the public push.

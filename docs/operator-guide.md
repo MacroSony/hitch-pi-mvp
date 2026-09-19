@@ -91,13 +91,17 @@ sudo chmod 0600 /srv/hitch/config.json
 
 Important fields:
 
-- `telegramAccounts[].id` and `wechatAccounts[].id` are local labels.
+- `telegramAccounts[].id`, `wechatAccounts[].id`, and `wecomAccounts[].id` are local labels.
 - Telegram `userId` and `privateChatId` must match the intended private chat.
   Use the authenticated discovery procedure in Section 4 before Hitch starts;
   do not retain the example `123` values.
 - WeChat `userId` is the exact private peer returned by the configured bot.
   If it is not known yet, complete the Section 4 WeChat QR login first, copy
   the printed scanner peer ID, then return here before validating config.
+- Enterprise WeChat (`wecom`) endpoints support private single chats with text
+  and supported media ingress (images, files, video, voice). Group callbacks
+  are rejected before content processing; blanket native media egress across
+  all media types is not claimed.
 - Each user receives one non-overlapping workspace.
 - Remove an unused channel account and its user endpoint rather than leaving a
   placeholder.
@@ -328,7 +332,13 @@ channels rather than substituting a synthetic live result.
 6. When `mediaMode` is `"text-trigger"`, send a media-only message and confirm
    the "Saved N attachment(s)" reply, then send text and confirm the staged
    attachments merge into one Turn. `!status` reports the staged count.
-7. Restart the service and confirm sessions remain listed. Hitch quarantines
+7. Send `!status` to verify the last-known context snapshot (sampled token metrics
+   and context window percentage from Pi session stats of the last completed turn).
+   Send `!compact` to run an in-session compaction maintenance turn; verify it
+   summarizes context without deleting the stored transcript or losing the session.
+   Too-small/already-compacted sessions may have nothing to compact. For optional
+   host-local automation via MCP, refer to the [local-control runbook](local-control.md).
+8. Restart the service and confirm sessions remain listed. Hitch quarantines
    any Turn that was ambiguous at restart and never replays it automatically.
 
 ## 8. Operations and recovery
@@ -366,7 +376,12 @@ sudo -u hitch env XDG_RUNTIME_DIR="/run/user/$HITCH_SERVICE_UID" \
 
 Recovery rules:
 
-- Corrupt Pi profile: restore the stopped profile backup or repeat Pi `/login`.
+- Corrupt Pi profile / auth recovery: All users share the single authority at
+  `piProfileDir/auth.json` (legacy per-user auth files, if present, are not authoritative). **Never promote or
+  restore a stale auth backup**, as this can overwrite newly rotated provider
+  tokens and permanently break provider sessions. Stop the service and perform
+  an attended re-login with pinned Pi 0.85.1 (`PI_CODING_AGENT_DIR=/srv/hitch/pi-profile node ...`)
+  against the dedicated profile.
 - Expired/corrupt WeChat state: stop, rerun `wechat:login`, then restart. Login
   deliberately resets that account's remote cursor/context state.
 - Uncertain prior Turn: use `!recover` to cancel its queued successors, then
@@ -375,6 +390,10 @@ Recovery rules:
   manually delete SQLite-referenced blobs or transcripts.
 - Database or data-root loss: restore the whole stopped backup, not individual
   database files.
+- Manual stdio MCP clients: For host-local control stdio clients, execute
+  `node dist/src/local/mcp.js` (or `node --disable-warning=ExperimentalWarning dist/src/local/mcp.js`)
+  directly, never `npm run mcp`, to avoid npm banner stdout output corrupting
+  the JSON-RPC protocol stream.
 - Repeated channel delivery failure: correct the account/peer/credential and
   restart promptly. Delivery may duplicate after an ambiguous response and
   permanently failed rows have no MVP chat retry command.
@@ -438,7 +457,11 @@ both paths and the offline backup before running it. Delete the `hitch` account
 only if it is dedicated to this service and its home contains nothing else.
 
 
-## Forge Mode A (prompt-only subset)
+## Historical: Forge Mode A (prompt-only subset, schema 3 to 4)
+
+> **Historical note:** This section documents the earlier Mode A integration
+> that migrated schema 3 to schema 4. The current runtime operates on Schema 8
+> (see Section 13 for current upgrade procedures).
 
 Mode A reads an operator-prepared root, **not** the interactive global Forge
 home. It imports the pinned `@zihanw/pi-forge/service` entry, never Forge's root
@@ -494,15 +517,17 @@ system content and 64 KiB serialized controller prompt configuration. Preview
 uses current time but does not represent a running model/tool snapshot; actual
 Turns supply their effective model/tools/time.
 
-**Database upgrade:** this version migrates schema 3 to 4 to retain Forge
-selection. Back up the database while stopped before deploying. A code-only
-rollback to B2 cannot read schema 4; a rollback needs the pre-upgrade database,
-which loses any newer messages unless separately reconciled. No live Mode A
-deployment or migration is implied by code acceptance. Dogfood remains on B2
-until an attended switch is explicitly arranged.
+**Historical database upgrade note:** This version migrated schema 3 to 4 to retain
+Forge selection. The current active runtime uses Schema 8 (see Section 13).
 
 
-## 11. Shared operator authentication (AUTH-1)
+## Historical: Shared operator authentication migration (AUTH-1)
+
+> **Historical note:** This section describes the initial migration from
+> per-user auth clones to a shared operator authority. In the current runtime,
+> the shared authority at `piProfileDir/auth.json` is fully established. All
+> configured users share this single source. Legacy per-user auth files may
+> remain on disk but are ignored; never promote them automatically.
 
 This section describes the new code, not proof that an existing deployment has
 been migrated. Deterministic real-CLI fixtures passed; an attended real-provider
@@ -565,7 +590,8 @@ and channel check is still required. No new config key or auth database exists.
 Stop and retain the current state first. For an AUTH-1-only rollback on the same
 DB schema, preserve the latest authoritative operator auth, restore compatible
 code/config, and re-login if needed. **Do not blindly restore old auth clones.**
-The old runtime clones auth again, so its original persistence defect returns.
+Current auth uses a single shared source (`piProfileDir/auth.json`); old per-user
+files are not authoritative. Never promote or restore stale credentials.
 For combined Mode A→B2 rollback, schema 4 is not readable by B2: restoring the
 pre-upgrade schema-3 backup discards newer messages/state. Obtain agreement on
 that loss or repair forward; restoring old credentials does not repair schema.
@@ -588,3 +614,69 @@ Profiles for it need thinking low/medium/high (use low), not off. It will not
 quietly substitute Gemini 3.7 on a 404. Verify real availability before changing
 working profile defaults. A successful new-session model-less profile now uses
 the same default-model fallback as ordinary turns; manual overrides remain.
+
+
+## 13. Current database schema (Schema 8) and upgrade runbook
+
+The current database schema is **Schema 8** (`hitch-pi-mvp-schema-8`).
+
+### Automatic migration
+
+When Hitch starts, it checks the database schema identity in `app_meta` and
+automatically runs the required versioned SQLite transactions up to Schema 8:
+
+- Schema 1 → 2: added `turns.operation_kind` (`prompt`, `publish`), `artifacts`,
+  `turn_artifacts`, and modernized `outbox`.
+- Schema 2 → 3: added `staged_artifacts` for staged media mode.
+- Schema 3 → 4: added `sessions.forge_kind` and `sessions.forge_id`.
+- Schema 4 → 5: added Enterprise WeChat (`wecom`) channel endpoints.
+- Schema 5 → 6: added `compact` turns operation for context pruning.
+- Schema 6 → 7: added nullable `sessions.context_usage` snapshot column.
+- Schema 7 → 8: added `local_requests` table for idempotent caller receipts and
+  restored the `turns_user_state_ordinal` FIFO index.
+
+### Pre-upgrade procedure
+
+Before upgrading the code or service:
+
+1. Arrange an attended maintenance window. Confirm the turn queue, active
+   sandbox scopes, and outbox deliveries are idle.
+2. Stop the service cleanly:
+   ```text
+   systemctl --user stop hitch-pi-mvp.service
+   ```
+3. Follow Section 8's owner-private, stopped full-deployment backup procedure.
+   Include `<dataRoot>/hitch.sqlite` and any WAL/SHM files, config, channel state,
+   workspaces, transcripts, blobs and the Pi profile. A bare copy of a live
+   SQLite file is not a consistent backup. Verify the backup before proceeding.
+4. Build and verify the new release:
+   ```text
+   npm ci
+   npm run acceptance:deterministic
+   npm run build
+   ```
+5. Start the service:
+   ```text
+   systemctl --user start hitch-pi-mvp.service
+   ```
+   Run these service commands as the configured service user with the correct
+   unit name/user-manager environment (Section 8). Verify the new process's
+   release identity and running log; inspect SQLite `PRAGMA user_version` (8),
+   `quick_check` and `foreign_key_check` rather than assuming startup alone
+   proves migration integrity.
+
+### Downgrade and recovery invariants
+
+- **No code-only downgrade:** Code written for older schemas (e.g. schema 6 or 7)
+  cannot read a Schema 8 database and will fail closed on startup.
+- **No automatic restore losing new messages/auth:** Restoring a pre-upgrade
+  database backup permanently discards all new chat messages, turns, outbox
+  deliveries, and local receipts recorded since the upgrade. Do not run an
+  automatic rollback or restore without explicit operator agreement on data loss.
+- **Auth recovery invariant:** Authentication is rooted in the single shared
+  operator authority `piProfileDir/auth.json`. Legacy per-user auth files
+  must not be promoted to that authority. **Never promote or restore a stale auth backup**, as this can
+  overwrite newly refreshed or rotated OAuth tokens and break provider
+  sessions. If auth is invalid or corrupt, perform an attended re-login with
+  pinned Pi 0.85.1 (`PI_CODING_AGENT_DIR=/srv/hitch/pi-profile node ...`) while
+  the service is stopped.

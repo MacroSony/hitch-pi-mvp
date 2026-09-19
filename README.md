@@ -23,9 +23,10 @@ This repository is a fresh, narrow rewrite started from the product boundary. It
 - [Operator install, recovery, and reset guide](docs/operator-guide.md)
 - [MVP acceptance record](docs/mvp-acceptance.md)
 - [Optional host-only notification/scheduling MCP](docs/local-control.md)
+- [Release notes (2026-09-19)](docs/releases/2026-09-19.md)
 
 The durable foundation, Telegram, WeChat, and Enterprise WeChat private-peer paths, native
-Pi/Bubblewrap runtime, bounded media, and artifact outbox are implemented. Enterprise WeChat is a text-only, single-chat MVP.
+Pi/Bubblewrap runtime, bounded media, and artifact outbox are implemented. Enterprise WeChat supports private text and image/file/media ingress; native egress support varies by media type.
 Earlier Phase 0 evidence under `spikes/` found four real
 hardening gaps. The trusted-personal MVP reset accepts two as attended
 operational risks, excludes the two unsupported operator extensions, and moves
@@ -74,9 +75,10 @@ user. Do not use a personal ambient Pi profile and do not put provider keys in
 the Hitch service environment.
 
 Keep an offline, owner-private backup of `auth.json` while the service is
-stopped. If startup reports corrupt Pi profile JSON after a crash, restore that
-backup or repeat the attended Pi login; the MVP deliberately does not patch
-Pi's in-place credential writer.
+stopped. Shared auth updates are locked and atomically persisted locally, but
+remote OAuth rotation is not atomic with local persistence. If credentials are
+corrupt or stale, stop and use attended Pi login; do not blindly restore an old
+authority or promote a legacy per-user auth clone.
 
 After `npm run build`, start the real vertical slice explicitly:
 
@@ -86,23 +88,30 @@ HITCH_TELEGRAM_PRIMARY_TOKEN=... \
 ```
 
 Startup pins and checks Pi `0.85.1` plus its dependency closure, validates the
-operator profile, clones it into owner-only per-user directories, compiles and
-pins the reviewed sandbox assets, obtains the native Pi model catalog, and
-requires a fresh mandatory-extension/Bubblewrap attestation.
+operator profile, prepares owner-only per-user directories with a shared
+operator auth authority (without copying credentials), compiles and pins the
+reviewed sandbox assets, obtains the native Pi model catalog, and requires a
+fresh mandatory-extension/Bubblewrap attestation.
 It exits if no authenticated model is available. Normal text and supported
 images/files run a native Pi Turn. JPEG, PNG, GIF, and WebP become native Pi
 image blocks, while other files are exposed read-only under `/inbox`.
-`!send <relative-path>` and Pi's `hitch_publish` create immutable bounded
+Pi's `hitch_publish` tool and `!send <relative-path>` create immutable bounded
 snapshots and deliver them through the originating channel's native file
-methods.
+methods (note: `!send` has a known suffixed-blob regression vs the working
+`hitch_publish` model tool).
 
 The post-MVP chat command surface is `!new [name]`, `!sessions`,
-`!switch <id-or-name>`, `!status`, `!abort`, `!stop`, `!recover`,
+`!switch <id-or-name>`, `!status`, `!compact`, `!abort`, `!stop`, `!recover`,
 `!models [filter]`, `!model <provider>/<id>`, `!thinking <level>`,
-`!send <relative-path>`, and `!help`. During longer native Turns, Hitch also
-sends merged intermediate agent progress to the originating chat: at most one
-message every 30 seconds, 4000 characters per message, and 64 KiB of progress
-per Turn.
+`!send <relative-path>`, and `!help`.
+`!status` reports the last-known session context token count, context window
+and percentage sampled from Pi, not live billing totals; it can be unknown
+before sampling or just after compaction. `!compact` runs a queued maintenance
+Turn to summarize older context without deleting the stored transcript. External local scheduling and notifications
+are configured separately via the [local-control runbook](docs/local-control.md).
+During longer native Turns, Hitch also sends merged intermediate agent
+progress to the originating chat: at most one message every 30 seconds, 4000
+characters per message, and 64 KiB of progress per Turn.
 
 `config.example.json` documents `mediaMode`: `"always-trigger"` runs media-only
 messages immediately, while `"text-trigger"` stages attachments for up to 10
@@ -118,6 +127,11 @@ Authenticate a configured WeChat account with:
 ```text
 npm run wechat:login -- --state-dir /absolute/private/wechat-state
 ```
+
+When connecting manual stdio MCP clients to the host-local control service,
+execute `node dist/src/local/mcp.js` directly (e.g. `node --disable-warning=ExperimentalWarning dist/src/local/mcp.js`),
+never `npm run mcp`, to prevent npm banner and lifecycle noise from corrupting
+stdio JSON-RPC framing.
 
 Real provider and Telegram traffic is always opt-in and never runs in normal
 CI. The host-only sandbox check can be repeated with:

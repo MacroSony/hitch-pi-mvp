@@ -1,5 +1,10 @@
 # MVP acceptance record
 
+> Historical initial-MVP checkpoint. Later personal-WeChat formatting and
+> host-local notification dogfood is recorded in the
+> [2026-09-19 follow-up acceptance](ux-local-acceptance-20260919.md#subsequent-attended-personal-wechat-dogfood-2026-09-19);
+> it does not retroactively change this checkpoint's test matrix.
+
 Date: 2026-08-13 (Asia/Shanghai)
 
 This record distinguishes deterministic/host evidence from credentialed live

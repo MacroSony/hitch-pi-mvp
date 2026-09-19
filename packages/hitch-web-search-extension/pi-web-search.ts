@@ -1,4 +1,3 @@
-import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -56,29 +55,6 @@ const querySchema = Type.Object(
 
 const adapter = new TavilySearchAdapter({ apiKey });
 
-// Bounded diagnostics sink for execute-time failures. The classified turn
-// error is intentionally content-free; this file is the operator's evidence.
-function debugSink(pi: ExtensionAPI, error: unknown): void {
-  try {
-    const path = "/srv/hitch/data/websearch-debug.log";
-    if (fs.existsSync(path) && fs.statSync(path).size > 64 * 1024)
-      fs.truncateSync(path, 0);
-    const snapshot = {
-      at: new Date().toISOString(),
-      error: String(error).slice(0, 300),
-      all: pi
-        .getAllTools()
-        .map((tool) => [tool.name, tool.sourceInfo?.path ?? null]),
-      active: pi.getActiveTools(),
-      expectedEnv: process.env.HITCH_EXPECTED_TOOLS ?? null,
-      dynamicEnv: process.env.HITCH_DYNAMIC_EXTENSION_PATHS ?? null,
-    };
-    fs.appendFileSync(path, `${JSON.stringify(snapshot)}\n`, { mode: 0o600 });
-  } catch {
-    // diagnostics must never break the tool path
-  }
-}
-
 // Bounds and validates the adapter result before it reaches the model.
 function boundedResult(result: {
   readonly items: readonly {
@@ -131,8 +107,7 @@ export default function (pi: ExtensionAPI): void {
           content: [{ type: "text", text: boundedResult(result) }],
           details: {},
         };
-      } catch (error) {
-        debugSink(pi, error);
+      } catch {
         throw new Error("web-search-failed");
       }
     },
