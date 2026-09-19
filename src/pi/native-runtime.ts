@@ -163,6 +163,8 @@ export interface NativePiRuntimeOptions {
   readonly dataRoot: string;
   readonly piProfileDir: string;
   readonly userIds?: readonly string[];
+  /** Test-only JSONL controller; never accepted by the service composition. */
+  readonly testCliPath?: string;
   readonly maxConcurrentTurns?: number;
   readonly turnTimeoutMs?: number;
   readonly mediaStore?: MediaStore;
@@ -645,6 +647,7 @@ class PiRpcProcess {
       readonly resolve: (value: JsonRecord) => void;
       readonly reject: (error: Error) => void;
       readonly timer: NodeJS.Timeout;
+      readonly command: string;
     }
   >();
   readonly #eventWaiters = new Set<{
@@ -829,7 +832,8 @@ class PiRpcProcess {
           this.#pending.delete(event.id);
           clearTimeout(pending.timer);
           if (event.success === true) pending.resolve(event);
-          else pending.reject(new Error("Pi rejected an RPC command"));
+          else
+            pending.reject(new PiRpcCommandError(pending.command, event.error));
         }
       }
       for (const waiter of [...this.#eventWaiters]) {
@@ -857,6 +861,7 @@ class PiRpcProcess {
         resolve: resolveResponse,
         reject: rejectResponse,
         timer,
+        command: typeof command.type === "string" ? command.type : "unknown",
       });
       this.#child.stdin.write(encoded, (error) => {
         if (error === null || error === undefined) return;
@@ -925,6 +930,36 @@ class PiRpcProcess {
   public async waitClosed(): Promise<void> {
     await this.#closed;
   }
+}
+
+class PiRpcCommandError extends Error {
+  public readonly command: string;
+
+  public constructor(command: string, responseError: unknown) {
+    super(safeRpcRejection(command, responseError));
+    this.name = "PiRpcCommandError";
+    this.command = command;
+  }
+}
+
+function safeRpcRejection(command: string, responseError: unknown): string {
+  // Pi's response.error is provider-controlled. Do not copy it into logs or
+  // chat: it may contain a request body, transcript text, credentials, or a
+  // host path. Keep only stable, actionable protocol categories.
+  const detail = typeof responseError === "string" ? responseError : "";
+  if (command === "compact") {
+    if (detail === "Nothing to compact (session too small)")
+      return "Pi rejected compact RPC: the session is already compacted or too small";
+    if (detail === "Already compacted")
+      return "Pi rejected compact RPC: the session is already compacted";
+    if (detail === "Compaction cancelled")
+      return "Pi rejected compact RPC: compaction was cancelled";
+    if (
+      /^(?:Summarization|Turn prefix summarization) failed(?::|$)/u.test(detail)
+    )
+      return "Pi rejected compact RPC: the compaction provider request failed; retry is safe if the session remains active";
+  }
+  return `Pi rejected ${command} RPC command`;
 }
 
 function responseData(response: JsonRecord): JsonRecord {
@@ -1210,6 +1245,7 @@ export class NativePiRuntime implements AgentRuntime {
   readonly #profiles: ReadonlyMap<string, string>;
   readonly #catalogProfile: string;
   readonly #cli: string;
+  readonly #testCliPath: string | undefined;
   readonly #assets: string;
   readonly #turnTimeoutMs: number;
   readonly #media: MediaStore;
@@ -1238,7 +1274,8 @@ export class NativePiRuntime implements AgentRuntime {
     this.#sessionsRoot = join(options.dataRoot, "pi-sessions");
     this.#profiles = profiles;
     this.#catalogProfile = catalogProfile;
-    this.#cli = piCliPath();
+    this.#cli = options.testCliPath ?? piCliPath();
+    this.#testCliPath = options.testCliPath;
     this.#assets = assetRoot();
     this.#turnTimeoutMs = options.turnTimeoutMs ?? 10 * 60 * 1000;
     this.#media = options.mediaStore ?? new MediaStore(options.dataRoot);
@@ -1277,8 +1314,12 @@ export class NativePiRuntime implements AgentRuntime {
     const sharedAuthPath = validateSharedAuthPath(
       join(options.piProfileDir, "auth.json"),
     );
-    const cli = piCliPath();
-    validatePiPackage(cli);
+    const cli = options.testCliPath ?? piCliPath();
+    if (options.testCliPath === undefined) {
+      validatePiPackage(cli);
+    } else if (process.env.NODE_ENV !== "test") {
+      throw new Error("test Pi CLI is only available in test mode");
+    }
     const assets = assetRoot();
     validateSandboxAssets(assets);
     const profileRoot = join(options.dataRoot, PI_PROFILE_ROOT);
@@ -1472,6 +1513,14 @@ export class NativePiRuntime implements AgentRuntime {
             HITCH_MCP_EXTENSION_SHA256: sha256File(mcpExtension),
           }
         : {}),
+      // This branch is unreachable from service composition and exists only
+      // so the fake JSONL controller can select a deterministic scenario.
+      ...(this.#testCliPath === undefined
+        ? {}
+        : {
+            HITCH_FAKE_PI_MODE: process.env.HITCH_FAKE_PI_MODE ?? "success",
+            HITCH_FAKE_PI_TRACE: process.env.HITCH_FAKE_PI_TRACE ?? "",
+          }),
     };
     return new PiRpcProcess(
       this.#cli,
@@ -1674,6 +1723,14 @@ export class NativePiRuntime implements AgentRuntime {
             directory: sessionDirectory,
           } as const);
     const profileDir = this.#profileFor(userId);
+    // Pi has no durable history before the first assistant message. Do not
+    // start a provider-owning controller just to compact an empty session.
+    if (turn.compact === true && turn.transcriptPath === undefined)
+      return {
+        outcome: "succeeded",
+        text: "Nothing to compact yet; this session has no saved conversation.",
+        sessionReusable: true,
+      };
     const inputArtifacts = turn.artifacts ?? [];
     if (
       inputArtifacts.length > 8 ||
@@ -1776,12 +1833,20 @@ export class NativePiRuntime implements AgentRuntime {
     let phase: RuntimeFailurePhase = "attest";
     let timedOut = false;
     let promptSubmitted = false;
+    let compactCommandStarted = false;
     let timer: NodeJS.Timeout | undefined;
     let forcedKill: NodeJS.Timeout | undefined;
+    let abortRequest: Promise<void> | undefined;
+    let abortAcknowledged = false;
     const promoted: RuntimeArtifact[] = [];
     const abort = (): void => {
       if (!promptSubmitted || controller.exited) return;
-      void controller.send({ type: "abort" }, 5_000).catch(() => undefined);
+      abortRequest ??= controller
+        .send({ type: "abort" }, 5_000)
+        .then(() => {
+          abortAcknowledged = true;
+        })
+        .catch(() => undefined);
       forcedKill ??= setTimeout(() => controller.kill(), 5_000);
     };
     const onExternalAbort = (): void => abort();
@@ -1813,24 +1878,55 @@ export class NativePiRuntime implements AgentRuntime {
         };
       }
       if (turn.compact === true) {
-        // Maintenance Turn: run session compaction instead of a model prompt.
-        // The compact RPC performs the summarization itself and rewrites the
-        // resumed Pi session; the response is the completion signal.
+        // Pi 0.85.1 returns compaction metadata in response.data. A response
+        // envelope is not the result, and a rejected compact command is not
+        // automatically an uncertain Turn: Pi reports expected no-op/failure
+        // cases while keeping the controller usable.
         phase = "prompt";
         promptSubmitted = true;
-        const compaction = record(
+        compactCommandStarted = true;
+        timer = setTimeout(() => {
+          timedOut = true;
+          abort();
+        }, this.#turnTimeoutMs);
+        const compaction = responseData(
           await controller.send({ type: "compact" }, this.#turnTimeoutMs),
         );
+        if (timer !== undefined) clearTimeout(timer);
+        if (forcedKill !== undefined) clearTimeout(forcedKill);
+        if (signal.aborted || timedOut) {
+          abort();
+          if (abortRequest !== undefined) await abortRequest;
+          if (!abortAcknowledged)
+            throw new Error("Pi compact abort was not acknowledged");
+          if (forcedKill !== undefined) clearTimeout(forcedKill);
+          await controller.closeCleanly();
+          const compactTranscript =
+            turn.transcriptPath === undefined
+              ? undefined
+              : syncTranscript(turn.transcriptPath, sessionDirectory);
+          return {
+            outcome: timedOut ? "timed-out" : "cancelled",
+            text: "",
+            sessionReusable: true,
+            ...(compactTranscript === undefined
+              ? {}
+              : { transcriptPath: compactTranscript }),
+          };
+        }
         const tokensBefore =
-          compaction !== null &&
           Number.isSafeInteger(compaction.tokensBefore) &&
           Number(compaction.tokensBefore) >= 0
             ? Number(compaction.tokensBefore)
             : undefined;
-        if (tokensBefore === undefined)
+        if (
+          tokensBefore === undefined ||
+          typeof compaction.summary !== "string" ||
+          typeof compaction.firstKeptEntryId !== "string" ||
+          compaction.firstKeptEntryId.length === 0
+        )
           throw new Error("compaction returned invalid metadata");
         const tokensAfter =
-          compaction !== null &&
           Number.isSafeInteger(compaction.estimatedTokensAfter) &&
           Number(compaction.estimatedTokensAfter) >= 0
             ? Number(compaction.estimatedTokensAfter)
@@ -1942,6 +2038,71 @@ export class NativePiRuntime implements AgentRuntime {
         ...(promoted.length === 0 ? {} : { artifacts: promoted }),
       };
     } catch (error) {
+      if (timer !== undefined) clearTimeout(timer);
+      if (forcedKill !== undefined) clearTimeout(forcedKill);
+      const compactInterrupted =
+        turn.compact === true &&
+        compactCommandStarted &&
+        (signal.aborted ||
+          timedOut ||
+          (error instanceof Error && /timed out/iu.test(error.message)));
+      if (compactInterrupted) {
+        // Abort is an in-band Pi operation. Give it a chance to cancel the
+        // compaction before closing; only a clean close plus transcript sync
+        // makes this maintenance Turn reusable.
+        try {
+          abort();
+          if (abortRequest !== undefined) await abortRequest;
+          if (!abortAcknowledged)
+            throw new Error("Pi compact abort was not acknowledged");
+          if (forcedKill !== undefined) clearTimeout(forcedKill);
+          await controller.closeCleanly();
+          const compactTranscript =
+            turn.transcriptPath === undefined
+              ? undefined
+              : syncTranscript(turn.transcriptPath, sessionDirectory);
+          return {
+            outcome: timedOut ? "timed-out" : "cancelled",
+            text: "",
+            sessionReusable: true,
+            ...(compactTranscript === undefined
+              ? {}
+              : { transcriptPath: compactTranscript }),
+          };
+        } catch {
+          // Fall through to the fail-closed kill/quarantine path.
+        }
+      }
+      if (
+        turn.compact === true &&
+        compactCommandStarted &&
+        error instanceof PiRpcCommandError &&
+        error.command === "compact" &&
+        !compactInterrupted
+      ) {
+        // A rejected compact has no prompt Turn to replay. Pi clears its
+        // compaction state before returning this response. It may have already
+        // appended an entry if a later extension hook failed; sync the actual
+        // leaf after clean shutdown rather than assuming nothing was written.
+        try {
+          await controller.closeCleanly();
+          const compactTranscript =
+            turn.transcriptPath === undefined
+              ? undefined
+              : syncTranscript(turn.transcriptPath, sessionDirectory);
+          return {
+            outcome: "failed",
+            text: "",
+            error: error.message,
+            sessionReusable: true,
+            ...(compactTranscript === undefined
+              ? {}
+              : { transcriptPath: compactTranscript }),
+          };
+        } catch {
+          // A failed close is ambiguous and must quarantine below.
+        }
+      }
       logPiRuntimeFailure({ phase, turnId: turn.turnId, error });
       if (phase === "attest")
         console.error(
