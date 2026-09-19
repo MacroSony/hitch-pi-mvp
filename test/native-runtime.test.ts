@@ -25,6 +25,7 @@ import {
   validatePiProfile,
   validatePiPackage,
   toolArgPreview,
+  publishDisplayName,
 } from "../src/pi/native-runtime.js";
 import { SharedCredentialStore } from "../src/pi/shared-credentials.js";
 import type { RuntimeModel, RuntimeTurn } from "../src/runtime/runtime.js";
@@ -542,4 +543,26 @@ test("toolArgPreview prefers primary keys, flattens whitespace, and clips", () =
   assert.ok(long.startsWith(" · "));
   assert.ok(long.endsWith("…"));
   assert.equal(Array.from(long).length, 3 + 60 + 1);
+});
+
+test("publishDisplayName keeps allowlisted extensions and bins everything else", () => {
+  const id = "778b368064c44350896ff62bcd2c7be1";
+  assert.equal(
+    publishDisplayName(`${id}.svg.blob`),
+    "published-778b368064c4.svg",
+  );
+  assert.equal(
+    publishDisplayName(`${id}.png.blob`),
+    "published-778b368064c4.png",
+  );
+  // No extension hint: neutral fallback handled by the media store.
+  assert.equal(publishDisplayName(`${id}.blob`), undefined);
+  // Non-allowlisted extensions stay neutralized.
+  assert.equal(publishDisplayName(`${id}.exe.blob`), undefined);
+  assert.equal(publishDisplayName(`${id}.html.blob`), undefined);
+  assert.equal(publishDisplayName(`${id}.js.blob`), undefined);
+  // Malformed names never produce a display name.
+  assert.equal(publishDisplayName("not-a-blob"), undefined);
+  assert.equal(publishDisplayName(`${id}.SVG.blob`), undefined);
+  assert.equal(publishDisplayName(`${id}.toolongext9.blob`), undefined);
 });

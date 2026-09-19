@@ -582,7 +582,7 @@ export class MediaStore {
     if (!USER_PATTERN.test(userId) || dirname(sourcePath) === sourcePath)
       throw new Error("published artifact path is invalid");
     const sourceName = basename(sourcePath);
-    if (!/^[a-f0-9]{32}\.blob$/u.test(sourceName))
+    if (!/^[a-f0-9]{32}(?:\.[a-z0-9]{1,8})?\.blob$/u.test(sourceName))
       throw new Error("published artifact name is invalid");
     const source = lstatSync(sourcePath, { bigint: true });
     const uid = process.getuid?.();

@@ -6,6 +6,7 @@ import {
 	mkdirSync,
 	readFileSync,
 	readdirSync,
+	renameSync,
 	statSync,
 	writeFileSync,
 } from "node:fs";
@@ -167,6 +168,18 @@ async function publish(input) {
 					result.bytes < 0 || result.bytes > MAX_PUBLISH_BYTES ||
 					typeof result.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(result.sha256)
 				) fail("publication-helper-response-invalid");
+				// Extension hint via blob filename: the runtime re-validates the
+				// segment against its own allowlist, so this only ever travels as
+				// an untrusted hint in a name we control.
+				const extension = /\.([A-Za-z0-9]{1,8})$/.exec(sourcePath)?.[1]?.toLowerCase();
+				if (extension !== undefined) {
+					try {
+						renameSync(
+							`/publish/${input.artifactId}.blob`,
+							`/publish/${input.artifactId}.${extension}.blob`,
+						);
+					} catch { finish(new Error("publication-rename-failed")); return; }
+				}
 				finish(null, result);
 			} catch { finish(new Error("publication-helper-response-invalid")); }
 		});

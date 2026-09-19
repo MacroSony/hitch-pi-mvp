@@ -212,6 +212,35 @@ interface SandboxBackend {
   ): Promise<unknown>;
 }
 
+const PUBLISH_BLOB_PATTERN = /^([a-f0-9]{32})(?:\.([a-z0-9]{1,8}))?\.blob$/u;
+const PUBLISH_EXTENSION_ALLOWLIST: ReadonlySet<string> = new Set([
+  "png",
+  "jpg",
+  "jpeg",
+  "gif",
+  "webp",
+  "pdf",
+  "txt",
+  "md",
+  "csv",
+  "json",
+  "zip",
+  "svg",
+]);
+
+// The model never chooses publication names; the sandbox only hints the
+// workspace extension through the blob filename. Allowlisted extensions make
+// deliveries openable (chart.svg over mystery .bin) while the basename stays
+// neutral. Non-allowlisted hints fall back to .bin.
+export function publishDisplayName(blobName: string): string | undefined {
+  const match = PUBLISH_BLOB_PATTERN.exec(blobName);
+  if (match === null) return undefined;
+  const extension = match[2];
+  if (extension === undefined || !PUBLISH_EXTENSION_ALLOWLIST.has(extension))
+    return undefined;
+  return `published-${match[1]!.slice(0, 12)}.${extension}`;
+}
+
 const TOOL_PREVIEW_KEYS = [
   "command",
   "query",
@@ -1844,7 +1873,7 @@ export class NativePiRuntime implements AgentRuntime {
       const publicationEntries = readdirSync(context.publishRoot).sort();
       if (
         publicationEntries.length > MAX_OUTBOUND_ARTIFACTS ||
-        publicationEntries.some((name) => !/^[a-f0-9]{32}\.blob$/u.test(name))
+        publicationEntries.some((name) => !PUBLISH_BLOB_PATTERN.test(name))
       ) {
         throw new Error("Pi publication output is invalid");
       }
@@ -1853,6 +1882,7 @@ export class NativePiRuntime implements AgentRuntime {
           this.#media.promotePublished(
             turn.userId,
             join(context.publishRoot, name),
+            publishDisplayName(name),
           ),
         );
       if (outcome === "failed") {
