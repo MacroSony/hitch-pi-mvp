@@ -742,7 +742,14 @@ export class HitchApplication {
       contentDigest: createHash("sha256").update(prompt).digest("hex"),
     };
     try {
-      this.store.admitPrompt(identity, prompt, [], schedule.sessionId);
+      const pinnedSessionId =
+        schedule.freshSession === true
+          ? this.store.resetSessionPiStateForWake(
+              schedule.endpointId,
+              schedule.ownerId,
+            ).id
+          : schedule.sessionId;
+      this.store.admitPrompt(identity, prompt, [], pinnedSessionId);
       this.#schedule(schedule.ownerId);
     } catch (error) {
       this.#wakeError(`wake ${schedule.id} dispatch failed`, error);

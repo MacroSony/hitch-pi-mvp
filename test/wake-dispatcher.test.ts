@@ -222,6 +222,99 @@ test("once schedule with a far-past slot is skipped and never fires", async () =
   );
 });
 
+test("freshSession wake resets Pi state but keeps the Hitch session, and never rotates mid-Turn", async () => {
+  const environment = setup();
+  const calls: RuntimeTurn[] = [];
+  const app = makeApp(environment, calls);
+
+  const identity: MessageIdentity = {
+    endpoint: environment.endpoint,
+    idempotencyKey: "p-1",
+    contentDigest: "p-1",
+  };
+  environment.store.admitPrompt(identity, "hello");
+  const claimed = environment.store.claimNextTurn("alice");
+  assert.ok(claimed !== null);
+  environment.foundation.database.connection
+    .prepare("UPDATE turns SET state = 'terminal', updated_at = 1 WHERE id = ?")
+    .run(claimed.turnId);
+  const before = environment.foundation.database.connection
+    .prepare(
+      "SELECT id, pi_session_id, transcript_path FROM sessions WHERE id = ?",
+    )
+    .get(claimed.sessionId) as {
+    id: string;
+    pi_session_id: string;
+    transcript_path: string | null;
+  };
+  environment.foundation.database.connection
+    .prepare(
+      "UPDATE sessions SET transcript_path = '/tmp/old.jsonl' WHERE id = ?",
+    )
+    .run(before.id);
+
+  // Busy no-op: an active Turn must block rotation.
+  environment.store.admitPrompt(
+    { ...identity, idempotencyKey: "p-2", contentDigest: "p-2" },
+    "busy",
+  );
+  const activeClaim = environment.store.claimNextTurn("alice");
+  assert.ok(activeClaim !== null);
+  const busyResult = environment.store.resetSessionPiStateForWake(
+    environment.endpoint.id,
+    "alice",
+  );
+  assert.equal(busyResult.id, before.id);
+  const stillOld = environment.foundation.database.connection
+    .prepare("SELECT pi_session_id FROM sessions WHERE id = ?")
+    .get(before.id) as { pi_session_id: string };
+  assert.equal(stillOld.pi_session_id, before.pi_session_id);
+  environment.foundation.database.connection
+    .prepare("UPDATE turns SET state = 'terminal', updated_at = 1 WHERE id = ?")
+    .run(activeClaim.turnId);
+
+  // Fresh fire rotates: same Hitch session, new Pi state.
+  const schedule = environment.wakeStore.add({
+    ownerId: "alice",
+    channel: "telegram",
+    endpointId: environment.endpoint.id,
+    sessionId: before.id,
+    promptTemplate: "fresh briefing",
+    recurrence: { kind: "daily" },
+    timeOfDay: "08:00",
+    timezone: "UTC",
+    enabled: true,
+    freshSession: true,
+    maxFires: null,
+    until: null,
+  });
+  const slot = nextFireAfter(schedule, Date.now());
+  assert.ok(slot !== null);
+  app.runWakeTick(slot + 5 * 60_000);
+  await app.drain();
+
+  const after = environment.foundation.database.connection
+    .prepare(
+      "SELECT id, pi_session_id, transcript_path FROM sessions WHERE id = ?",
+    )
+    .get(before.id) as {
+    id: string;
+    pi_session_id: string;
+    transcript_path: string | null;
+  };
+  assert.equal(after.id, before.id);
+  assert.notEqual(after.pi_session_id, before.pi_session_id);
+  assert.equal(after.transcript_path, null);
+  const fired = environment.foundation.database.connection
+    .prepare(
+      "SELECT session_id FROM turns WHERE prompt_text = 'fresh briefing'",
+    )
+    .get() as { session_id: string };
+  assert.equal(fired.session_id, before.id);
+  assert.equal(calls.length, 1);
+  environment.foundation.close();
+});
+
 test("wake turn is pinned to the session bound at schedule creation", async () => {
   const environment = setup();
   const calls: RuntimeTurn[] = [];

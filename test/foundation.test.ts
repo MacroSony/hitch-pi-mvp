@@ -530,7 +530,26 @@ test("schema 1 state migrates to current schema without losing Turns or outbox",
   const version = migrated.connection.prepare("PRAGMA user_version").get() as {
     user_version: bigint;
   };
-  assert.equal(version.user_version, 5n);
+  assert.equal(version.user_version, 6n);
+  // The v6 turns CHECK must accept compact Turns after migration.
+  const probeIds = migrated.connection
+    .prepare(
+      "SELECT id, user_id FROM channel_endpoints WHERE kind = 'telegram' LIMIT 1",
+    )
+    .get() as { id: string; user_id: string };
+  migrated.connection
+    .prepare(
+      "INSERT INTO sessions(id, user_id, name, pi_session_id, state, created_at, updated_at) VALUES ('session-compact-probe', ?, 'probe', 'pi-probe', 'active', 1, 1)",
+    )
+    .run(probeIds.user_id);
+  migrated.connection
+    .prepare(
+      `INSERT INTO turns(
+         id, user_id, session_id, endpoint_id, idempotency_key, content_digest,
+         prompt_text, operation_kind, ordinal, state, created_at, updated_at
+       ) VALUES ('turn-compact-probe', ?, 'session-compact-probe', ?, 'probe', 'probe', '!compact', 'compact', 99, 'queued', 1, 1)`,
+    )
+    .run(probeIds.user_id, probeIds.id);
   const staged = migrated.connection
     .prepare(
       "SELECT name FROM sqlite_schema WHERE type = 'table' AND name = 'staged_artifacts'",

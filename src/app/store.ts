@@ -446,6 +446,41 @@ export class HitchStore {
       : null;
   }
 
+  /**
+   * Wake-fired context rotation: reset the selected session's Pi state (fresh
+   * transcript) while keeping the Hitch session row, name, and selections.
+   * No-op when a Turn is in flight — completion still writes to the old
+   * transcript, and clobbering mid-Turn state would be worse than one
+   * fire continuing the previous context.
+   */
+  public resetSessionPiStateForWake(
+    endpointId: string,
+    userId: string,
+  ): { id: string } {
+    return transaction(this.#database, () => {
+      const selected = this.#selectedSession(endpointId, userId);
+      if (selected === null || selected.state === "stopped")
+        return this.#createSession(endpointId, userId);
+      if (selected.state === "quarantined")
+        throw new AppError(
+          "session-quarantined",
+          "use !recover before sending another Turn",
+        );
+      const active = this.#database
+        .prepare(
+          "SELECT 1 FROM turns WHERE user_id = ? AND state IN ('starting', 'running') LIMIT 1",
+        )
+        .get(userId);
+      if (active !== undefined) return { id: selected.id };
+      this.#database
+        .prepare(
+          "UPDATE sessions SET pi_session_id = ?, transcript_path = NULL, updated_at = ? WHERE id = ? AND user_id = ?",
+        )
+        .run(this.ids.next("pi"), this.clock.now(), selected.id, userId);
+      return { id: selected.id };
+    });
+  }
+
   public admitPrompt(
     identity: MessageIdentity,
     prompt: string,
@@ -1231,6 +1266,51 @@ export class HitchStore {
           }
           break;
         }
+        case "compact": {
+          if (session.state !== "active")
+            throw new AppError(
+              "session-quarantined",
+              "selected session is not active; use !recover or !new",
+            );
+          this.admissionGuard(identity.endpoint.userId);
+          const capacity = this.#database
+            .prepare(
+              "SELECT count(*) AS count FROM turns WHERE user_id = ? AND state IN ('queued', 'starting', 'running')",
+            )
+            .get(identity.endpoint.userId) as { count: bigint };
+          if (Number(capacity.count) >= MAX_ACTIVE_AND_QUEUED)
+            throw new AppError(
+              "busy",
+              "one Turn is active and three are already queued",
+            );
+          const turnId = this.ids.next("turn");
+          const now = this.clock.now();
+          this.#database
+            .prepare(
+              `INSERT INTO turns(
+                 id, user_id, session_id, endpoint_id, idempotency_key, content_digest,
+                 prompt_text, operation_kind, ordinal, state, created_at, updated_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, 'compact', ?, 'queued', ?, ?)`,
+            )
+            .run(
+              turnId,
+              identity.endpoint.userId,
+              session.id,
+              identity.endpoint.id,
+              identity.idempotencyKey,
+              identity.contentDigest,
+              sourceText,
+              this.#nextOrdinal(identity.endpoint.userId),
+              now,
+              now,
+            );
+          return {
+            turnId,
+            userId: identity.endpoint.userId,
+            duplicate: false,
+            abortTurnId: null,
+          };
+        }
         case "send": {
           if (session.state !== "active")
             throw new AppError(
@@ -1325,6 +1405,7 @@ export class HitchStore {
             "!profile [list|use <id>|preview <id>|status|clear] - manage persona profiles",
             "!wake [add|list|del|pause|resume|tz] - manage scheduled wake-ups",
             "!send <relative-path> - publish a workspace file",
+            "!compact - compact the session context",
             "!help - show this list",
           ].join("\n");
           break;
@@ -1408,7 +1489,7 @@ export class HitchStore {
             session_id: string;
             endpoint_id: string;
             prompt_text: string;
-            operation_kind: "prompt" | "publish";
+            operation_kind: "prompt" | "publish" | "compact";
             publish_path: string | null;
             workspace_path: string;
             pi_session_id: string;
@@ -1474,6 +1555,7 @@ export class HitchStore {
         ...(row.operation_kind === "publish" && row.publish_path !== null
           ? { publishPath: row.publish_path }
           : {}),
+        ...(row.operation_kind === "compact" ? { compact: true } : {}),
       };
     });
   }

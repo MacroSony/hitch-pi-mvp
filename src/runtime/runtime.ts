@@ -14,6 +14,7 @@ export interface RuntimeTurn {
   readonly forgeSelection?: ForgeSelection;
   readonly artifacts?: readonly RuntimeArtifact[];
   readonly publishPath?: string;
+  readonly compact?: boolean;
 }
 
 export interface RuntimeArtifact {

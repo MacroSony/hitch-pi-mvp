@@ -1812,6 +1812,45 @@ export class NativePiRuntime implements AgentRuntime {
           ...(transcriptPath === undefined ? {} : { transcriptPath }),
         };
       }
+      if (turn.compact === true) {
+        // Maintenance Turn: run session compaction instead of a model prompt.
+        // The compact RPC performs the summarization itself and rewrites the
+        // resumed Pi session; the response is the completion signal.
+        phase = "prompt";
+        promptSubmitted = true;
+        const compaction = record(
+          await controller.send({ type: "compact" }, this.#turnTimeoutMs),
+        );
+        const tokensBefore =
+          compaction !== null &&
+          Number.isSafeInteger(compaction.tokensBefore) &&
+          Number(compaction.tokensBefore) >= 0
+            ? Number(compaction.tokensBefore)
+            : undefined;
+        if (tokensBefore === undefined)
+          throw new Error("compaction returned invalid metadata");
+        const tokensAfter =
+          compaction !== null &&
+          Number.isSafeInteger(compaction.estimatedTokensAfter) &&
+          Number(compaction.estimatedTokensAfter) >= 0
+            ? Number(compaction.estimatedTokensAfter)
+            : undefined;
+        await controller.closeCleanly();
+        const compactTranscript =
+          turn.transcriptPath === undefined
+            ? undefined
+            : syncTranscript(turn.transcriptPath, sessionDirectory);
+        return {
+          outcome: "succeeded",
+          text: `Context compacted: ~${tokensBefore} tokens before${
+            tokensAfter === undefined ? "" : `, ~${tokensAfter} tokens after`
+          }.`,
+          sessionReusable: true,
+          ...(compactTranscript === undefined
+            ? {}
+            : { transcriptPath: compactTranscript }),
+        };
+      }
       const settled = controller.waitForEvent(
         (event) => event.type === "agent_settled",
         this.#turnTimeoutMs + 6_000,

@@ -907,6 +907,37 @@ test("a timed-out Turn is terminal and quarantines rather than replaying", async
   environment.foundation.close();
 });
 
+test("!compact parses, enqueues a compact Turn, and claims with the compact flag", () => {
+  const environment = setup();
+  const endpoint = environment.store.resolveTelegramEndpoint(
+    "primary",
+    "101",
+    "101",
+  );
+  assert.ok(endpoint !== null);
+  const result = environment.store.executeCommand(
+    { endpoint, idempotencyKey: "c-1", contentDigest: "c-1" },
+    { kind: "compact" },
+    "!compact",
+    [],
+    undefined,
+  );
+  assert.equal(result.duplicate, false);
+  const claimed = environment.store.claimNextTurn("alice");
+  assert.ok(claimed !== null);
+  assert.equal(claimed.compact, true);
+  assert.equal(claimed.prompt, "!compact");
+  const row = environment.foundation.database.connection
+    .prepare("SELECT operation_kind, publish_path FROM turns WHERE id = ?")
+    .get(claimed.turnId) as {
+    operation_kind: string;
+    publish_path: string | null;
+  };
+  assert.equal(row.operation_kind, "compact");
+  assert.equal(row.publish_path, null);
+  environment.foundation.close();
+});
+
 test("forge defaults apply at claim time and yield to explicit session selections", () => {
   const environment = setup();
   const store = new HitchStore(

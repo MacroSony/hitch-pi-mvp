@@ -14,6 +14,9 @@ export interface WakeSchedule {
   timeOfDay: string;
   timezone: string;
   enabled: boolean;
+  /** When true, each fire resets the session's Pi context (fresh transcript)
+   *  before enqueueing; the Hitch session and selections are preserved. */
+  freshSession?: boolean;
   maxFires: number | null;
   until: string | null;
   fireCount: number;

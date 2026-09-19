@@ -51,6 +51,7 @@ export type Command =
       readonly id: string;
     }
   | { readonly kind: "send"; readonly path: string }
+  | { readonly kind: "compact" }
   | { readonly kind: "help" }
   | WakeCommand
   | { readonly kind: "unknown"; readonly name: string };
@@ -70,6 +71,7 @@ export const HELP_TEXT = [
   "!profile [list|use <id>|preview <id>|status|clear] - manage persona profiles",
   "!wake [add|list|del|pause|resume|tz] - manage scheduled wake prompts",
   "!send <relative-path> - publish a workspace file",
+  "!compact - compact the session context",
   "!help - show this list",
 ].join("\n");
 
@@ -484,6 +486,10 @@ export function parseCommand(text: string): Command | null {
       return parseWakeCommand(argument);
     case "send":
       return { kind: "send", path: boundedPath(argument) };
+    case "compact":
+      if (argument.trim().length > 0)
+        throw new AppError("rejected", "!compact takes no arguments");
+      return { kind: "compact" };
     case "help":
       return { kind: "help" };
     default:

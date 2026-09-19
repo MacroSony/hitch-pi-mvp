@@ -9,7 +9,7 @@ import {
   type ValidatedTopology,
 } from "./filesystem.js";
 
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 const SCHEMA_ID = "hitch-pi-mvp-schema-5";
 const EXPECTED_TABLES = [
   "app_meta",
@@ -99,7 +99,7 @@ CREATE TABLE turns (
   idempotency_key TEXT NOT NULL,
   content_digest TEXT NOT NULL,
   prompt_text TEXT NOT NULL,
-  operation_kind TEXT NOT NULL DEFAULT 'prompt' CHECK (operation_kind IN ('prompt', 'publish')),
+  operation_kind TEXT NOT NULL DEFAULT 'prompt' CHECK (operation_kind IN ('prompt', 'publish', 'compact')),
   publish_path TEXT,
   ordinal INTEGER NOT NULL,
   state TEXT NOT NULL CHECK (state IN ('queued', 'starting', 'running', 'terminal')),
@@ -115,7 +115,8 @@ CREATE TABLE turns (
   FOREIGN KEY (endpoint_id, user_id) REFERENCES channel_endpoints(id, user_id),
   CHECK (
     (operation_kind = 'prompt' AND publish_path IS NULL) OR
-    (operation_kind = 'publish' AND publish_path IS NOT NULL)
+    (operation_kind = 'publish' AND publish_path IS NOT NULL) OR
+    (operation_kind = 'compact' AND publish_path IS NULL)
   )
 ) STRICT;
 
@@ -233,6 +234,48 @@ SELECT id, tuple_key, user_id, kind, account_id, platform_user_id, private_chat_
 FROM channel_endpoints;
 DROP TABLE channel_endpoints;
 ALTER TABLE channel_endpoints_new RENAME TO channel_endpoints;
+`;
+
+const MIGRATE_5_TO_6 = `
+CREATE TABLE turns_new (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id),
+  session_id TEXT NOT NULL,
+  endpoint_id TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL,
+  content_digest TEXT NOT NULL,
+  prompt_text TEXT NOT NULL,
+  operation_kind TEXT NOT NULL DEFAULT 'prompt' CHECK (operation_kind IN ('prompt', 'publish', 'compact')),
+  publish_path TEXT,
+  ordinal INTEGER NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('queued', 'starting', 'running', 'terminal')),
+  outcome TEXT CHECK (outcome IN ('succeeded', 'failed', 'cancelled', 'timed-out', 'unknown')),
+  result_text TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE (endpoint_id, idempotency_key),
+  UNIQUE (user_id, ordinal),
+  UNIQUE (id, user_id),
+  UNIQUE (id, endpoint_id, user_id),
+  FOREIGN KEY (session_id, user_id) REFERENCES sessions(id, user_id),
+  FOREIGN KEY (endpoint_id, user_id) REFERENCES channel_endpoints(id, user_id),
+  CHECK (
+    (operation_kind = 'prompt' AND publish_path IS NULL) OR
+    (operation_kind = 'publish' AND publish_path IS NOT NULL) OR
+    (operation_kind = 'compact' AND publish_path IS NULL)
+  )
+) STRICT;
+INSERT INTO turns_new(
+  id, user_id, session_id, endpoint_id, idempotency_key, content_digest,
+  prompt_text, operation_kind, publish_path, ordinal, state, outcome,
+  result_text, created_at, updated_at
+)
+SELECT id, user_id, session_id, endpoint_id, idempotency_key, content_digest,
+       prompt_text, operation_kind, publish_path, ordinal, state, outcome,
+       result_text, created_at, updated_at
+FROM turns;
+DROP TABLE turns;
+ALTER TABLE turns_new RENAME TO turns;
 `;
 
 const MIGRATE_1_TO_2 = `
@@ -399,6 +442,7 @@ function verifySchema(connection: DatabaseSync): void {
       connection.exec(MIGRATE_2_TO_3);
       connection.exec(MIGRATE_3_TO_4);
       connection.exec(MIGRATE_4_TO_5);
+      connection.exec(MIGRATE_5_TO_6);
       connection
         .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
         .run(SCHEMA_ID, "schema_id");
@@ -408,7 +452,7 @@ function verifySchema(connection: DatabaseSync): void {
         .prepare("PRAGMA foreign_key_check")
         .all() as unknown[];
       if (violations.length > 0)
-        throw new FoundationError("database schema 5 foreign key check failed");
+        throw new FoundationError("database schema 6 foreign key check failed");
     } catch (error) {
       connection.exec("ROLLBACK");
       connection.exec("PRAGMA foreign_keys = ON");
@@ -427,6 +471,7 @@ function verifySchema(connection: DatabaseSync): void {
       connection.exec(MIGRATE_2_TO_3);
       connection.exec(MIGRATE_3_TO_4);
       connection.exec(MIGRATE_4_TO_5);
+      connection.exec(MIGRATE_5_TO_6);
       connection
         .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
         .run(SCHEMA_ID, "schema_id");
@@ -436,7 +481,7 @@ function verifySchema(connection: DatabaseSync): void {
         .prepare("PRAGMA foreign_key_check")
         .all() as unknown[];
       if (violations.length > 0)
-        throw new FoundationError("database schema 5 foreign key check failed");
+        throw new FoundationError("database schema 6 foreign key check failed");
     } catch (error) {
       connection.exec("ROLLBACK");
       connection.exec("PRAGMA foreign_keys = ON");
@@ -454,6 +499,7 @@ function verifySchema(connection: DatabaseSync): void {
         throw new FoundationError("database schema 3 identity is unknown");
       connection.exec(MIGRATE_3_TO_4);
       connection.exec(MIGRATE_4_TO_5);
+      connection.exec(MIGRATE_5_TO_6);
       connection
         .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
         .run(SCHEMA_ID, "schema_id");
@@ -473,6 +519,7 @@ function verifySchema(connection: DatabaseSync): void {
       if (meta?.value !== "hitch-pi-mvp-schema-4")
         throw new FoundationError("database schema 4 identity is unknown");
       connection.exec(MIGRATE_4_TO_5);
+      connection.exec(MIGRATE_5_TO_6);
       connection
         .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
         .run(SCHEMA_ID, "schema_id");
@@ -482,7 +529,28 @@ function verifySchema(connection: DatabaseSync): void {
         .prepare("PRAGMA foreign_key_check")
         .all() as unknown[];
       if (violations.length > 0)
-        throw new FoundationError("database schema 5 foreign key check failed");
+        throw new FoundationError("database schema 6 foreign key check failed");
+    } catch (error) {
+      connection.exec("ROLLBACK");
+      connection.exec("PRAGMA foreign_keys = ON");
+      throw error;
+    }
+    connection.exec("PRAGMA foreign_keys = ON");
+  } else if (version === 5) {
+    connection.exec("PRAGMA foreign_keys = OFF");
+    connection.exec("BEGIN IMMEDIATE");
+    try {
+      connection.exec(MIGRATE_5_TO_6);
+      connection
+        .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
+        .run(SCHEMA_ID, "schema_id");
+      connection.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+      connection.exec("COMMIT");
+      const violations = connection
+        .prepare("PRAGMA foreign_key_check")
+        .all() as unknown[];
+      if (violations.length > 0)
+        throw new FoundationError("database schema 6 foreign key check failed");
     } catch (error) {
       connection.exec("ROLLBACK");
       connection.exec("PRAGMA foreign_keys = ON");

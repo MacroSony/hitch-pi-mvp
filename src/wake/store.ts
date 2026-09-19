@@ -107,7 +107,7 @@ type ValidationResult =
   | { ok: true; data: WakeStoreFile }
   | { ok: false; error: string };
 
-const SCHEDULE_ALLOWED_KEYS = new Set([
+const SCHEDULE_REQUIRED_KEYS = new Set([
   "id",
   "ownerId",
   "channel",
@@ -123,6 +123,14 @@ const SCHEDULE_ALLOWED_KEYS = new Set([
   "fireCount",
   "lastFiredAt",
   "createdAt",
+]);
+
+// Optional fields may be absent (older files) but are validated when present.
+const SCHEDULE_OPTIONAL_KEYS = new Set(["freshSession"]);
+
+const SCHEDULE_ALLOWED_KEYS = new Set([
+  ...SCHEDULE_REQUIRED_KEYS,
+  ...SCHEDULE_OPTIONAL_KEYS,
 ]);
 
 function validateStoreData(data: unknown): ValidationResult {
@@ -192,7 +200,7 @@ function validateStoreData(data: unknown): ValidationResult {
         return { ok: false, error: `Unknown field in schedule: ${k}` };
       }
     }
-    for (const reqKey of SCHEDULE_ALLOWED_KEYS) {
+    for (const reqKey of SCHEDULE_REQUIRED_KEYS) {
       if (!(reqKey in scheduleObj)) {
         return {
           ok: false,
@@ -275,6 +283,11 @@ function validateStoreData(data: unknown): ValidationResult {
       return { ok: false, error: "Schedule enabled must be a boolean" };
     }
 
+    const freshSession = scheduleObj.freshSession;
+    if (freshSession !== undefined && typeof freshSession !== "boolean") {
+      return { ok: false, error: "Schedule freshSession must be a boolean" };
+    }
+
     const maxFires = scheduleObj.maxFires;
     if (
       maxFires !== null &&
@@ -335,6 +348,7 @@ function validateStoreData(data: unknown): ValidationResult {
       timeOfDay,
       timezone,
       enabled,
+      ...(freshSession === undefined ? {} : { freshSession }),
       maxFires,
       until,
       fireCount,
@@ -532,6 +546,12 @@ export class WakeStore {
       throw new Error("Invalid enabled flag");
     }
     if (
+      input.freshSession !== undefined &&
+      typeof input.freshSession !== "boolean"
+    ) {
+      throw new Error("Invalid freshSession flag");
+    }
+    if (
       input.maxFires !== null &&
       (typeof input.maxFires !== "number" ||
         !Number.isSafeInteger(input.maxFires) ||
@@ -560,6 +580,9 @@ export class WakeStore {
       timeOfDay: input.timeOfDay,
       timezone: input.timezone,
       enabled: input.enabled,
+      ...(input.freshSession === undefined
+        ? {}
+        : { freshSession: input.freshSession }),
       maxFires: input.maxFires,
       until: input.until,
       fireCount: 0,
