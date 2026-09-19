@@ -169,31 +169,47 @@ const backendConfiguration = Object.freeze({
 });
 assertSandboxBackendReady(backendConfiguration);
 
-const strictPath = Type.String({ minLength: 1, maxLength: 4096 });
+// Model-visible path guidance. Workspace paths are passed relative to the
+// workspace root; only explicit read-only /inbox/... paths may appear for the
+// read/search/list tools. The backend validators are unchanged.
+const pathDescriptions = {
+	read: "Workspace-relative file path (for example \"notes/todo.md\"), or an explicit read-only /inbox/... path. Never prefix it with /workspace/ or ./; .. traversal is rejected.",
+	write: "Workspace-relative file path (for example \"notes/todo.md\"). Never prefix it with /workspace/ or ./; .. traversal is rejected.",
+	edit: "Workspace-relative file path (for example \"notes/todo.md\"). Never prefix it with /workspace/ or ./; .. traversal is rejected.",
+	ls: "Workspace-relative directory path (for example \"notes\"). Omit it or pass \".\" for the workspace root. An explicit read-only /inbox/... path lists inbound files. Never prefix it with /workspace/ or ./; .. traversal is rejected.",
+	grep: "Workspace-relative directory whose file contents to search (for example \"src\"). Omit it or pass \".\" for the workspace root. An explicit read-only /inbox/... path searches inbound files. Never prefix it with /workspace/ or ./; .. traversal is rejected.",
+	find: "Workspace-relative directory to search (for example \"src\"). Omit it or pass \".\" for the workspace root. An explicit read-only /inbox/... path searches inbound files. Never prefix it with /workspace/ or ./; .. traversal is rejected.",
+	hitch_publish: "Workspace-relative file path, for example \"pelican-on-bike.svg\". Never prefix it with /workspace/ or ./; .. traversal is rejected. Success only snapshots the file; the service queues delivery after the Turn completes.",
+} as const;
+
+function pathType(description: string) {
+	return Type.String({ minLength: 1, maxLength: 4096, description });
+}
+
 const schemas = {
 	read: Type.Object({
-		path: strictPath,
+		path: pathType(pathDescriptions.read),
 		offset: Type.Optional(Type.Integer({ minimum: 1 })),
 		limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 2000 })),
 	}, { additionalProperties: false }),
 	write: Type.Object({
-		path: strictPath,
+		path: pathType(pathDescriptions.write),
 		content: Type.String({ maxLength: 2 * 1024 * 1024 }),
 	}, { additionalProperties: false }),
 	edit: Type.Object({
-		path: strictPath,
+		path: pathType(pathDescriptions.edit),
 		edits: Type.Array(Type.Object({
 			oldText: Type.String({ minLength: 1, maxLength: 2 * 1024 * 1024 }),
 			newText: Type.String({ maxLength: 2 * 1024 * 1024 }),
 		}, { additionalProperties: false }), { minItems: 1, maxItems: 64 }),
 	}, { additionalProperties: false }),
 	ls: Type.Object({
-		path: Type.Optional(strictPath),
+		path: Type.Optional(pathType(pathDescriptions.ls)),
 		limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 500 })),
 	}, { additionalProperties: false }),
 	grep: Type.Object({
 		pattern: Type.String({ minLength: 1, maxLength: 4096 }),
-		path: Type.Optional(strictPath),
+		path: Type.Optional(pathType(pathDescriptions.grep)),
 		glob: Type.Optional(Type.String({ maxLength: 4096 })),
 		ignoreCase: Type.Optional(Type.Boolean()),
 		literal: Type.Optional(Type.Boolean()),
@@ -202,14 +218,14 @@ const schemas = {
 	}, { additionalProperties: false }),
 	find: Type.Object({
 		pattern: Type.String({ minLength: 1, maxLength: 4096 }),
-		path: Type.Optional(strictPath),
+		path: Type.Optional(pathType(pathDescriptions.find)),
 		limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 500 })),
 	}, { additionalProperties: false }),
 	bash: Type.Object({
 		command: Type.String({ minLength: 1, maxLength: 65536 }),
 		timeout: Type.Optional(Type.Integer({ minimum: 1, maximum: 5 })),
 	}, { additionalProperties: false }),
-	hitch_publish: Type.Object({ path: strictPath }, { additionalProperties: false }),
+	hitch_publish: Type.Object({ path: pathType(pathDescriptions.hitch_publish) }, { additionalProperties: false }),
 } as const;
 
 function stableDigest(value: unknown): string {
@@ -277,14 +293,14 @@ export default function (pi: ExtensionAPI): void {
 	}
 
 	const definitions = [
-		["read", "Read a UTF-8 file beneath /workspace or the read-only /inbox."],
-		["write", "Write a UTF-8 file beneath /workspace."],
-		["edit", "Edit a UTF-8 file beneath /workspace using exact replacements."],
-		["ls", "List a directory beneath /workspace or /inbox."],
-		["grep", "Search file contents beneath /workspace or /inbox."],
-		["find", "Find paths beneath /workspace or /inbox."],
-		["bash", "Run a bounded shell command in the Hitch sandbox."],
-		["hitch_publish", "Snapshot one workspace file into the Turn publication bridge."],
+		["read", "Read a UTF-8 file. Pass a workspace-relative path such as \"notes/todo.md\"; never prefix it with /workspace/ or ./. An explicit /inbox/... path reads the read-only inbound mount; .. traversal is rejected."],
+		["write", "Write a UTF-8 file to the workspace. Pass a workspace-relative path such as \"notes/todo.md\"; never prefix it with /workspace/ or ./ and never use .. traversal."],
+		["edit", "Edit a workspace UTF-8 file using exact replacements. Pass a workspace-relative path such as \"notes/todo.md\"; never prefix it with /workspace/ or ./ and never use .. traversal."],
+		["ls", "List a workspace directory. Pass a workspace-relative path such as \"notes\"; omit it or pass \".\" for the workspace root, and never prefix it with /workspace/ or ./. An explicit /inbox/... path lists the read-only inbound mount; .. traversal is rejected."],
+		["grep", "Search workspace file contents. Pass a workspace-relative path; omit it or pass \".\" for the workspace root, and never prefix it with /workspace/ or ./. An explicit /inbox/... path searches the read-only inbound mount; .. traversal is rejected."],
+		["find", "Find workspace paths. Pass a workspace-relative path; omit it or pass \".\" for the workspace root, and never prefix it with /workspace/ or ./. An explicit /inbox/... path searches the read-only inbound mount; .. traversal is rejected."],
+		["bash", "Run a bounded shell command in the Hitch sandbox. Unlike the file tools, bash starts with cwd /workspace, where absolute paths such as /workspace/report.pdf are valid; /workspace prefixes belong in commands, not in file-tool path arguments."],
+		["hitch_publish", "Publish one workspace file to the current IM conversation by snapshotting it. Use a workspace-relative path, for example hitch_publish({\"path\":\"pelican-on-bike.svg\"}); never prefix it with /workspace/ or ./ and never use .. traversal. Success only snapshots the file; the service queues delivery after the Turn completes, so do not tell the user delivery is already confirmed. Do not tell the user to open /workspace (they cannot)."],
 	] as const;
 	for (const [name, description] of definitions) {
 		pi.registerTool({
