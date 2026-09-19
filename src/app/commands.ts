@@ -56,24 +56,45 @@ export type Command =
   | WakeCommand
   | { readonly kind: "unknown"; readonly name: string };
 
-export const HELP_TEXT = [
-  "!new [name] - create and select a session",
-  "!sessions - list sessions",
-  "!switch <id-or-name> - select a session",
-  "!status - session, model, queue, and sandbox state",
-  "!abort - cancel the active Turn",
-  "!stop - stop the session and cancel queued Turns",
-  "!recover - replace a quarantined session",
-  "!models [filter] - list available models",
-  "!model <provider>/<id> - select a model",
-  "!thinking <level> - select a thinking level",
-  "!preset [list|use <id>|preview <id>|status|clear] - manage preset prompt stacks",
-  "!profile [list|use <id>|preview <id>|status|clear] - manage persona profiles",
-  "!wake [add|list|del|pause|resume|tz] - manage scheduled wake prompts",
-  "!send <relative-path> - publish a workspace file",
-  "!compact - compact the session context",
-  "!help - show this list",
-].join("\n");
+// Generated help is one exported source. Every command line is its own
+// paragraph (a real blank line, never a lone LF) so text clients that fold
+// single newlines to spaces still keep the command boundaries. Command syntax
+// is wrapped in inline code so angle brackets are not mistaken for markup.
+// These strings must stay single-line; the join below supplies the separators.
+const HELP_PARAGRAPHS: readonly string[] = [
+  "Hitch commands",
+  "Sessions",
+  "`!new [name]` - create and select a session",
+  "`!sessions` - list your sessions",
+  "`!switch <id-or-name>` - select a session",
+  "Status and recovery",
+  "`!status` - show session, model, queue, and sandbox state",
+  "`!abort` - cancel the active Turn",
+  "`!stop` - stop the session and cancel queued Turns",
+  "`!recover` - replace a quarantined session",
+  "`!compact` - compact the session context",
+  "Models",
+  "`!models [filter]` - list available models",
+  "`!model <provider>/<id>` - select a model",
+  "`!thinking <level>` - select a thinking level",
+  "Presets and profiles",
+  "`!preset [list|use <id>|preview <id>|status|clear]` - manage preset prompt stacks",
+  "`!profile [list|use <id>|preview <id>|status|clear]` - manage persona profiles",
+  "Scheduled wake-ups",
+  "`!wake [add|list|del|pause|resume|tz]` - manage scheduled wake prompts",
+  "Files and help",
+  "`!send <relative-path>` - publish a workspace file",
+  "`!help` - show this list",
+  "Examples",
+  "`!new research`",
+  "`!switch research`",
+  "`!model openai/gpt-4o`",
+  "`!thinking high`",
+  "`!wake add daily 09:00 --tz Asia/Shanghai Review the build`",
+  "`!send notes/report.md`",
+];
+
+export const HELP_TEXT = HELP_PARAGRAPHS.join("\n\n");
 
 function boundedArgument(value: string, label: string): string {
   const trimmed = value.trim();

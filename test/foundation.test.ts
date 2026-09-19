@@ -530,8 +530,8 @@ test("schema 1 state migrates to current schema without losing Turns or outbox",
   const version = migrated.connection.prepare("PRAGMA user_version").get() as {
     user_version: bigint;
   };
-  assert.equal(version.user_version, 6n);
-  // The v6 turns CHECK must accept compact Turns after migration.
+  assert.equal(version.user_version, 7n);
+  // The v7 turns CHECK must accept compact Turns after migration.
   const probeIds = migrated.connection
     .prepare(
       "SELECT id, user_id FROM channel_endpoints WHERE kind = 'telegram' LIMIT 1",
@@ -592,4 +592,59 @@ test("non-private database files are rejected", () => {
   writeFileSync(databasePath, "", { mode: 0o644 });
   chmodSync(databasePath, 0o644);
   assert.throws(() => openFoundationDatabase(setup.dataRoot), FoundationError);
+});
+
+test("schema 6 migrates context snapshot column without changing existing rows", () => {
+  const setup = fixture();
+  const initial = bootstrapFoundation(setup.config());
+  const userCount = rowCount(initial.database.connection, "users");
+  initial.database.connection.exec(
+    "ALTER TABLE sessions DROP COLUMN context_usage; UPDATE app_meta SET value='hitch-pi-mvp-schema-5' WHERE key='schema_id'; PRAGMA user_version=6;",
+  );
+  initial.close();
+  const migrated = openFoundationDatabase(setup.dataRoot);
+  try {
+    assert.equal(
+      (
+        migrated.connection.prepare("PRAGMA user_version").get() as {
+          user_version: bigint;
+        }
+      ).user_version,
+      7n,
+    );
+    assert.equal(rowCount(migrated.connection, "users"), userCount);
+    assert.equal(
+      (
+        migrated.connection
+          .prepare("SELECT value FROM app_meta WHERE key='schema_id'")
+          .get() as { value: string }
+      ).value,
+      "hitch-pi-mvp-schema-7",
+    );
+    assert.deepEqual(
+      migrated.connection.prepare("PRAGMA foreign_key_check").all(),
+      [],
+    );
+    assert.ok(
+      migrated.connection
+        .prepare("PRAGMA table_info(sessions)")
+        .all()
+        .some((row) => row.name === "context_usage"),
+    );
+  } finally {
+    migrated.close();
+  }
+});
+
+test("schema 6 with unknown identity is rejected before migration", () => {
+  const setup = fixture();
+  const initial = bootstrapFoundation(setup.config());
+  initial.database.connection.exec(
+    "ALTER TABLE sessions DROP COLUMN context_usage; UPDATE app_meta SET value='unknown-schema' WHERE key='schema_id'; PRAGMA user_version=6;",
+  );
+  initial.close();
+  assert.throws(
+    () => openFoundationDatabase(setup.dataRoot),
+    /schema 6 identity is unknown/u,
+  );
 });

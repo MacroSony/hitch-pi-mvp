@@ -369,6 +369,9 @@ test("help lists commands and send validates workspace files before dispatch", (
     .join("\n");
   assert.match(help, /!send <relative-path>/u);
   assert.match(help, /!recover/u);
+  assert.ok(help.includes("\n\n"));
+  assert.ok(!help.includes("\\n"));
+  assert.doesNotMatch(help, /(?<!\n)\n(?!\n)/u);
 
   assert.equal(
     app.receiveTelegram("primary", update(41, "101", "!send hello.txt"))
@@ -1394,6 +1397,54 @@ test("runtime progress enforces per-message and per-Turn bounds", async () => {
     .reduce((total, text) => total + Buffer.byteLength(text, "utf8"), 0);
   assert.ok(progressBytes <= 64 * 1024);
   assert.ok(texts.includes("done"));
+  environment.foundation.close();
+});
+
+test("progress preserves synthetic tool paragraph boundaries and leaves final reply unchanged", async () => {
+  const environment = setup();
+  const runtime = new FakeAgentRuntime(async (_turn, _signal, onProgress) => {
+    // Fixture for native-runtime's synthetic tool line, emitted as
+    // "\n\n⏳ <tool>\n\n" so clients that fold single newlines keep the call
+    // in its own paragraph. Preceding model text shares the same buffer.
+    onProgress("Checking the workspace.");
+    onProgress("\n\n⏳ bash\n\n");
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    return {
+      outcome: "succeeded",
+      text: "Final answer: all checks passed.",
+      sessionReusable: true,
+    };
+  });
+  const app = new HitchApplication(
+    environment.store,
+    runtime,
+    "always-trigger",
+    undefined,
+    5,
+  );
+  app.start();
+
+  assert.equal(
+    app.receiveTelegram("primary", update(920, "101", "run the checks"))
+      .accepted,
+    true,
+  );
+  await app.drain();
+
+  const texts = environment.store
+    .pendingTelegramOutbox("primary")
+    .map(({ text }) => text ?? "");
+  assert.ok(
+    texts.includes("Checking the workspace.\n\n⏳ bash\n\n"),
+    "progress must preserve the blank-line tool boundary verbatim",
+  );
+  assert.ok(texts.includes("Final answer: all checks passed."));
+  const final = texts.find((text) => text.startsWith("Final answer"));
+  assert.equal(final, "Final answer: all checks passed.");
+  assert.ok(
+    final !== undefined && !final.includes("⏳"),
+    "synthetic tool progress must not bleed into final text",
+  );
   environment.foundation.close();
 });
 

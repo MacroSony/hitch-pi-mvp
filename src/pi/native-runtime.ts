@@ -53,6 +53,7 @@ import {
 } from "./profile-preparation.js";
 import type {
   AgentRuntime,
+  ContextUsage,
   RuntimeArtifact,
   RuntimeModel,
   RuntimeResult,
@@ -616,6 +617,12 @@ export function parseCatalog(value: unknown): readonly RuntimeModel[] {
         : [];
       if (input.length === 0)
         throw new Error("Pi model catalog input capability is invalid");
+      const contextWindow =
+        typeof model.contextWindow === "number" &&
+        Number.isSafeInteger(model.contextWindow) &&
+        model.contextWindow > 0
+          ? model.contextWindow
+          : undefined;
       return {
         provider,
         id,
@@ -623,6 +630,7 @@ export function parseCatalog(value: unknown): readonly RuntimeModel[] {
         reasoning: model.reasoning === true,
         input: [...new Set(input)].sort(),
         thinkingLevels: supportedThinkingLevels(model),
+        ...(contextWindow === undefined ? {} : { contextWindow }),
       };
     })
     .sort((left, right) =>
@@ -823,7 +831,7 @@ class PiRpcProcess {
         // text deltas. Final responses are assembled from the assistant
         // snapshot, so these lines never contaminate terminal text.
         this.onTextDelta?.(
-          `⏳ ${event.toolName}${toolArgPreview(event.args)}\n`,
+          `\n\n⏳ ${event.toolName}${toolArgPreview(event.args)}\n\n`,
         );
       }
       if (event.type === "response" && typeof event.id === "string") {
@@ -966,6 +974,47 @@ function responseData(response: JsonRecord): JsonRecord {
   const data = record(response.data);
   if (data === null) throw new Error("Pi RPC response data is invalid");
   return data;
+}
+
+/** Parse only the small, non-cumulative context snapshot needed by !status. */
+export function parseContextUsage(value: unknown): ContextUsage | undefined {
+  const data = record(value);
+  const usage = record(data?.contextUsage);
+  if (usage === null) return undefined;
+  const contextWindow = usage.contextWindow;
+  if (
+    typeof contextWindow !== "number" ||
+    !Number.isSafeInteger(contextWindow) ||
+    contextWindow <= 0
+  )
+    return undefined;
+  const tokens = usage.tokens;
+  if (
+    tokens !== null &&
+    (typeof tokens !== "number" || !Number.isSafeInteger(tokens) || tokens < 0)
+  )
+    return undefined;
+  return {
+    tokens,
+    contextWindow,
+    percent: tokens === null ? null : (tokens / contextWindow) * 100,
+  };
+}
+
+async function readContextUsage(
+  controller: PiRpcProcess,
+): Promise<ContextUsage | undefined> {
+  try {
+    const response = await controller.send(
+      { type: "get_session_stats" },
+      2_000,
+    );
+    return parseContextUsage(responseData(response));
+  } catch {
+    // Context reporting is advisory. A rejected, timed-out, or malformed
+    // stats RPC must not turn an otherwise durable Turn into an unknown one.
+    return undefined;
+  }
 }
 
 function assetRoot(): string {
@@ -1730,6 +1779,7 @@ export class NativePiRuntime implements AgentRuntime {
         outcome: "succeeded",
         text: "Nothing to compact yet; this session has no saved conversation.",
         sessionReusable: true,
+        contextUsage: null,
       };
     const inputArtifacts = turn.artifacts ?? [];
     if (
@@ -1909,6 +1959,7 @@ export class NativePiRuntime implements AgentRuntime {
             outcome: timedOut ? "timed-out" : "cancelled",
             text: "",
             sessionReusable: true,
+            contextUsage: null,
             ...(compactTranscript === undefined
               ? {}
               : { transcriptPath: compactTranscript }),
@@ -1931,6 +1982,7 @@ export class NativePiRuntime implements AgentRuntime {
           Number(compaction.estimatedTokensAfter) >= 0
             ? Number(compaction.estimatedTokensAfter)
             : undefined;
+        const contextUsage = await readContextUsage(controller);
         await controller.closeCleanly();
         const compactTranscript =
           turn.transcriptPath === undefined
@@ -1942,6 +1994,10 @@ export class NativePiRuntime implements AgentRuntime {
             tokensAfter === undefined ? "" : `, ~${tokensAfter} tokens after`
           }.`,
           sessionReusable: true,
+          modelProvider: selectedModel.provider,
+          modelId: selectedModel.id,
+          thinkingLevel: selectedThinking,
+          contextUsage: contextUsage ?? null,
           ...(compactTranscript === undefined
             ? {}
             : { transcriptPath: compactTranscript }),
@@ -1973,13 +2029,17 @@ export class NativePiRuntime implements AgentRuntime {
       if (forcedKill !== undefined) clearTimeout(forcedKill);
       const assistant = controller.assistantSnapshot();
       const state = responseData(await controller.send({ type: "get_state" }));
+      const contextUsage = await readContextUsage(controller);
       await controller.closeCleanly();
 
       phase = "transcript";
       const model = record(state.model);
       const modelProvider =
-        model === null ? undefined : strictText(model.provider, 128);
-      const modelId = model === null ? undefined : strictText(model.id, 128);
+        model === null
+          ? selectedModel.provider
+          : strictText(model.provider, 128);
+      const modelId =
+        model === null ? selectedModel.id : strictText(model.id, 128);
       const thinking = state.thinkingLevel;
       if (!THINKING_LEVELS.includes(thinking as ThinkingLevel))
         throw new Error("Pi returned an invalid thinking level");
@@ -2035,6 +2095,7 @@ export class NativePiRuntime implements AgentRuntime {
         ...(modelProvider === undefined ? {} : { modelProvider }),
         ...(modelId === undefined ? {} : { modelId }),
         thinkingLevel: thinking as ThinkingLevel,
+        ...(contextUsage === undefined ? {} : { contextUsage }),
         ...(promoted.length === 0 ? {} : { artifacts: promoted }),
       };
     } catch (error) {
@@ -2065,6 +2126,7 @@ export class NativePiRuntime implements AgentRuntime {
             outcome: timedOut ? "timed-out" : "cancelled",
             text: "",
             sessionReusable: true,
+            contextUsage: null,
             ...(compactTranscript === undefined
               ? {}
               : { transcriptPath: compactTranscript }),
@@ -2095,6 +2157,7 @@ export class NativePiRuntime implements AgentRuntime {
             text: "",
             error: error.message,
             sessionReusable: true,
+            contextUsage: null,
             ...(compactTranscript === undefined
               ? {}
               : { transcriptPath: compactTranscript }),

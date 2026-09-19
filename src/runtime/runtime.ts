@@ -44,6 +44,14 @@ export interface RuntimeModel {
   readonly reasoning: boolean;
   readonly input: readonly ("text" | "image")[];
   readonly thinkingLevels: readonly ThinkingLevel[];
+  /** Provider-reported context window, when Pi supplies a valid value. */
+  readonly contextWindow?: number;
+}
+
+export interface ContextUsage {
+  readonly tokens: number | null;
+  readonly contextWindow: number;
+  readonly percent: number | null;
 }
 
 export interface RuntimeResult {
@@ -60,6 +68,8 @@ export interface RuntimeResult {
   readonly modelProvider?: string;
   readonly modelId?: string;
   readonly thinkingLevel?: ThinkingLevel;
+  /** A best-effort snapshot from the controller that completed this Turn. */
+  readonly contextUsage?: ContextUsage | null;
   readonly artifacts?: readonly RuntimeArtifact[];
 }
 

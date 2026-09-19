@@ -450,9 +450,50 @@ test("parseCommand handles --tz position strictly", () => {
   });
 });
 
-test("HELP_TEXT contains !wake command description", () => {
-  assert.match(HELP_TEXT, /!wake/u);
-  assert.match(HELP_TEXT, /!wake \[add\|list\|del\|pause\|resume\|tz\]/u);
+test("HELP_TEXT separates generated lines with real blank lines", () => {
+  // A lone LF is folded to a space by affected clients; generated command
+  // lines must be blank-line separated instead.
+  assert.ok(HELP_TEXT.includes("\n\n"));
+  assert.ok(!HELP_TEXT.includes("\\n"), "help must not contain literal \\n");
+  assert.equal(
+    HELP_TEXT.replaceAll("\n\n", "").includes("\n"),
+    false,
+    "help must not contain a single LF",
+  );
+});
+
+test("HELP_TEXT is grouped and keeps the !wake description", () => {
+  assert.match(HELP_TEXT, /Sessions/u);
+  assert.match(HELP_TEXT, /Status and recovery/u);
+  assert.match(HELP_TEXT, /Models/u);
+  assert.match(HELP_TEXT, /Presets and profiles/u);
+  assert.match(HELP_TEXT, /Scheduled wake-ups/u);
+  assert.match(HELP_TEXT, /`!wake \[add\|list\|del\|pause\|resume\|tz\]`/u);
+  assert.match(HELP_TEXT, /`!send <relative-path>`/u);
+  assert.match(HELP_TEXT, /`!recover`/u);
+});
+
+test("HELP_TEXT marks command syntax as inline code", () => {
+  assert.match(HELP_TEXT, /`!switch <id-or-name>`/u);
+  assert.match(HELP_TEXT, /`!model <provider>\/<id>`/u);
+  assert.match(
+    HELP_TEXT,
+    /`!preset \[list\|use <id>\|preview <id>\|status\|clear\]`/u,
+  );
+  // Angle brackets may only appear inside inline code spans.
+  const outsideInlineCode = HELP_TEXT.replaceAll(/`[^`]*`/gu, "");
+  assert.ok(!outsideInlineCode.includes("<"));
+  assert.ok(!outsideInlineCode.includes(">"));
+});
+
+test("HELP_TEXT includes practical examples", () => {
+  assert.match(HELP_TEXT, /Examples/u);
+  assert.match(HELP_TEXT, /`!new research`/u);
+  assert.match(
+    HELP_TEXT,
+    /`!wake add daily 09:00 --tz Asia\/Shanghai Review the build`/u,
+  );
+  assert.match(HELP_TEXT, /`!send notes\/report\.md`/u);
 });
 
 test("existing commands parse unchanged", () => {
@@ -595,6 +636,13 @@ test("HitchApplication.handleWakeCommand handles add, list, del, pause, resume, 
   );
   assert.match(listResp, /\[sched_001\] \(enabled\)/u);
   assert.match(listResp, /\[sched_002\] \(enabled\)/u);
+  // Generated list entries must be blank-line separated, and must retain the
+  // existing timezone and next-fire details.
+  assert.equal(listResp.split("\n\n").length, 2);
+  assert.ok(!listResp.includes("\\n"));
+  assert.match(listResp, /\(Asia\/Shanghai\)/u);
+  assert.match(listResp, /\(America\/New_York\)/u);
+  assert.match(listResp, /next: /u);
 
   // 6. Pause schedule
   const pauseResp = app.handleWakeCommand(

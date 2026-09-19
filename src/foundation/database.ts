@@ -9,8 +9,8 @@ import {
   type ValidatedTopology,
 } from "./filesystem.js";
 
-const SCHEMA_VERSION = 6;
-const SCHEMA_ID = "hitch-pi-mvp-schema-5";
+const SCHEMA_VERSION = 7;
+const SCHEMA_ID = "hitch-pi-mvp-schema-7";
 const EXPECTED_TABLES = [
   "app_meta",
   "artifacts",
@@ -62,6 +62,7 @@ CREATE TABLE sessions (
     (forge_kind IS NULL AND forge_id IS NULL) OR
     (forge_kind IS NOT NULL AND forge_id IS NOT NULL AND length(CAST(forge_id AS BLOB)) BETWEEN 1 AND 64)
   ),
+  context_usage TEXT CHECK (context_usage IS NULL OR json_valid(context_usage)),
   state TEXT NOT NULL CHECK (state IN ('active', 'stopped', 'quarantined')),
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
@@ -278,6 +279,11 @@ DROP TABLE turns;
 ALTER TABLE turns_new RENAME TO turns;
 `;
 
+const MIGRATE_6_TO_7 = `
+ALTER TABLE sessions ADD COLUMN context_usage TEXT
+  CHECK (context_usage IS NULL OR json_valid(context_usage));
+`;
+
 const MIGRATE_1_TO_2 = `
 ALTER TABLE turns ADD COLUMN operation_kind TEXT NOT NULL DEFAULT 'prompt'
   CHECK (operation_kind IN ('prompt', 'publish'));
@@ -443,6 +449,7 @@ function verifySchema(connection: DatabaseSync): void {
       connection.exec(MIGRATE_3_TO_4);
       connection.exec(MIGRATE_4_TO_5);
       connection.exec(MIGRATE_5_TO_6);
+      connection.exec(MIGRATE_6_TO_7);
       connection
         .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
         .run(SCHEMA_ID, "schema_id");
@@ -472,6 +479,7 @@ function verifySchema(connection: DatabaseSync): void {
       connection.exec(MIGRATE_3_TO_4);
       connection.exec(MIGRATE_4_TO_5);
       connection.exec(MIGRATE_5_TO_6);
+      connection.exec(MIGRATE_6_TO_7);
       connection
         .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
         .run(SCHEMA_ID, "schema_id");
@@ -500,6 +508,7 @@ function verifySchema(connection: DatabaseSync): void {
       connection.exec(MIGRATE_3_TO_4);
       connection.exec(MIGRATE_4_TO_5);
       connection.exec(MIGRATE_5_TO_6);
+      connection.exec(MIGRATE_6_TO_7);
       connection
         .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
         .run(SCHEMA_ID, "schema_id");
@@ -520,6 +529,7 @@ function verifySchema(connection: DatabaseSync): void {
         throw new FoundationError("database schema 4 identity is unknown");
       connection.exec(MIGRATE_4_TO_5);
       connection.exec(MIGRATE_5_TO_6);
+      connection.exec(MIGRATE_6_TO_7);
       connection
         .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
         .run(SCHEMA_ID, "schema_id");
@@ -541,6 +551,7 @@ function verifySchema(connection: DatabaseSync): void {
     connection.exec("BEGIN IMMEDIATE");
     try {
       connection.exec(MIGRATE_5_TO_6);
+      connection.exec(MIGRATE_6_TO_7);
       connection
         .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
         .run(SCHEMA_ID, "schema_id");
@@ -551,6 +562,27 @@ function verifySchema(connection: DatabaseSync): void {
         .all() as unknown[];
       if (violations.length > 0)
         throw new FoundationError("database schema 6 foreign key check failed");
+    } catch (error) {
+      connection.exec("ROLLBACK");
+      connection.exec("PRAGMA foreign_keys = ON");
+      throw error;
+    }
+    connection.exec("PRAGMA foreign_keys = ON");
+  } else if (version === 6) {
+    const schemaId = connection
+      .prepare("SELECT value FROM app_meta WHERE key = 'schema_id'")
+      .get() as { value: string } | undefined;
+    if (schemaId?.value !== "hitch-pi-mvp-schema-5")
+      throw new FoundationError("database schema 6 identity is unknown");
+    connection.exec("PRAGMA foreign_keys = OFF");
+    connection.exec("BEGIN IMMEDIATE");
+    try {
+      connection.exec(MIGRATE_6_TO_7);
+      connection
+        .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
+        .run(SCHEMA_ID, "schema_id");
+      connection.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+      connection.exec("COMMIT");
     } catch (error) {
       connection.exec("ROLLBACK");
       connection.exec("PRAGMA foreign_keys = ON");

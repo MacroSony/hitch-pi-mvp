@@ -244,7 +244,9 @@ export class HitchApplication {
             const promptPreview = truncatePrompt(schedule.promptTemplate);
             return `- [${schedule.id}] (${status}) ${summary} | next: ${nextStr} | "${promptPreview}"`;
           });
-          return lines.join("\n");
+          // Generated wake-list entries are separated by a real blank line so
+          // clients that fold single newlines keep each schedule distinct.
+          return lines.join("\n\n");
         }
         case "add": {
           const defaultTz = wakeStore.getDefaultTimezone(userId);

@@ -6,13 +6,14 @@ import type { DatabaseSync } from "node:sqlite";
 import type { Clock, FoundationDatabase } from "../foundation/database.js";
 import type { ForgeCatalog, ForgeResolved } from "../forge/types.js";
 import type {
+  ContextUsage,
   RuntimeModel,
   RuntimeArtifact,
   RuntimeResult,
   RuntimeTurn,
   ThinkingLevel,
 } from "../runtime/runtime.js";
-import type { Command, WakeCommand } from "./commands.js";
+import { HELP_TEXT, type Command, type WakeCommand } from "./commands.js";
 import { AppError } from "./errors.js";
 
 const MAX_SESSIONS_PER_USER = 32;
@@ -74,6 +75,69 @@ interface SessionRow {
   readonly id: string;
   readonly name: string;
   readonly state: "active" | "stopped" | "quarantined";
+}
+
+interface ContextSnapshot extends ContextUsage {
+  readonly piSessionId: string;
+  readonly modelProvider: string | null;
+  readonly modelId: string | null;
+  readonly capturedAt: number;
+}
+
+function contextUsage(value: unknown): ContextUsage | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value))
+    return null;
+  const input = value as Record<string, unknown>;
+  const contextWindow = input.contextWindow;
+  const tokens = input.tokens;
+  if (
+    typeof contextWindow !== "number" ||
+    !Number.isSafeInteger(contextWindow) ||
+    contextWindow <= 0 ||
+    (tokens !== null &&
+      (typeof tokens !== "number" ||
+        !Number.isSafeInteger(tokens) ||
+        tokens < 0))
+  )
+    return null;
+  return {
+    tokens,
+    contextWindow,
+    percent: tokens === null ? null : (tokens / contextWindow) * 100,
+  };
+}
+
+function contextSnapshot(value: string | null): ContextSnapshot | null {
+  if (value === null) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value) as unknown;
+  } catch {
+    return null;
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed))
+    return null;
+  const input = parsed as Record<string, unknown>;
+  const usage = contextUsage(input);
+  if (
+    usage === null ||
+    typeof input.piSessionId !== "string" ||
+    input.piSessionId.length === 0 ||
+    (input.modelProvider !== null && typeof input.modelProvider !== "string") ||
+    (input.modelId !== null && typeof input.modelId !== "string") ||
+    typeof input.capturedAt !== "number" ||
+    !Number.isSafeInteger(input.capturedAt) ||
+    input.capturedAt < 0 ||
+    !Number.isFinite(new Date(input.capturedAt).getTime())
+  )
+    return null;
+  return {
+    ...usage,
+    piSessionId: input.piSessionId,
+    modelProvider: input.modelProvider as string | null,
+    modelId: input.modelId as string | null,
+    capturedAt: input.capturedAt,
+  };
 }
 
 function transaction<T>(database: DatabaseSync, operation: () => T): T {
@@ -474,7 +538,7 @@ export class HitchStore {
       if (active !== undefined) return { id: selected.id };
       this.#database
         .prepare(
-          "UPDATE sessions SET pi_session_id = ?, transcript_path = NULL, updated_at = ? WHERE id = ? AND user_id = ?",
+          "UPDATE sessions SET pi_session_id = ?, transcript_path = NULL, context_usage = NULL, updated_at = ? WHERE id = ? AND user_id = ?",
         )
         .run(this.ids.next("pi"), this.clock.now(), selected.id, userId);
       return { id: selected.id };
@@ -639,7 +703,7 @@ export class HitchStore {
           : session.id.slice(0, 8);
         return `${session.id === selectedId ? "*" : "-"} ${selector} ${session.name} (${session.state})`;
       })
-      .join("\n");
+      .join("\n\n");
   }
 
   #findSession(userId: string, selector: string): SessionRow {
@@ -766,17 +830,27 @@ export class HitchStore {
           };
           const selection = this.#database
             .prepare(
-              "SELECT model_provider, model_id, thinking_level FROM sessions WHERE id = ? AND user_id = ?",
+              "SELECT model_provider, model_id, thinking_level, forge_kind, forge_id, context_usage, pi_session_id FROM sessions WHERE id = ? AND user_id = ?",
             )
             .get(session.id, identity.endpoint.userId) as {
             model_provider: string | null;
             model_id: string | null;
             thinking_level: string | null;
+            forge_kind: "preset" | "profile" | null;
+            forge_id: string | null;
+            context_usage: string | null;
+            pi_session_id: string;
           };
           const model =
             selection.model_provider === null || selection.model_id === null
               ? "Pi default"
               : `${selection.model_provider}/${selection.model_id}`;
+          const profile =
+            selection.forge_kind !== null && selection.forge_id !== null
+              ? `${selection.forge_kind} ${selection.forge_id} (explicit)`
+              : this.forgeDefaults.has(identity.endpoint.userId)
+                ? `${this.forgeDefaults.get(identity.endpoint.userId)!.kind} ${this.forgeDefaults.get(identity.endpoint.userId)!.id} (fallback)`
+                : "none (fallback)";
           const running = this.#database
             .prepare(
               "SELECT updated_at FROM turns WHERE user_id = ? AND state = 'running' ORDER BY ordinal LIMIT 1",
@@ -787,9 +861,47 @@ export class HitchStore {
           const staged = this.stagedArtifactCount(identity.endpoint.userId);
           const elapsed =
             running === undefined
-              ? ""
-              : `; elapsed ${Math.max(0, now - running.updated_at) / 1000}s`;
-          response = `Session ${session.name} (${session.state}); model ${model}; thinking ${selection.thinking_level ?? "Pi default"}; active ${Number(counts.active ?? 0n)}; queued ${Number(counts.queued ?? 0n)}${elapsed}${staged === 0 ? "" : `; staged ${staged}`}.`;
+              ? "none"
+              : `${Math.max(0, now - running.updated_at) / 1000}s`;
+          const snapshot = contextSnapshot(selection.context_usage);
+          let effectiveProvider = selection.model_provider;
+          let effectiveModelId = selection.model_id;
+          if (effectiveProvider === null || effectiveModelId === null) {
+            const fallbackSelection =
+              selection.forge_kind !== null && selection.forge_id !== null
+                ? { kind: selection.forge_kind, id: selection.forge_id }
+                : this.forgeDefaults.get(identity.endpoint.userId);
+            if (fallbackSelection !== undefined && forge !== undefined) {
+              try {
+                const resolved = forge.resolve(fallbackSelection);
+                effectiveProvider = resolved.model?.provider ?? null;
+                effectiveModelId = resolved.model?.id ?? null;
+              } catch {
+                // Status remains useful even if an old fallback was removed.
+              }
+            }
+            if (effectiveProvider === null || effectiveModelId === null) {
+              const fallback = models[0];
+              effectiveProvider = fallback?.provider ?? null;
+              effectiveModelId = fallback?.id ?? null;
+            }
+          }
+          const matches =
+            snapshot !== null &&
+            snapshot.piSessionId === selection.pi_session_id &&
+            snapshot.modelProvider === effectiveProvider &&
+            snapshot.modelId === effectiveModelId;
+          const context =
+            snapshot === null
+              ? "Context: unknown · no completed-turn snapshot"
+              : !matches
+                ? "Context: unknown/stale · snapshot no longer matches this session or model"
+                : `Context: ${snapshot.tokens === null ? "unknown" : `~${snapshot.tokens}`} / ${snapshot.contextWindow} (${snapshot.percent === null ? "unknown" : `${Math.round(snapshot.percent)}%`}) · last completed turn ${new Date(snapshot.capturedAt).toISOString()}`;
+          response = [
+            `Session ${session.name} (${session.state}); model ${model}; thinking ${selection.thinking_level ?? "Pi default"}.`,
+            `Profile: ${profile}; active ${Number(counts.active ?? 0n)}; queued ${Number(counts.queued ?? 0n)}; elapsed ${elapsed}; staged ${staged}.`,
+            context,
+          ].join("\n\n");
           break;
         }
         case "abort": {
@@ -806,7 +918,7 @@ export class HitchStore {
         case "stop": {
           this.#database
             .prepare(
-              "UPDATE sessions SET state = 'stopped', updated_at = ? WHERE id = ? AND user_id = ?",
+              "UPDATE sessions SET state = 'stopped', context_usage = NULL, updated_at = ? WHERE id = ? AND user_id = ?",
             )
             .run(now, session.id, identity.endpoint.userId);
           this.#database
@@ -870,7 +982,7 @@ export class HitchStore {
               (model) =>
                 `${model.provider}/${model.id}${model.reasoning ? " (reasoning)" : ""}`,
             )
-            .join("\n");
+            .join("\n\n");
           break;
         }
         case "model": {
@@ -899,7 +1011,7 @@ export class HitchStore {
           const changed = this.#database
             .prepare(
               `UPDATE sessions
-               SET model_provider = ?, model_id = ?, thinking_level = ?, updated_at = ?
+               SET model_provider = ?, model_id = ?, thinking_level = ?, context_usage = NULL, updated_at = ?
                WHERE id = ? AND user_id = ? AND state = 'active'`,
             )
             .run(
@@ -988,7 +1100,7 @@ export class HitchStore {
                     ? `${item.id} - ${item.name}`
                     : item.id,
                 )
-                .join("\n");
+                .join("\n\n");
             }
             break;
           }
@@ -1078,7 +1190,7 @@ export class HitchStore {
             const changed = this.#database
               .prepare(
                 `UPDATE sessions
-                 SET forge_kind = NULL, forge_id = NULL, updated_at = ?
+                 SET forge_kind = NULL, forge_id = NULL, context_usage = NULL, updated_at = ?
                  WHERE id = ? AND user_id = ? AND state = 'active'`,
               )
               .run(now, session.id, identity.endpoint.userId);
@@ -1115,7 +1227,7 @@ export class HitchStore {
               const changed = this.#database
                 .prepare(
                   `UPDATE sessions
-                   SET forge_kind = 'preset', forge_id = ?, updated_at = ?
+                   SET forge_kind = 'preset', forge_id = ?, context_usage = NULL, updated_at = ?
                    WHERE id = ? AND user_id = ? AND state = 'active'`,
                 )
                 .run(
@@ -1243,7 +1355,7 @@ export class HitchStore {
             const changed = this.#database
               .prepare(
                 `UPDATE sessions
-                 SET forge_kind = 'profile', forge_id = ?, model_provider = ?, model_id = ?, thinking_level = ?, updated_at = ?
+                 SET forge_kind = 'profile', forge_id = ?, model_provider = ?, model_id = ?, thinking_level = ?, context_usage = NULL, updated_at = ?
                  WHERE id = ? AND user_id = ? AND state = 'active'`,
               )
               .run(
@@ -1390,24 +1502,7 @@ export class HitchStore {
           };
         }
         case "help":
-          response = [
-            "!new [name] - create and select a session",
-            "!sessions - list sessions",
-            "!switch <id-or-name> - select a session",
-            "!status - session, model, queue, and sandbox state",
-            "!abort - cancel the active Turn",
-            "!stop - stop the session and cancel queued Turns",
-            "!recover - replace a quarantined session",
-            "!models [filter] - list available models",
-            "!model <provider>/<id> - select a model",
-            "!thinking <level> - select a thinking level",
-            "!preset [list|use <id>|preview <id>|status|clear] - manage preset prompt stacks",
-            "!profile [list|use <id>|preview <id>|status|clear] - manage persona profiles",
-            "!wake [add|list|del|pause|resume|tz] - manage scheduled wake-ups",
-            "!send <relative-path> - publish a workspace file",
-            "!compact - compact the session context",
-            "!help - show this list",
-          ].join("\n");
+          response = HELP_TEXT;
           break;
         case "wake": {
           if (wakeHandler === undefined) {
@@ -1615,7 +1710,7 @@ export class HitchStore {
       if (!result.sessionReusable || result.outcome === "unknown") {
         this.#database
           .prepare(
-            "UPDATE sessions SET state = 'quarantined', updated_at = ? WHERE id = ? AND user_id = ?",
+            "UPDATE sessions SET state = 'quarantined', context_usage = NULL, updated_at = ? WHERE id = ? AND user_id = ?",
           )
           .run(now, turn.sessionId, turn.userId);
       }
@@ -1639,6 +1734,27 @@ export class HitchStore {
             turn.sessionId,
             turn.userId,
           );
+        const parsedUsage = contextUsage(result.contextUsage);
+        const shouldUpdateContext =
+          turn.compact === true || result.contextUsage !== undefined;
+        if (shouldUpdateContext) {
+          const snapshot =
+            parsedUsage === null
+              ? null
+              : JSON.stringify({
+                  ...parsedUsage,
+                  piSessionId: turn.piSessionId ?? "",
+                  modelProvider:
+                    result.modelProvider ?? turn.modelProvider ?? null,
+                  modelId: result.modelId ?? turn.modelId ?? null,
+                  capturedAt: now,
+                });
+          this.#database
+            .prepare(
+              "UPDATE sessions SET context_usage = ? WHERE id = ? AND user_id = ? AND pi_session_id = ? AND state = 'active'",
+            )
+            .run(snapshot, turn.sessionId, turn.userId, turn.piSessionId ?? "");
+        }
       }
       this.#insertOutbox(turn.userId, turn.endpointId, turn.turnId, text);
       const artifacts = result.artifacts ?? [];
@@ -1698,7 +1814,7 @@ export class HitchStore {
           .run(text, now, turn.id, turn.user_id);
         this.#database
           .prepare(
-            "UPDATE sessions SET state = 'quarantined', updated_at = ? WHERE id = ? AND user_id = ?",
+            "UPDATE sessions SET state = 'quarantined', context_usage = NULL, updated_at = ? WHERE id = ? AND user_id = ?",
           )
           .run(now, turn.session_id, turn.user_id);
         this.#insertOutbox(turn.user_id, turn.endpoint_id, turn.id, text);

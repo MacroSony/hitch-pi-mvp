@@ -21,6 +21,8 @@ process.env.NODE_ENV = "test";
 
 type FakeMode =
   | "success"
+  | "stats-fail"
+  | "normal"
   | "noop"
   | "reject"
   | "unknown-reject"
@@ -77,10 +79,21 @@ const handle = (line) => {
     reply(command, { success: true, data: { models: [{ provider: "fixture", id: "fake", name: "Fake", reasoning: false, input: ["text"] }] } });
   } else if (command.type === "set_model" || command.type === "set_thinking_level") {
     reply(command, { success: true });
+  } else if (command.type === "get_session_stats") {
+    if (mode === "stats-fail") reply(command, { success: false, error: "fixture stats unavailable" });
+    else reply(command, { success: true, data: { contextUsage: { tokens: mode === "normal" ? 50000 : null, contextWindow: 100000, percent: 999 } } });
   } else if (command.type === "abort") {
     if (mode === "abort-fail") { reply(command, { success: false, error: "fixture abort failure" }); return; }
     if (pendingCompact) reply(pendingCompact, { success: false, error: "Compaction cancelled" });
     reply(command, { success: true });
+  } else if (command.type === "get_state") {
+    reply(command, { success: true, data: { model: { provider: "fixture", id: "fake" }, thinkingLevel: "off", sessionFile: process.argv[process.argv.indexOf("--session") + 1] } });
+  } else if (command.type === "prompt") {
+    reply(command, { success: true });
+    send({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Checking" } });
+    send({ type: "tool_execution_start", toolName: "read", args: { path: "fixture.txt" } });
+    send({ type: "message_end", message: { role: "assistant", content: [{type: "text", text: "done"}], stopReason: "stop" } });
+    send({ type: "agent_settled" });
   } else if (command.type === "compact") {
     compactSeen = true;
     if (mode === "hang" || mode === "abort-fail") { pendingCompact = command; return; }
@@ -228,6 +241,10 @@ test(
         outcome: "succeeded",
         text: "Context compacted: ~120 tokens before, ~40 tokens after.",
         sessionReusable: true,
+        modelProvider: "fixture",
+        modelId: "fake",
+        thinkingLevel: "off",
+        contextUsage: { tokens: null, contextWindow: 100000, percent: null },
         transcriptPath: value.transcript,
       });
       assert.match(readFileSafe(value.trace), /compact/u);
@@ -240,6 +257,18 @@ test(
     }
   },
 );
+
+test("stats RPC failure does not poison a clean compact", async () => {
+  const { fixture: value, result } = await runFixture("stats-fail");
+  try {
+    assert.equal(result.outcome, "succeeded");
+    assert.equal(result.sessionReusable, true);
+    assert.equal(result.contextUsage, null);
+    assert.match(readFileSafe(value.trace), /get_session_stats/u);
+  } finally {
+    dispose(value);
+  }
+});
 
 test(
   "clean rejected/no-op compaction is actionable and keeps the session reusable",
@@ -389,6 +418,41 @@ test("unknown compact rejection is safe and embedded no-op text is not classifie
       result.error ?? "",
       /fixture-secret|private text|too small/u,
     );
+  } finally {
+    dispose(value);
+  }
+});
+
+test("normal turns capture context statistics and synthetic tool paragraphs without altering finals", async () => {
+  const value = await fixture("normal");
+  const deltas: string[] = [];
+  try {
+    const result = await value.runtime.run(
+      { ...turn(value), compact: false },
+      new AbortController().signal,
+      (delta) => deltas.push(delta),
+    );
+    assert.equal(result.outcome, "succeeded");
+    assert.equal(result.text, "done");
+    assert.deepEqual(result.contextUsage, {
+      tokens: 50000,
+      contextWindow: 100000,
+      percent: 50,
+    });
+    assert.equal(deltas.join(""), "Checking\n\n⏳ read · fixture.txt\n\n");
+  } finally {
+    dispose(value);
+  }
+});
+
+test("normal turns survive a rejected advisory stats RPC", async () => {
+  const { fixture: value, result } = await runFixture("stats-fail", {
+    compact: false,
+  });
+  try {
+    assert.equal(result.outcome, "succeeded");
+    assert.equal(result.sessionReusable, true);
+    assert.equal(result.contextUsage, undefined);
   } finally {
     dispose(value);
   }
