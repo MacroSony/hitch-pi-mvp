@@ -97,8 +97,8 @@ images/files run a native Pi Turn. JPEG, PNG, GIF, and WebP become native Pi
 image blocks, while other files are exposed read-only under `/inbox`.
 Pi's `hitch_publish` tool and `!send <relative-path>` create immutable bounded
 snapshots and deliver them through the originating channel's native file
-methods (note: `!send` has a known suffixed-blob regression vs the working
-`hitch_publish` model tool).
+methods. Both paths verify the snapshot identity, size, and digest; channel
+delivery still requires channel-specific acceptance.
 
 The post-MVP chat command surface is `!new [name]`, `!sessions`,
 `!switch <id-or-name>`, `!status`, `!compact`, `!abort`, `!stop`, `!recover`,

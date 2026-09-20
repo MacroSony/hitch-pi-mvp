@@ -7,6 +7,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -517,7 +518,10 @@ test(
           input: { path: "result.txt", artifactId },
         },
       )) as { bytes: number; sha256: string };
-      const artifact = join(publishRoot, `${artifactId}.blob`);
+      // The worker appends the workspace extension to the snapshot name.
+      const snapshots = readdirSync(publishRoot);
+      assert.deepEqual(snapshots, [`${artifactId}.txt.blob`]);
+      const artifact = join(publishRoot, snapshots[0]!);
       assert.equal(result.bytes, 17);
       assert.equal(result.sha256, sha256(artifact));
       assert.equal(readFileSync(artifact, "utf8"), "publication-check");

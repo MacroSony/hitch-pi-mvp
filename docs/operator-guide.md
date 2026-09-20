@@ -323,12 +323,16 @@ channels rather than substituting a synthetic live result.
    selected model supports it.
 3. Send a common JPEG/PNG and an ordinary small file. Confirm the image is
    understood and the ordinary file is visible in the Turn inbox.
-4. Ask Pi to produce a small result and publish it, or send
-   `!send relative/path`. Confirm a native image/file arrives in the originating
-   channel.
+4. Ask Pi to produce a small result and publish it, then independently test
+   `!send relative/path`. Confirm both paths deliver a native image/file in the
+   originating channel; one path succeeding does not validate the other.
 5. Start a longer Turn, send `!abort`, and confirm it is cancelled. Check that
    no `hitch-p0-*.scope` remains with
-   `systemctl --user list-units 'hitch-p0-*.scope' --all`.
+   `systemctl --user list-units 'hitch-p0-*.scope' --all`. If any scope remains,
+   do not start another runtime and do not delete arbitrary same-UID scopes;
+   startup fails closed until an operator verifies whether they are active work
+   from another runtime, stalled scopes, or confirmed orphans. Hitch never
+   performs the global sweep automatically.
 6. When `mediaMode` is `"text-trigger"`, send a media-only message and confirm
    the "Saved N attachment(s)" reply, then send text and confirm the staged
    attachments merge into one Turn. `!status` reports the staged count.
@@ -386,6 +390,12 @@ Recovery rules:
   deliberately resets that account's remote cursor/context state.
 - Uncertain prior Turn: use `!recover` to cancel its queued successors, then
   `!new` for a clean session. Do not manually mark it successful or replay it.
+- Sandbox scope remnants: startup fails closed if it cannot confirm that the
+  user scope state is empty. Do not assume another same-UID runtime's active
+  scope is an orphan and do not delete scopes blindly. Stop other same-UID
+  runtimes through their own lifecycle, inspect
+  `systemctl --user list-units 'hitch-p0-*.scope' --all`, and remove only a
+  scope after an attended recovery decision confirms it is orphaned.
 - Low disk: stop the service and free space outside live Hitch roots. Do not
   manually delete SQLite-referenced blobs or transcripts.
 - Database or data-root loss: restore the whole stopped backup, not individual
@@ -407,7 +417,9 @@ Recovery rules:
   role system, group chat, or public multi-tenancy.
 - Workspaces have no kernel project quotas. Hitch enforces media/session limits
   and a free-space stop threshold; the operator still monitors workspace use.
-- Pi `auth.json` may require backup restore or re-login after a host crash.
+- The shared Pi auth authority may require attended re-login after a crash or
+  interrupted refresh. Never promote a legacy per-user auth copy or blindly
+  restore an old snapshot over newer credentials.
 - Channel delivery can duplicate after an ambiguous response, but an agent
   Turn is never rerun for that reason.
 - WeChat large-image CDN downloads can be truncated by the WeChat service
@@ -417,9 +429,10 @@ Recovery rules:
 - Intermediate agent progress is best-effort: at most one merged message every
   30 seconds, at most 4000 characters per message and 64 KiB of progress per
   Turn. A failed progress message never reruns or quarantines the Turn.
-- Automated retention, a failed-delivery retry UI, optional operator
-  extensions, skills/MCP, a broad provider matrix, and hardened hostile-server
-  handling are post-MVP.
+- Automated retention, a failed-delivery retry UI, arbitrary/untrusted
+  extensions or skills/MCP servers, a broad provider matrix, and hardened
+  hostile-server handling remain deferred. The supported trusted MCP wrapper
+  is described in [its service boundary](hitch-mcp-service-boundary.md).
 
 ## 10. Disable or completely reset
 

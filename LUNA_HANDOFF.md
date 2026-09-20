@@ -1,5 +1,21 @@
 # Implementation handoff
 
+## Post-MVP increment: user-default and MCP isolation checks (2026-09-19)
+
+Completed a bounded offline-readiness increment: automatic per-user Forge
+default evidence, owner-only sandbox cleanup/read-only startup inspection,
+suffixed publication snapshot recovery, and a restricted trusted MCP wrapper.
+Independent code review passed after closing the generic gateway policy bypass.
+Final deterministic check: 310 total / 286 passed / 24 opt-in skipped; the full
+selected host/MCP lanes subsequently passed 49/49 with no skips, and constrained
+service acceptance passed 12/12. Counts overlap, not unique scenario totals.
+No live model, market-data service, account enrollment, or production deployment
+is implied. See [profile acceptance](docs/dad-default-profile-review-20260919.md),
+[sandbox acceptance](docs/dad-sandbox-review-20260919.md), and the
+[MCP boundary/upgrade requirements](docs/hitch-mcp-service-boundary.md).
+
+The original MVP handoff below is retained as historical phase context.
+
 Status: all six trusted-personal MVP phases are implemented and independently
 reviewed. Deterministic, direct-host, and service-constrained acceptance pass;
 credentialed provider/Telegram/WeChat checks remain honestly opt-in for the

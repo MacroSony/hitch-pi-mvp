@@ -19,10 +19,13 @@ import {
   rmSync,
   writeFileSync,
   chmodSync,
+  cpSync,
+  lstatSync,
+  symlinkSync,
   existsSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import {
@@ -254,6 +257,25 @@ function privateDirectory(path: string): void {
   chmodSync(path, 0o700);
 }
 
+/**
+ * Copy an operator-controlled code tree into the fixture root and strip
+ * group/world write bits from every entry. Adapter code is public code, but
+ * the fixture must never present a group/world-writable adapter to the
+ * digest/mode gate under test.
+ */
+function copyOwnerCodeTree(source: string, destination: string): void {
+  cpSync(source, destination, { recursive: true });
+  const strip = (path: string): void => {
+    const metadata = lstatSync(path);
+    if (metadata.isSymbolicLink()) return;
+    chmodSync(path, metadata.mode & ~0o022);
+    if (metadata.isDirectory()) {
+      for (const entry of readdirSync(path)) strip(join(path, entry));
+    }
+  };
+  strip(destination);
+}
+
 function assetDigest(path: string): string {
   return sha256(path);
 }
@@ -374,6 +396,20 @@ async function launchFixture(
     readonly sharedAuth?: string;
     readonly modelsStore?: Record<string, unknown>;
     readonly omitSharedAuthPreload?: boolean;
+    /**
+     * Opt-in real MCP acceptance wiring. The fixture copies the
+     * operator-installed adapter into a private temp tree, generates a
+     * single synthetic stdio server config, and points the production
+     * `hitch-mcp.ts` wrapper at both. Nothing here reads the operator's real
+     * `mcp.json` or `/data` authentication.
+     */
+    readonly mcp?: {
+      readonly adapterDir: string;
+      readonly wrapperPath?: string;
+      readonly config?: unknown;
+      readonly forgeToolsPolicy?: unknown;
+      readonly dynamicPaths?: readonly string[];
+    };
   },
 ): Promise<FixtureRun> {
   const root = mkdtempSync(join(tmpdir(), "hitch-b2-rpc-"));
@@ -447,6 +483,58 @@ async function launchFixture(
     "fixtures",
     antigravity ? "antigravity-network-preload.mjs" : "network-preload.mjs",
   );
+  const mcpWrapper =
+    options.mcp === undefined
+      ? undefined
+      : (options.mcp.wrapperPath ?? join(assetsRoot, "hitch-mcp.ts"));
+  const mcpAdapterDir =
+    options.mcp === undefined ? undefined : join(root, "mcp", "pi-mcp-adapter");
+  const mcpAdapterFile =
+    mcpAdapterDir === undefined ? undefined : join(mcpAdapterDir, "index.ts");
+  const mcpConfig =
+    options.mcp === undefined ? undefined : join(root, "mcp.json");
+  if (options.mcp !== undefined) {
+    if (!isAbsolute(options.mcp.adapterDir))
+      throw new Error("MCP adapter directory must be absolute");
+    const mcpRoot = join(root, "mcp");
+    privateDirectory(mcpRoot);
+    copyOwnerCodeTree(options.mcp.adapterDir, mcpAdapterDir!);
+    if (!existsSync(mcpAdapterFile!))
+      throw new Error("MCP adapter directory has no index.ts");
+    // The adapter's public dependencies (SDK, ajv, undici, ...) live next to
+    // the operator install. Link only that dependency surface; the adapter
+    // code itself remains a private temp copy.
+    symlinkSync(
+      dirname(options.mcp.adapterDir),
+      join(mcpRoot, "node_modules"),
+      "dir",
+    );
+    writeFileSync(
+      mcpConfig!,
+      JSON.stringify(
+        options.mcp.config ?? {
+          settings: { scriptMode: true, toolPrefix: "mcp", directTools: true },
+          mcpServers: {
+            mock: {
+              command: process.execPath,
+              args: [
+                join(repository, "test", "fixtures", "synthetic-mcp-stdio.mjs"),
+              ],
+              cwd: root,
+              env: {},
+              inheritEnv: true,
+              lifecycle: "eager",
+              directTools: true,
+            },
+          },
+        },
+        null,
+        2,
+      ),
+      { mode: 0o600 },
+    );
+    chmodSync(mcpConfig!, 0o600);
+  }
   const environment: NodeJS.ProcessEnv = {
     PATH: "/usr/bin:/bin",
     HOME: root,
@@ -474,6 +562,14 @@ async function launchFixture(
           HITCH_B2_REFRESH_LOG: refreshLog,
         }),
     HITCH_ACTIVE_TOOLS: JSON.stringify(activeTools),
+    // Match the current manifest-attestation launch contract. Omitting this
+    // made the mandatory extension reject these old opt-in fixtures at load.
+    HITCH_EXPECTED_TOOLS: JSON.stringify(baselineTools),
+    HITCH_DYNAMIC_EXTENSION_PATHS: JSON.stringify(
+      options.mcp === undefined
+        ? []
+        : (options.mcp.dynamicPaths ?? [mcpWrapper!]),
+    ),
     ...(options.forgePromptRaw !== undefined
       ? { HITCH_FORGE_PROMPT: options.forgePromptRaw }
       : options.forgePrompt === undefined
@@ -498,6 +594,23 @@ async function launchFixture(
     HITCH_P0_BACKEND_SHA256: assetDigest(
       join(assetsRoot, "sandbox-backend.mjs"),
     ),
+    ...(options.mcp === undefined
+      ? {}
+      : {
+          HITCH_MCP_ENABLED: "1",
+          HITCH_MCP_EXTENSION_PATH: mcpWrapper!,
+          HITCH_MCP_EXTENSION_SHA256: sha256(mcpWrapper!),
+          HITCH_MCP_ADAPTER_PATH: mcpAdapterFile!,
+          HITCH_MCP_ADAPTER_SHA256: sha256(mcpAdapterFile!),
+          HITCH_MCP_CONFIG_PATH: mcpConfig!,
+          ...(options.mcp.forgeToolsPolicy === undefined
+            ? {}
+            : {
+                HITCH_FORGE_TOOLS_POLICY: JSON.stringify(
+                  options.mcp.forgeToolsPolicy,
+                ),
+              }),
+        }),
   };
   if (antigravity) {
     environment.HITCH_ANTIGRAVITY_ENABLED = "1";
@@ -545,6 +658,7 @@ async function launchFixture(
         ? []
         : ["--extension", join(assetsRoot, "pi-antigravity.ts")]
       : ["--extension", provider]),
+    ...(options.mcp === undefined ? [] : ["--extension", mcpWrapper!]),
     "--no-builtin-tools",
     "--exclude-tools",
     "powershell",
@@ -1899,5 +2013,219 @@ test(
       rmSync(root, { recursive: true, force: true });
       server.server.close();
     }
+  },
+);
+
+const REAL_MCP_ADAPTER_DIR = process.env.HITCH_REAL_MCP_ADAPTER_DIR;
+const REAL_MCP_ADAPTER_AVAILABLE =
+  REAL_MCP_ADAPTER_DIR !== undefined &&
+  existsSync(join(REAL_MCP_ADAPTER_DIR, "index.ts"));
+
+test(
+  "real Pi loads the Hitch MCP wrapper through jiti, attests source paths, and late-activates a synthetic direct tool",
+  {
+    skip:
+      process.env.HITCH_RUN_SANDBOX_TESTS !== "1" ||
+      !REAL_MCP_ADAPTER_AVAILABLE,
+    timeout: 180_000,
+  },
+  async () => {
+    const server = await startFixtureServer();
+    const mandatorySource = join(
+      repository,
+      "dist",
+      "sandbox",
+      "hitch-sandbox.ts",
+    );
+    const run = await launchFixture(server, {
+      web: false,
+      providerMode: "mcp-quote",
+      // Force a second `before_agent_start` attestation after the MCP wrapper
+      // has registered its gateway/direct tools. If the wrapper tools were not
+      // excluded by their real `sourceInfo.path`, attestation would fail and
+      // the turn would never settle with the success sentinel.
+      forgePrompt: {
+        mode: "replace",
+        systemPrompt: "HITCH_MCP_FORGE_SENTINEL",
+      },
+      mcp: {
+        adapterDir: REAL_MCP_ADAPTER_DIR!,
+        // Exercise the runtime-style Forge policy env path as well.
+        forgeToolsPolicy: { allow: ["mcp*"] },
+      },
+    });
+    try {
+      await waitForAttestation(run.rpc, run.context);
+      const attestation = logEntries(run.log).find(
+        (entry) => entry.type === "startup-attestation",
+      );
+      assert.ok(attestation);
+      // The startup witness is the production baseline only. Every listed
+      // tool is source-attested to the mandatory sandbox extension; no MCP
+      // tool is allowed to leak into the static attestation.
+      assert.deepEqual(attestation.allTools, [
+        "bash",
+        "edit",
+        "find",
+        "grep",
+        "hitch_publish",
+        "ls",
+        "read",
+        "write",
+      ]);
+      assert.deepEqual(
+        attestation.sourcePaths,
+        attestation.allTools.map(() => mandatorySource),
+      );
+      assert.equal(attestation.webSearchEnabled, false);
+
+      assert.equal(
+        (
+          await run.rpc.send({
+            type: "set_model",
+            provider: "hitch-b2-fixture",
+            modelId: "b2-web-search",
+          })
+        ).success,
+        true,
+      );
+      assert.equal(
+        (
+          await run.rpc.send({
+            type: "prompt",
+            message: "run the synthetic MCP acceptance",
+          })
+        ).success,
+        true,
+      );
+      await run.rpc.waitFor((event) => event.type === "agent_settled", 60_000);
+      const assistantText = record(
+        (await run.rpc.send({ type: "get_last_assistant_text" })).data,
+      )?.text;
+      assert.equal(
+        assistantText,
+        "HITCH_MCP_QUOTE_SETTLED",
+        JSON.stringify(
+          {
+            assistantText,
+            provider: logEntries(run.providerLog),
+            toolEnds: run.rpc.events
+              .filter((event) => event.type === "tool_execution_end")
+              .map((event) => ({
+                toolName: event.toolName,
+                isError: event.isError,
+                result: event.result,
+              })),
+            messages: run.rpc.events
+              .filter((event) => event.type === "message_end")
+              .map((event) => record(event.message)?.errorMessage),
+            stderr: run.rpc.stderr,
+          },
+          null,
+          2,
+        ),
+      );
+
+      // Provider observations are the model-visible tool surface, so they
+      // prove the gateway/direct-tool activation timing and the script deny.
+      const observations = logEntries(run.providerLog).filter(
+        (entry) => entry.mode === "mcp-quote",
+      );
+      assert.equal(
+        observations.length,
+        4,
+        JSON.stringify({ observations, diagnostics: run.rpc.stderr }),
+      );
+      for (const observation of observations) {
+        const toolNames = observation.toolNames;
+        assert.ok(Array.isArray(toolNames));
+        assert.ok(
+          !(toolNames as unknown[]).includes("mcpScript"),
+          `mcpScript leaked into the model surface: ${JSON.stringify(toolNames)}`,
+        );
+        // Proves the mandatory `before_agent_start` source-path attestation
+        // ran to completion while the MCP gateway tool was registered.
+        assert.equal(
+          observation.forgeAttested,
+          true,
+          JSON.stringify(observation),
+        );
+      }
+      const beforeSearch = observations[0]?.toolNames as string[];
+      assert.ok(beforeSearch.includes("mcp"), JSON.stringify(beforeSearch));
+      assert.ok(
+        !beforeSearch.includes("mcp__mock_quote"),
+        JSON.stringify(beforeSearch),
+      );
+      // The gateway model surface is exactly the safe status/search/connect
+      // parameter set: no install/auth/url/target/instructions/tool/args and
+      // therefore no management or generic script-style call entry.
+      assert.deepEqual(observations[0]?.gatewayParameterKeys, [
+        "connect",
+        "describe",
+        "includeSchemas",
+        "limit",
+        "offset",
+        "regex",
+        "search",
+        "server",
+      ]);
+      const afterSearch = observations[1]?.toolNames as string[];
+      assert.ok(
+        afterSearch.includes("mcp__mock_quote"),
+        JSON.stringify(afterSearch),
+      );
+      const finalObservation = observations[3];
+      assert.equal(finalObservation?.quoteSeen, true);
+      assert.equal(finalObservation?.managementSeen, true);
+
+      // Tool execution ends prove the synthetic value reached the model and
+      // the management surface stayed disabled.
+      const ends = run.rpc.events.filter(
+        (event) => event.type === "tool_execution_end",
+      );
+      assert.equal(
+        ends.length,
+        3,
+        JSON.stringify(ends.map((event) => event.toolName)),
+      );
+      assert.equal(ends[0]?.toolName, "mcp");
+      assert.equal(ends[0]?.isError, false);
+      assert.equal(ends[1]?.toolName, "mcp__mock_quote");
+      assert.equal(ends[1]?.isError, false);
+      assert.match(JSON.stringify(ends[1]?.result), /synthetic_quote/u);
+      assert.equal(ends[2]?.toolName, "mcp");
+      assert.equal(ends[2]?.isError, true);
+      assert.match(
+        JSON.stringify(ends[2]?.result),
+        /MCP management actions are disabled by Hitch|must not have additional properties/u,
+      );
+      assert.ok(
+        !ends.some((event) => event.toolName === "mcpScript"),
+        "mcpScript executed",
+      );
+
+      // The adapter's prompts/commands are no-ops under the wrapper. No MCP
+      // management slash command may be exposed to the operator.
+      const commands = record(
+        (await run.rpc.send({ type: "get_commands" })).data,
+      )?.commands;
+      assert.ok(Array.isArray(commands));
+      assert.ok(
+        (commands as unknown[]).every(
+          (entry) =>
+            !String(record(entry)?.name ?? "")
+              .toLowerCase()
+              .includes("mcp"),
+        ),
+        JSON.stringify(commands),
+      );
+    } finally {
+      await stopFixture(run);
+      server.server.close();
+    }
+    // stopFixture throws if sandbox scope cleanup cannot be confirmed; this
+    // asserts the private fixture tree itself is also gone.
+    assert.equal(existsSync(run.root), false);
   },
 );

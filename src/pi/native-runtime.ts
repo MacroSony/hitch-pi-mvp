@@ -1,10 +1,6 @@
 import { reduceForgeTools } from "@zihanw/pi-forge/service";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import {
-  spawn,
-  spawnSync,
-  type ChildProcessWithoutNullStreams,
-} from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import {
   closeSync,
@@ -32,6 +28,10 @@ import {
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { MediaStore, MAX_OUTBOUND_ARTIFACTS } from "../media/media-store.js";
+import {
+  assertNoStartupSandboxScopes,
+  cleanupOwnedSandboxScopes,
+} from "./sandbox-units.js";
 import { AsyncSemaphore } from "./semaphore.js";
 import {
   logPiRuntimeFailure,
@@ -152,10 +152,6 @@ const THINKING_LEVELS: readonly ThinkingLevel[] = [
   "xhigh",
   "max",
 ];
-const SANDBOX_OWNER_PATTERN = /^[a-f0-9]{16}$/u;
-const SANDBOX_UNIT_PATTERN =
-  /^hitch-p0-(?:[a-f0-9]{24}|[a-f0-9]{16}-[a-f0-9]{24})\.scope$/u;
-
 let activeRunCount = 0;
 
 type JsonRecord = Record<string, unknown>;
@@ -193,6 +189,10 @@ export interface ControllerContext {
   readonly forgePrompt?: {
     readonly mode: "replace" | "append" | "prepend";
     readonly systemPrompt: string;
+  };
+  readonly forgeTools?: {
+    readonly allow?: readonly string[];
+    readonly deny?: readonly string[];
   };
 }
 
@@ -289,6 +289,46 @@ function sha256File(path: string): string {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
 
+function validateMcpFile(
+  path: string,
+  label: string,
+  maximumBytes: number,
+  forbiddenModeBits: bigint,
+): void {
+  const metadata = lstatSync(path, { bigint: true });
+  const uid = process.getuid?.();
+  if (
+    !metadata.isFile() ||
+    metadata.isSymbolicLink() ||
+    metadata.nlink !== 1n ||
+    metadata.size > BigInt(maximumBytes) ||
+    (uid !== undefined && metadata.uid !== BigInt(uid)) ||
+    (metadata.mode & forbiddenModeBits) !== 0n ||
+    realpathSync(path) !== path
+  ) {
+    throw new Error(`MCP ${label} is unsafe`);
+  }
+}
+
+function validateMcpAdapterFile(
+  path: string,
+  label: string,
+  maximumBytes: number,
+): void {
+  // Adapter code is public code with a checked digest. Group/world read is
+  // allowed (npm commonly installs 0644); group/world write is not.
+  validateMcpFile(path, label, maximumBytes, 0o022n);
+}
+
+function validatePrivateMcpConfigFile(
+  path: string,
+  label: string,
+  maximumBytes: number,
+): void {
+  // The per-profile config can carry bearer tokens and command environments.
+  validateMcpFile(path, label, maximumBytes, 0o077n);
+}
+
 function validateSandboxAssets(assets: string): void {
   for (const [name, expectedDigest] of Object.entries(toolsManifest().assets)) {
     const path = join(assets, name);
@@ -336,78 +376,6 @@ function treeSha256(root: string, includeDependencies: boolean): string {
   };
   visit(root);
   return hash.digest("hex");
-}
-
-function systemdEnvironment(): NodeJS.ProcessEnv {
-  const uid = process.getuid?.();
-  if (uid === undefined)
-    throw new Error("native Pi requires a Unix service user");
-  const runtime = `/run/user/${uid}`;
-  return {
-    PATH: "/usr/bin:/bin",
-    LANG: "C",
-    LC_ALL: "C",
-    XDG_RUNTIME_DIR: runtime,
-    DBUS_SESSION_BUS_ADDRESS: `unix:path=${runtime}/bus`,
-  };
-}
-
-function sandboxUnits(prefix: string | null): readonly string[] | null {
-  const result = spawnSync(
-    "/usr/bin/systemctl",
-    [
-      "--user",
-      "list-units",
-      "hitch-p0-*.scope",
-      "--all",
-      "--plain",
-      "--no-legend",
-      "--no-pager",
-    ],
-    {
-      encoding: "utf8",
-      env: systemdEnvironment(),
-      timeout: 5_000,
-    },
-  );
-  if (result.status !== 0) return null;
-  const units = result.stdout
-    .split("\n")
-    .map((line) => line.trim().split(/\s/u)[0])
-    .filter((unit): unit is string => unit !== undefined && unit.length > 0);
-  if (prefix === null) {
-    if (units.some((unit) => !SANDBOX_UNIT_PATTERN.test(unit))) return null;
-  } else {
-    if (!SANDBOX_OWNER_PATTERN.test(prefix)) return null;
-    const pattern = new RegExp(
-      `^hitch-p0-${prefix}-[a-f0-9]{24}\\.scope$`,
-      "u",
-    );
-    if (units.some((unit) => !pattern.test(unit))) return null;
-  }
-  return units;
-}
-
-async function cleanupSandboxUnits(prefix: string | null): Promise<boolean> {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    const units = sandboxUnits(prefix);
-    if (units === null) return false;
-    if (units.length === 0) return true;
-    for (const unit of units) {
-      for (const arguments_ of [
-        ["--user", "kill", "--kill-whom=all", "--signal=KILL", unit],
-        ["--user", "stop", unit],
-      ]) {
-        spawnSync("/usr/bin/systemctl", arguments_, {
-          encoding: "utf8",
-          env: systemdEnvironment(),
-          timeout: 5_000,
-        });
-      }
-    }
-    await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
-  }
-  return false;
 }
 
 function stableDigest(value: unknown): string {
@@ -1406,8 +1374,7 @@ export class NativePiRuntime implements AgentRuntime {
     );
     privateDirectory(temporary.#runtimeRoot);
     privateDirectory(temporary.#sessionsRoot);
-    if (activeRunCount === 0 && !(await cleanupSandboxUnits(null)))
-      throw new Error("sandbox process-tree cleanup could not be confirmed");
+    if (activeRunCount === 0) assertNoStartupSandboxScopes();
     await temporary.#refreshCatalog();
     syncPiModelsStore(catalogProfile, profiles);
     const models = await temporary.#loadCatalog();
@@ -1431,6 +1398,10 @@ export class NativePiRuntime implements AgentRuntime {
     forgePrompt?: {
       readonly mode: "replace" | "append" | "prepend";
       readonly systemPrompt: string;
+    },
+    forgeTools?: {
+      readonly allow?: readonly string[];
+      readonly deny?: readonly string[];
     },
   ): ControllerContext {
     const root = join(
@@ -1457,6 +1428,7 @@ export class NativePiRuntime implements AgentRuntime {
       ...(this.#antigravity ? { antigravityRequired: true } : {}),
       ...(activeTools === undefined ? {} : { activeTools }),
       ...(forgePrompt === undefined ? {} : { forgePrompt }),
+      ...(forgeTools === undefined ? {} : { forgeTools }),
     };
   }
 
@@ -1478,20 +1450,30 @@ export class NativePiRuntime implements AgentRuntime {
     const extension = join(this.#assets, "hitch-sandbox.ts");
     const webSearchExtension = join(this.#assets, "pi-web-search.ts");
     const antigravityExtension = join(this.#assets, "pi-antigravity.ts");
-    // Opt-in MCP support: the vendored pi-mcp-adapter and its mcp.json config
-    // live in the (release-independent) shared profile directory; the per-user
-    // profile clone receives mcp.json through the managed sync boundary. The
-    // extension itself loads by absolute path from the shared profile.
-    const mcpExtension = join(
+    // Opt-in MCP support: the fixed Hitch wrapper is the only extension Pi
+    // loads. It imports the operator-installed adapter factory after checking
+    // the adapter code file and per-user profile config as owner-controlled
+    // regular files.
+    const mcpExtension = join(this.#assets, "hitch-mcp.ts");
+    const mcpAdapter = join(
       this.#sharedProfileDir,
       "mcp",
       "node_modules",
       "pi-mcp-adapter",
       "index.ts",
     );
-    const mcpEnabled =
-      existsSync(mcpExtension) &&
-      existsSync(join(this.#sharedProfileDir, "mcp.json"));
+    const sharedMcpConfig = join(this.#sharedProfileDir, "mcp.json");
+    const profileMcpConfig = join(profileDir, "mcp.json");
+    const mcpConfigured = existsSync(sharedMcpConfig);
+    if (mcpConfigured) {
+      validateMcpAdapterFile(mcpAdapter, "adapter", 8 * 1024 * 1024);
+      validatePrivateMcpConfigFile(
+        profileMcpConfig,
+        "profile config",
+        1024 * 1024,
+      );
+    }
+    const mcpEnabled = mcpConfigured;
     const worker = join(this.#assets, "sandbox-worker.mjs");
     const helper = join(this.#assets, "secure-bwrap-helper");
     const baseline = expectedToolNames(context.webSearchEnabled);
@@ -1537,6 +1519,9 @@ export class NativePiRuntime implements AgentRuntime {
             }),
           }
         : {}),
+      ...(context.forgeTools !== undefined
+        ? { HITCH_FORGE_TOOLS_POLICY: JSON.stringify(context.forgeTools) }
+        : {}),
       ...(context.webSearchEnabled
         ? {
             HITCH_WEB_SEARCH_ENABLED: "1",
@@ -1559,7 +1544,10 @@ export class NativePiRuntime implements AgentRuntime {
         ? {
             HITCH_MCP_ENABLED: "1",
             HITCH_MCP_EXTENSION_PATH: mcpExtension,
-            HITCH_MCP_EXTENSION_SHA256: sha256File(mcpExtension),
+            HITCH_MCP_EXTENSION_SHA256: toolsManifest().assets["hitch-mcp.ts"],
+            HITCH_MCP_ADAPTER_PATH: mcpAdapter,
+            HITCH_MCP_ADAPTER_SHA256: sha256File(mcpAdapter),
+            HITCH_MCP_CONFIG_PATH: profileMcpConfig,
           }
         : {}),
       // This branch is unreachable from service composition and exists only
@@ -1613,7 +1601,7 @@ export class NativePiRuntime implements AgentRuntime {
       await controller.waitClosed();
       throw error;
     } finally {
-      if (!(await cleanupSandboxUnits(this.#owner)))
+      if (!(await cleanupOwnedSandboxScopes(this.#owner)))
         throw new Error("sandbox process-tree cleanup could not be confirmed");
       normalizeProfilePermissions(this.#catalogProfile);
       rmSync(context.root, { recursive: true, force: true });
@@ -1670,9 +1658,20 @@ export class NativePiRuntime implements AgentRuntime {
       ) {
         throw new Error("publication helper returned invalid metadata");
       }
+      // The worker appends the workspace extension to the snapshot name
+      // (`<artifactId>.<ext>.blob`) while the legacy no-extension form
+      // (`<artifactId>.blob`) must keep working. Resolve the one entry that
+      // matches the artifact handle we verified; anything else fails closed.
+      const publicationEntries = readdirSync(context.publishRoot);
+      const snapshots = publicationEntries.filter((name) => {
+        const match = PUBLISH_BLOB_PATTERN.exec(name);
+        return match !== null && match[1] === artifactId;
+      });
+      if (publicationEntries.length !== 1 || snapshots.length !== 1)
+        throw new Error("publication snapshot is ambiguous");
       const artifact = this.#media.promotePublished(
         turn.userId,
-        join(context.publishRoot, `${artifactId}.blob`),
+        join(context.publishRoot, snapshots[0]!),
         basename(publishPath),
       );
       if (
@@ -1701,7 +1700,7 @@ export class NativePiRuntime implements AgentRuntime {
         sessionReusable: true,
       };
     } finally {
-      const cleaned = await cleanupSandboxUnits(this.#owner);
+      const cleaned = await cleanupOwnedSandboxScopes(this.#owner);
       if (!cleaned) {
         this.#poisoned = true;
         logPiRuntimeFailure({ phase: "cleanup", turnId: turn.turnId });
@@ -1838,6 +1837,7 @@ export class NativePiRuntime implements AgentRuntime {
       isWebEnabled,
       activeTools,
       forgePrompt,
+      resolvedForge?.tools,
     );
     const nativeImages =
       selectedModel !== undefined && selectedModel.input.includes("image");
@@ -2183,7 +2183,7 @@ export class NativePiRuntime implements AgentRuntime {
       return { outcome: "unknown", text: "", sessionReusable: false };
     } finally {
       signal.removeEventListener("abort", onExternalAbort);
-      const cleaned = await cleanupSandboxUnits(this.#owner);
+      const cleaned = await cleanupOwnedSandboxScopes(this.#owner);
       if (!cleaned) {
         this.#poisoned = true;
         logPiRuntimeFailure({ phase: "cleanup", turnId: turn.turnId });

@@ -192,10 +192,13 @@ tells each controller the expected world via environment:
 `HITCH_EXPECTED_TOOLS` (exact post-filter set), `HITCH_ACTIVE_TOOLS`
 (policy-reduced active subset), and `HITCH_DYNAMIC_EXTENSION_PATHS`
 (extension paths whose tools are exempt by source). Dynamic sources such as
-the vendored pi-mcp-adapter register and activate tools asynchronously; they
-are excluded from the exact-match comparisons by source path, not by name,
-so late activation can never trip attestation. Dynamic-source tools still
-never route through the sandboxed execute path. Adding a new dynamic source
+the pinned Hitch MCP wrapper register and activate tools asynchronously; they
+are excluded from the exact-match comparisons by verified source path, not by
+name. The wrapper loads the operator-controlled adapter factory and applies
+Forge policy to actual direct tool names at registration and execution. Scripts,
+management calls, and generic gateway/namespace call proxies are forbidden.
+These tools still execute as trusted host code, not through the sandboxed file
+tool path; see [the MCP service boundary](hitch-mcp-service-boundary.md). Adding a new dynamic source
 is a runtime configuration change; adding a static tool means new extension
 code and therefore a rebuild, which re-anchors the manifest automatically.
 
@@ -219,8 +222,10 @@ Login and external auth edits happen only while stopped; additional plugin
 writers are not covered. See `docs/shared-auth-plan.md` for acceptance and
 migration details. Sandbox
 scopes are namespaced to the owning runtime, so one runtime's cleanup cannot
-kill another runtime's active units; a global sweep only runs at startup when
-no Turn is active.
+kill another runtime's active units. Startup never performs a global sweep:
+when no Turn is active and any `hitch-p0-*.scope` remains, or the user scope
+state cannot be inspected read-only, startup fails closed and requires
+explicit operator-verified recovery.
 
 Pi discovery is disabled and extensions are loaded explicitly from immutable
 manifests. The workspace cannot load `.pi/extensions`, settings, packages,

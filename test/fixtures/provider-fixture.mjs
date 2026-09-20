@@ -243,6 +243,118 @@ function streamFixture(selectedModel, context, options) {
         },
       ];
       stopReason = "stop";
+    } else if (mode === "mcp-quote") {
+      // Opt-in real-Pi MCP acceptance. Turn 1 searches/activates the synthetic
+      // direct tool through the Hitch MCP gateway; turn 2 calls the activated
+      // direct tool; turn 3 probes the disabled management surface; the final
+      // turn reports only whether the synthetic value and the disabled
+      // management error were both observed.
+      const toolNames = Array.isArray(context.tools)
+        ? context.tools
+            .map((tool) =>
+              tool && typeof tool.name === "string" ? tool.name : "",
+            )
+            .filter((name) => name.length > 0)
+            .sort()
+        : [];
+      const gatewayTool = Array.isArray(context.tools)
+        ? context.tools.find((tool) => tool && tool.name === "mcp")
+        : undefined;
+      const gatewayParameterKeys =
+        gatewayTool &&
+        gatewayTool.parameters &&
+        typeof gatewayTool.parameters === "object" &&
+        gatewayTool.parameters.properties &&
+        typeof gatewayTool.parameters.properties === "object"
+          ? Object.keys(gatewayTool.parameters.properties).sort()
+          : [];
+      const results = toolResults.map((message) => {
+        const content = Array.isArray(message.content) ? message.content : [];
+        const text = content
+          .filter((part) => part && part.type === "text")
+          .map((part) => part.text)
+          .join("\n");
+        return {
+          isError: message.isError === true,
+          text,
+          hasSyntheticQuote: text.includes("synthetic_quote"),
+          hasDisabledManagement: text.includes(
+            "MCP management actions are disabled by Hitch",
+          ),
+        };
+      });
+      const quoteSeen = results.some((result) => result.hasSyntheticQuote);
+      // The management call is the third result. It must fail (schema-level
+      // rejection or the wrapper's explicit deny); either way it did not run.
+      const managementResult = results.length >= 3 ? results[2] : undefined;
+      const managementSeen =
+        managementResult !== undefined && managementResult.isError === true;
+      if (process.env.HITCH_B2_PROVIDER_LOG) {
+        fs.appendFileSync(
+          process.env.HITCH_B2_PROVIDER_LOG,
+          `${JSON.stringify({
+            mode,
+            turn: toolResults.length,
+            toolNames,
+            gatewayParameterKeys,
+            // The mandatory extension's `before_agent_start` handler runs the
+            // source-path attestation and then replaces the system prompt with
+            // this sentinel. Seeing it proves that attestation completed with
+            // the MCP gateway already registered.
+            forgeAttested:
+              typeof context.systemPrompt === "string" &&
+              context.systemPrompt === "HITCH_MCP_FORGE_SENTINEL",
+            quoteSeen,
+            managementSeen,
+            results,
+          })}\n`,
+        );
+      }
+      if (toolResults.length === 0) {
+        content = [
+          {
+            type: "toolCall",
+            id: "hitch-mcp-search",
+            name: "mcp",
+            arguments: { search: "quote" },
+          },
+        ];
+        stopReason = "toolUse";
+      } else if (toolResults.length === 1) {
+        content = [
+          {
+            type: "toolCall",
+            id: "hitch-mcp-quote",
+            name: "mcp__mock_quote",
+            arguments: {},
+          },
+        ];
+        stopReason = "toolUse";
+      } else if (toolResults.length === 2) {
+        content = [
+          {
+            type: "toolCall",
+            id: "hitch-mcp-management",
+            name: "mcp",
+            arguments: {
+              action: "install",
+              url: "https://example.invalid/secret",
+            },
+          },
+        ];
+        stopReason = "toolUse";
+      } else {
+        content = [
+          {
+            type: "text",
+            text:
+              quoteSeen && managementSeen
+                ? "HITCH_MCP_QUOTE_SETTLED"
+                : "HITCH_MCP_QUOTE_MISMATCH",
+          },
+        ];
+        stopReason = "stop";
+      }
     } else if (toolResults.length === 0) {
       content = [
         {
@@ -263,7 +375,11 @@ function streamFixture(selectedModel, context, options) {
       stopReason = "stop";
     }
 
-    if (process.env.HITCH_B2_PROVIDER_LOG && !mode.startsWith("mode-a")) {
+    if (
+      process.env.HITCH_B2_PROVIDER_LOG &&
+      !mode.startsWith("mode-a") &&
+      mode !== "mcp-quote"
+    ) {
       fs.appendFileSync(
         process.env.HITCH_B2_PROVIDER_LOG,
         `${JSON.stringify({

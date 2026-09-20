@@ -69,7 +69,10 @@ without pretending the MVP is hardened for adversarial users.
   combined-output limits using the proven systemd/Bubblewrap backend.
 - Cancellation and timeout terminate the sandbox scope and confirm it is empty
   before releasing the controller slot. Sandbox units are namespaced to the
-  owning runtime so cleanup never kills another runtime's active units.
+  owning runtime so cleanup never kills another runtime's active units;
+  startup only enumerates scopes read-only and fails closed on existing or
+  unconfirmable scope state instead of guessing that another runtime's unit is
+  an orphan.
 - Wait for Pi `agent_settled`. A forced or ambiguous controller close marks the
   Turn unknown and quarantines the session instead of replaying it.
 
@@ -103,8 +106,9 @@ without pretending the MVP is hardened for adversarial users.
   media types and channels is not claimed.
 - Snapshot outbound workspace files into immutable owner-private artifacts
   through the descriptor-confined Phase 0 publication helper. Delivery never
-  reopens a live workspace path. Note: `hitch_publish` is the validated
-  model snapshot tool; `!send` has a known suffixed-blob regression in this release.
+  reopens a live workspace path. Both `hitch_publish` and `!send` validate the
+  snapshot identity, regular file, size, and digest; an optional safe extension
+  in the snapshot basename does not change those checks.
 - Persist terminal text and artifact deliveries to the owner-bound outbox
   before sending. A channel retry may duplicate delivery, but it must not rerun
   the agent Turn.
@@ -154,10 +158,11 @@ without pretending the MVP is hardened for adversarial users.
   administration;
 - kernel-enforced workspace quotas and complete hostile disk-exhaustion proof;
 - a patched crash-atomic upstream Pi credential writer;
-- Forge, ComfyUI Paint, arbitrary operator extensions, skills, MCP adapters,
-  and user-installed code;
+- ComfyUI Paint, arbitrary/untrusted operator extensions, skills, MCP servers,
+  and user-installed code (the narrow trusted Forge/MCP service path is
+  implemented; see [its boundary](hitch-mcp-service-boundary.md));
 - high availability, horizontal scaling, exactly-once channel delivery, and
-  unattended scheduling; and
+  guaranteed unattended delivery beyond the implemented bounded scheduler; and
 - exhaustive filesystem race, media bomb, provider-family, dependency-failure,
   and channel-failure certification beyond the MVP paths.
 

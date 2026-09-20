@@ -37,6 +37,7 @@ if (staticTools.length === 0)
 
 for (const [from, name] of [
   [join(source, "hitch-sandbox.ts"), "hitch-sandbox.ts"],
+  [join(source, "hitch-mcp.ts"), "hitch-mcp.ts"],
   [join(source, "manifest-attest.mjs"), "manifest-attest.mjs"],
   [join(webSource, "pi-web-search.ts"), "pi-web-search.ts"],
   [join(antigravitySource, "pi-antigravity.ts"), "pi-antigravity.ts"],
@@ -105,6 +106,7 @@ renameSync(temporary, helper);
 const assets = {};
 for (const name of [
   "hitch-sandbox.ts",
+  "hitch-mcp.ts",
   "manifest-attest.mjs",
   "pi-web-search.ts",
   "pi-antigravity.ts",

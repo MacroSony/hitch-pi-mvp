@@ -1,6 +1,7 @@
 # Native Pi runtime and sandbox-extension decision
 
-Status: selected architecture for the trusted-personal MVP
+Status: selected architecture for the trusted-personal MVP, with the later
+shared-auth and restricted MCP service path reflected below.
 
 ## Decision
 
@@ -36,7 +37,7 @@ Telegram / WeChat
    Pi RPC controller (trusted)
  native providers + operator Pi auth
  mandatory hitch-sandbox extension
- optional operator extensions deferred
+ restricted trusted Forge/MCP service extensions
         |
    sandbox backend
  /workspace rw, /inbox ro, bounded /tmp
@@ -48,9 +49,11 @@ Telegram / WeChat
 Each Hitch session keeps Pi's private transcript and selected provider/model.
 Each Turn starts a fresh Pi RPC controller against that session. Only one Turn
 per user runs at once (per-user pump); across users the service allows up to
-`maxConcurrentTurns` controllers (default 2). At startup the operator profile
-is cloned into a private per-user directory, so controllers no longer share
-`auth.json`/`settings.json`. After first flush, Hitch reopens the exact private
+`maxConcurrentTurns` controllers (default 2). Per-user private profiles provide
+settings and controller resources, but provider authentication has one shared
+operator authority. Legacy per-user auth files may remain; they are not
+independent authorities and must not be promoted during recovery. After first
+flush, Hitch reopens the exact private
 transcript path; `--session-id` is not a safe lookup/persistence boundary. A
 crash or forced close still quarantines the session unless Pi emits
 `agent_settled`, exits cleanly, and Hitch fsyncs the transcript plus its parent
@@ -59,11 +62,11 @@ boundary.
 
 ## Provider and model behavior
 
-Hitch keeps one operator-managed, host-private source Pi profile and clones it
-into per-user private directories under the data root. Runtime controllers use
-their user's clone, and a dedicated clone serves the startup model catalog. On
-startup it asks Pi for the models whose providers are registered and
-authenticated. The snapshot is filtered only by an optional static operator
+Hitch keeps one operator-managed, host-private source Pi profile and prepares
+per-user private resource directories under the data root. Both turn and
+catalog controllers use the attested shared-auth bootstrap and the same
+authority rather than independently refreshing cloned credentials. On startup
+it asks Pi for the models whose providers are registered and authenticated. The snapshot is filtered only by an optional static operator
 allowlist, recorded by digest, and exposed through:
 
 - `!models [filter]`;
@@ -168,3 +171,17 @@ What does not disappear is the sandbox security work. The extension/backend
 must still prove complete tool replacement, path confinement, process-tree
 cleanup, practical execution bounds, media publication, and fail-closed
 startup.
+
+## Restricted MCP service addition
+
+The runtime loads an immutable Hitch wrapper instead of exposing the operator
+adapter directly. MCP scripts, installation/auth/UI management, adapter slash
+commands, and generic gateway/namespace invocation proxies are unavailable.
+Allowed direct tools are policy-checked at registration and execute; search
+may activate them later. Verified wrapper source attribution, rather than a
+name-prefix exemption, permits these dynamic tools alongside the static
+manifest. See [the MCP service boundary](hitch-mcp-service-boundary.md).
+
+This does not move MCP servers inside Bubblewrap or make their credentials and
+capabilities safe for untrusted code. They and their dependency closure remain
+operator-controlled trusted host resources.
