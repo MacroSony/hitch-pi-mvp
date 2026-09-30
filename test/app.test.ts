@@ -1400,6 +1400,43 @@ test("runtime progress enforces per-message and per-Turn bounds", async () => {
   environment.foundation.close();
 });
 
+test("runtime progress sends at most three messages per Turn", async () => {
+  const environment = setup();
+  const runtime = new FakeAgentRuntime(async (_turn, _signal, onProgress) => {
+    for (let index = 0; index < 6; index += 1) {
+      onProgress(`\n\n⏳ tool-${String(index)}\n\n`);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    return {
+      outcome: "succeeded",
+      text: "final answer",
+      sessionReusable: true,
+    };
+  });
+  const app = new HitchApplication(
+    environment.store,
+    runtime,
+    "always-trigger",
+    undefined,
+    5,
+  );
+  app.start();
+  assert.equal(
+    app.receiveTelegram("primary", update(915, "101", "progress cap")).accepted,
+    true,
+  );
+  await app.drain();
+
+  const texts = environment.store
+    .pendingTelegramOutbox("primary")
+    .map(({ text }) => text ?? "");
+  const progress = texts.filter((text) => text.includes("⏳"));
+  assert.equal(progress.length, 3);
+  assert.ok(!texts.some((text) => text.includes("tool-3")));
+  assert.ok(texts.includes("final answer"));
+  environment.foundation.close();
+});
+
 test("progress preserves synthetic tool paragraph boundaries and leaves final reply unchanged", async () => {
   const environment = setup();
   const runtime = new FakeAgentRuntime(async (_turn, _signal, onProgress) => {

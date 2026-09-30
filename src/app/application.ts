@@ -35,6 +35,10 @@ import { renderWakeTemplate } from "../wake/template.js";
 const PROGRESS_FLUSH_MS = 30_000;
 const PROGRESS_MAX_CHARS_PER_MESSAGE = 4000;
 const PROGRESS_MAX_BYTES_PER_TURN = 64 * 1024;
+// WeChat iLink appears to accept only ~10 outbound messages per inbound
+// context; a looping tool call once burned the whole budget on progress
+// lines, so cap progress to a few messages and keep room for the final reply.
+const PROGRESS_MAX_MESSAGES_PER_TURN = 3;
 const WAKE_TICK_MS = 30_000;
 const WAKE_GRACE_MS = 30 * 60_000;
 const WAKE_MAX_SLOTS_PER_TICK = 50;
@@ -85,6 +89,7 @@ class TurnProgress {
   readonly #flushMs: number;
   #buffer = "";
   #sentBytes = 0;
+  #sentMessages = 0;
   #closed = false;
   #timer: NodeJS.Timeout | null = null;
 
@@ -130,7 +135,12 @@ class TurnProgress {
         `Turn progress insert failed: ${error instanceof Error ? error.message : "unknown"}\n`,
       );
     }
-    if (this.#sentBytes >= PROGRESS_MAX_BYTES_PER_TURN) this.#closed = true;
+    this.#sentMessages += 1;
+    if (
+      this.#sentBytes >= PROGRESS_MAX_BYTES_PER_TURN ||
+      this.#sentMessages >= PROGRESS_MAX_MESSAGES_PER_TURN
+    )
+      this.#closed = true;
   }
 
   public close(): void {
