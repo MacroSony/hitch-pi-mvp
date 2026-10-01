@@ -140,3 +140,12 @@ CI. The host-only sandbox check can be repeated with:
 npm run acceptance:host
 npm run acceptance:service
 ```
+
+
+### Discord Luna (M1, local implementation)
+
+Static Discord DM and trusted server connections are available in the
+[Discord guide](docs/discord.md), with a [test config example](examples/discord.config.json).
+Server channels share context/workspace; DMs remain independent. Replies carry
+author provenance and control commands require configured admin IDs. File
+transport/ComfyUI and live production acceptance are separate follow-up stages.

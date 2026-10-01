@@ -1,5 +1,13 @@
 # Architecture
 
+> **2026-10-01 Discord M1 amendment:** the operator authorized static Discord
+> DM and trusted server connections with shared server context/workspace and
+> separately attributed authors. [Discord scope and controls](discord.md)
+> narrowly supersede the private-only/group exclusions below for configured
+> Discord servers only. Other channels, credential separation, mandatory
+> sandboxing and owner isolation are unchanged. Local implementation is not
+> live/production acceptance.
+
 Status: implementation architecture for the trusted-personal MVP
 
 ## Design rule

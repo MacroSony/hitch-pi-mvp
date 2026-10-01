@@ -16,10 +16,18 @@ const CONTROL_PATTERN = /[\u0000-\u001f\u007f]/u;
 const DEFAULT_MAX_CONCURRENT_TURNS = 2;
 const MIN_MAX_CONCURRENT_TURNS = 1;
 const MAX_MAX_CONCURRENT_TURNS = 8;
+const DISCORD_SNOWFLAKE_PATTERN = /^[1-9][0-9]{16,19}$/u;
+const MAX_DISCORD_SNOWFLAKE = BigInt("18446744073709551615");
 
 export interface TelegramAccountConfig {
   readonly id: string;
   readonly botTokenEnv: string;
+}
+
+export interface DiscordAccountConfig {
+  readonly id: string;
+  readonly botTokenEnv: string;
+  readonly messageContent?: boolean;
 }
 
 export interface WeChatAccountConfig {
@@ -48,6 +56,25 @@ export interface WeComEndpointConfig {
   readonly userId: string;
 }
 
+export interface DiscordDmEndpointConfig {
+  readonly mode: "dm";
+  readonly account: string;
+  readonly userId: string;
+  readonly channelId: string;
+}
+
+export interface DiscordServerEndpointConfig {
+  readonly mode: "server";
+  readonly account: string;
+  readonly guildId: string;
+  readonly channelIds: readonly string[];
+  readonly adminUserIds: readonly string[];
+}
+
+export type DiscordEndpointConfig =
+  | DiscordDmEndpointConfig
+  | DiscordServerEndpointConfig;
+
 export interface UserConfig {
   readonly id: string;
   readonly workspace: string;
@@ -58,6 +85,7 @@ export interface UserConfig {
   readonly telegram?: TelegramEndpointConfig;
   readonly wechat?: WeChatEndpointConfig;
   readonly wecom?: WeComEndpointConfig;
+  readonly discord?: DiscordEndpointConfig;
 }
 
 export type MediaMode = "always-trigger" | "text-trigger";
@@ -83,6 +111,8 @@ export interface AppConfig {
   readonly telegramAccounts: readonly TelegramAccountConfig[];
   readonly wechatAccounts: readonly WeChatAccountConfig[];
   readonly wecomAccounts: readonly WeComAccountConfig[];
+  /** Optional for compatibility with pre-Discord AppConfig fixtures. */
+  readonly discordAccounts?: readonly DiscordAccountConfig[];
   readonly users: readonly UserConfig[];
   readonly webSearch?: WebSearchConfig;
   readonly forge?: ForgeConfig;
@@ -187,6 +217,37 @@ function parseTelegramAccount(
   return { id: identifier(input.id, `${path}.id`), botTokenEnv };
 }
 
+function parseDiscordAccount(
+  value: unknown,
+  index: number,
+): DiscordAccountConfig {
+  const path = `config.discordAccounts[${index}]`;
+  const input = record(value, path);
+  exactKeys(input, ["id", "botTokenEnv"], ["messageContent"], path);
+  const botTokenEnv = stringValue(
+    input.botTokenEnv,
+    `${path}.botTokenEnv`,
+    128,
+  );
+  if (!ENV_PATTERN.test(botTokenEnv))
+    fail(
+      `${path}.botTokenEnv`,
+      "must be an uppercase environment variable name",
+    );
+  if (
+    input.messageContent !== undefined &&
+    typeof input.messageContent !== "boolean"
+  )
+    fail(`${path}.messageContent`, "expected a boolean");
+  return {
+    id: identifier(input.id, `${path}.id`),
+    botTokenEnv,
+    ...(input.messageContent === undefined
+      ? {}
+      : { messageContent: input.messageContent as boolean }),
+  };
+}
+
 function parseWeChatAccount(
   value: unknown,
   index: number,
@@ -250,6 +311,63 @@ function parseWeComEndpoint(value: unknown, path: string): WeComEndpointConfig {
   };
 }
 
+function discordSnowflake(value: unknown, path: string): string {
+  const parsed = stringValue(value, path, 20);
+  if (
+    !DISCORD_SNOWFLAKE_PATTERN.test(parsed) ||
+    BigInt(parsed) > MAX_DISCORD_SNOWFLAKE
+  ) {
+    fail(path, "must be a canonical nonzero Discord snowflake");
+  }
+  return parsed;
+}
+
+function parseDiscordEndpoint(
+  value: unknown,
+  path: string,
+): DiscordEndpointConfig {
+  const input = record(value, path);
+  if (input.mode === "dm") {
+    exactKeys(input, ["mode", "account", "userId", "channelId"], [], path);
+    return {
+      mode: "dm",
+      account: identifier(input.account, `${path}.account`),
+      userId: discordSnowflake(input.userId, `${path}.userId`),
+      channelId: discordSnowflake(input.channelId, `${path}.channelId`),
+    };
+  }
+  if (input.mode === "server") {
+    exactKeys(
+      input,
+      ["mode", "account", "guildId", "channelIds", "adminUserIds"],
+      [],
+      path,
+    );
+    const rawChannels = arrayValue(input.channelIds, `${path}.channelIds`);
+    if (rawChannels.length < 1 || rawChannels.length > 32)
+      fail(`${path}.channelIds`, "must contain 1 to 32 channels");
+    const channelIds = rawChannels.map((item, index) =>
+      discordSnowflake(item, `${path}.channelIds[${index}]`),
+    );
+    unique(channelIds, `${path}.channelIds`);
+    const rawAdmins = arrayValue(input.adminUserIds, `${path}.adminUserIds`);
+    if (rawAdmins.length < 1 || rawAdmins.length > 32)
+      fail(`${path}.adminUserIds`, "must contain 1 to 32 administrators");
+    const adminUserIds = rawAdmins.map((item, index) =>
+      discordSnowflake(item, `${path}.adminUserIds[${index}]`),
+    );
+    unique(adminUserIds, `${path}.adminUserIds`);
+    return {
+      mode: "server",
+      account: identifier(input.account, `${path}.account`),
+      guildId: discordSnowflake(input.guildId, `${path}.guildId`),
+      channelIds,
+      adminUserIds,
+    };
+  }
+  fail(`${path}.mode`, "expected dm or server");
+}
+
 function parseLocalCaller(
   value: unknown,
   index: number,
@@ -303,7 +421,7 @@ function parseUser(value: unknown, index: number): UserConfig {
   exactKeys(
     input,
     ["id", "workspace"],
-    ["telegram", "wechat", "wecom", "forgeProfile"],
+    ["telegram", "wechat", "wecom", "discord", "forgeProfile"],
     path,
   );
   const telegram = Object.hasOwn(input, "telegram")
@@ -315,8 +433,21 @@ function parseUser(value: unknown, index: number): UserConfig {
   const wecom = Object.hasOwn(input, "wecom")
     ? parseWeComEndpoint(input.wecom, `${path}.wecom`)
     : undefined;
-  if (telegram === undefined && wechat === undefined && wecom === undefined)
+  const discord = Object.hasOwn(input, "discord")
+    ? parseDiscordEndpoint(input.discord, `${path}.discord`)
+    : undefined;
+  if (
+    telegram === undefined &&
+    wechat === undefined &&
+    wecom === undefined &&
+    discord === undefined
+  )
     fail(path, "must configure at least one private endpoint");
+  if (
+    discord !== undefined &&
+    (telegram !== undefined || wechat !== undefined || wecom !== undefined)
+  )
+    fail(path, "Discord cannot be mixed with legacy channel endpoints");
   const forgeProfile = Object.hasOwn(input, "forgeProfile")
     ? identifier(input.forgeProfile, `${path}.forgeProfile`)
     : undefined;
@@ -327,6 +458,7 @@ function parseUser(value: unknown, index: number): UserConfig {
     ...(telegram === undefined ? {} : { telegram }),
     ...(wechat === undefined ? {} : { wechat }),
     ...(wecom === undefined ? {} : { wecom }),
+    ...(discord === undefined ? {} : { discord }),
   };
 }
 
@@ -345,6 +477,7 @@ export function parseConfig(value: unknown): AppConfig {
     ],
     [
       "wecomAccounts",
+      "discordAccounts",
       "mediaMode",
       "maxConcurrentTurns",
       "webSearch",
@@ -376,6 +509,12 @@ export function parseConfig(value: unknown): AppConfig {
       : arrayValue(input.wecomAccounts, "config.wecomAccounts").map(
           parseWeComAccount,
         );
+  const discordAccounts =
+    input.discordAccounts === undefined
+      ? []
+      : arrayValue(input.discordAccounts, "config.discordAccounts").map(
+          parseDiscordAccount,
+        );
   const users = arrayValue(input.users, "config.users").map(parseUser);
   if (users.length === 0)
     fail("config.users", "must contain at least one user");
@@ -396,11 +535,17 @@ export function parseConfig(value: unknown): AppConfig {
     users.map(({ id }) => id),
     "config.users",
   );
+  unique(
+    discordAccounts.map(({ id }) => id),
+    "config.discordAccounts",
+  );
 
   const telegramAccountIds = new Set(telegramAccounts.map(({ id }) => id));
   const wechatAccountIds = new Set(wechatAccounts.map(({ id }) => id));
   const wecomAccountIds = new Set(wecomAccounts.map(({ id }) => id));
+  const discordAccountIds = new Set(discordAccounts.map(({ id }) => id));
   const endpointKeys: string[] = [];
+  const discordScopeKeys: string[] = [];
   for (const user of users) {
     if (user.telegram !== undefined) {
       if (!telegramAccountIds.has(user.telegram.account)) {
@@ -440,8 +585,50 @@ export function parseConfig(value: unknown): AppConfig {
         JSON.stringify(["wecom", user.wecom.account, user.wecom.userId]),
       );
     }
+    if (user.discord !== undefined) {
+      if (!discordAccountIds.has(user.discord.account)) {
+        fail(
+          `config.users.${user.id}.discord.account`,
+          "references an unknown Discord account",
+        );
+      }
+      const scopeId =
+        user.discord.mode === "dm" ? user.discord.userId : user.discord.guildId;
+      discordScopeKeys.push(
+        JSON.stringify([
+          "discord",
+          user.discord.account,
+          user.discord.mode,
+          scopeId,
+        ]),
+      );
+      if (user.discord.mode === "dm") {
+        endpointKeys.push(
+          JSON.stringify([
+            "discord",
+            user.discord.account,
+            "dm",
+            user.discord.userId,
+            user.discord.channelId,
+          ]),
+        );
+      } else {
+        for (const channelId of user.discord.channelIds) {
+          endpointKeys.push(
+            JSON.stringify([
+              "discord",
+              user.discord.account,
+              "server",
+              user.discord.guildId,
+              channelId,
+            ]),
+          );
+        }
+      }
+    }
   }
   unique(endpointKeys, "config.users endpoints");
+  unique(discordScopeKeys, "config.users Discord scopes");
 
   const mediaMode =
     input.mediaMode === undefined
@@ -580,6 +767,7 @@ export function parseConfig(value: unknown): AppConfig {
     telegramAccounts,
     wechatAccounts,
     wecomAccounts,
+    discordAccounts,
     users,
     ...(webSearch === undefined ? {} : { webSearch }),
     ...(forge === undefined ? {} : { forge }),

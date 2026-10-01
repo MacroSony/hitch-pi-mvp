@@ -196,3 +196,22 @@ Includes the new-session/model-less-profile thinking fallback fix. Fixed local
 119 tests passed / 17 opt-in skipped; namespace real Pi RPC 17/17.
 Operator staging login, real model availability, and final profile activation
 remain attended gates, not implied by passing dummy provider fixtures.
+
+
+## Post-MVP Discord Luna — M1 text (local implementation)
+
+Operator approved DM plus trusted server connection selection; one shared
+context/workspace per configured server, independent per-peer DMs, explicit
+author provenance and a static server admin ID list. The narrow amendment
+in [docs/discord-plan.md](docs/discord-plan.md) supersedes group/shared-workspace
+exclusions above only for this Discord scope. Sandbox/credentials and unrelated
+channels remain unchanged. [Setup and boundaries](docs/discord.md).
+
+- M1: strict configuration + schema9, Discord SDK/ingress/outbox, admin controls,
+  attributed text, shared selection/restart, deterministic acceptance/review.
+- M2 (not implemented): file reception/publication/delivery.
+- M3 (not implemented): ComfyUI Paint + owner-bound jobs.
+- Attended test guild/DM first; production activation requires separate approval.
+
+No production config, credentials, database, service or real Discord account was
+changed by local implementation.

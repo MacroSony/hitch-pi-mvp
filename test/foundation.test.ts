@@ -107,6 +107,78 @@ function rowCount(
   return Number(row.count);
 }
 
+// Build a genuine pre-9 fixture instead of a schema-8 database carrying
+// schema-9 columns. This is intentionally the old table shape used by the
+// historical migrator, including endpoint rows referenced by live state.
+function seedDurableState(database: DatabaseSync): void {
+  const endpoint = database
+    .prepare(
+      "SELECT id, user_id FROM channel_endpoints WHERE kind = 'telegram' LIMIT 1",
+    )
+    .get() as { id: string; user_id: string };
+  database
+    .prepare(
+      "INSERT INTO sessions(id, user_id, name, pi_session_id, state, created_at, updated_at) VALUES ('migration-session', ?, 'migration', 'pi-migration', 'active', 1, 1)",
+    )
+    .run(endpoint.user_id);
+  database
+    .prepare(
+      `INSERT INTO turns(
+         id, user_id, session_id, endpoint_id, idempotency_key, content_digest,
+         prompt_text, ordinal, state, outcome, result_text, created_at, updated_at
+       ) VALUES ('migration-turn', ?, 'migration-session', ?, 'migration-message', 'migration-digest',
+                 'hello', 1, 'terminal', 'succeeded', 'world', 1, 1)`,
+    )
+    .run(endpoint.user_id, endpoint.id);
+  database
+    .prepare(
+      `INSERT INTO outbox(
+         id, user_id, endpoint_id, turn_id, kind, payload_text, state,
+         attempts, created_at, updated_at
+       ) VALUES ('migration-outbox', ?, ?, 'migration-turn', 'text', 'world', 'pending', 0, 1, 1)`,
+    )
+    .run(endpoint.user_id, endpoint.id);
+}
+
+function downgradeToSchema8(database: DatabaseSync): void {
+  database.exec(`
+    PRAGMA foreign_keys = OFF;
+    BEGIN;
+    ALTER TABLE users DROP COLUMN scope_kind;
+    ALTER TABLE turns DROP COLUMN discord_source;
+    CREATE TABLE channel_endpoints_legacy (
+      id TEXT PRIMARY KEY,
+      tuple_key TEXT NOT NULL UNIQUE,
+      user_id TEXT NOT NULL REFERENCES users(id),
+      kind TEXT NOT NULL CHECK (kind IN ('telegram', 'wechat', 'wecom')),
+      account_id TEXT NOT NULL,
+      platform_user_id TEXT NOT NULL,
+      private_chat_id TEXT,
+      selected_session_id TEXT,
+      enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+      published_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      UNIQUE (id, user_id),
+      FOREIGN KEY (selected_session_id, user_id) REFERENCES sessions(id, user_id),
+      CHECK (
+        (kind = 'telegram' AND private_chat_id IS NOT NULL) OR
+        (kind IN ('wechat', 'wecom') AND private_chat_id IS NULL)
+      )
+    ) STRICT;
+    INSERT INTO channel_endpoints_legacy(
+      id, tuple_key, user_id, kind, account_id, platform_user_id,
+      private_chat_id, selected_session_id, enabled, published_at, updated_at
+    )
+    SELECT id, tuple_key, user_id, kind, account_id, platform_user_id,
+           private_chat_id, selected_session_id, enabled, published_at, updated_at
+    FROM channel_endpoints;
+    DROP TABLE channel_endpoints;
+    ALTER TABLE channel_endpoints_legacy RENAME TO channel_endpoints;
+    COMMIT;
+    PRAGMA foreign_keys = ON;
+  `);
+}
+
 test("foundation publishes two users, reopens deterministically, and keeps secrets out of SQLite", () => {
   const setup = fixture();
   const foundation = bootstrapFoundation(setup.config(), { now: () => 1_000 });
@@ -530,7 +602,7 @@ test("schema 1 state migrates to current schema without losing Turns or outbox",
   const version = migrated.connection.prepare("PRAGMA user_version").get() as {
     user_version: bigint;
   };
-  assert.equal(version.user_version, 8n);
+  assert.equal(version.user_version, 9n);
   // The v7 turns CHECK must accept compact Turns after migration.
   const probeIds = migrated.connection
     .prepare(
@@ -598,6 +670,7 @@ test("schema 6 migrates context snapshot column without changing existing rows",
   const setup = fixture();
   const initial = bootstrapFoundation(setup.config());
   const userCount = rowCount(initial.database.connection, "users");
+  downgradeToSchema8(initial.database.connection);
   initial.database.connection.exec(
     "DROP TABLE local_requests; ALTER TABLE sessions DROP COLUMN context_usage; UPDATE app_meta SET value='hitch-pi-mvp-schema-5' WHERE key='schema_id'; PRAGMA user_version=6;",
   );
@@ -610,7 +683,7 @@ test("schema 6 migrates context snapshot column without changing existing rows",
           user_version: bigint;
         }
       ).user_version,
-      8n,
+      9n,
     );
     assert.equal(rowCount(migrated.connection, "users"), userCount);
     assert.equal(
@@ -619,7 +692,7 @@ test("schema 6 migrates context snapshot column without changing existing rows",
           .prepare("SELECT value FROM app_meta WHERE key='schema_id'")
           .get() as { value: string }
       ).value,
-      "hitch-pi-mvp-schema-8",
+      "hitch-pi-mvp-schema-9",
     );
     assert.deepEqual(
       migrated.connection.prepare("PRAGMA foreign_key_check").all(),
@@ -649,9 +722,92 @@ test("schema 6 with unknown identity is rejected before migration", () => {
   );
 });
 
-test("actual-like schema 7 migrates local receipts and repairs the FIFO index", () => {
+test("schema 8 migrates non-empty state to schema 9", () => {
   const setup = fixture();
   const initial = bootstrapFoundation(setup.config());
+  seedDurableState(initial.database.connection);
+  downgradeToSchema8(initial.database.connection);
+  initial.database.connection.exec(
+    "UPDATE app_meta SET value='hitch-pi-mvp-schema-8' WHERE key='schema_id'; PRAGMA user_version=8;",
+  );
+  initial.close();
+  const migrated = openFoundationDatabase(setup.dataRoot);
+  try {
+    assert.equal(
+      (
+        migrated.connection.prepare("PRAGMA user_version").get() as {
+          user_version: bigint;
+        }
+      ).user_version,
+      9n,
+    );
+    assert.equal(rowCount(migrated.connection, "sessions"), 1);
+    assert.equal(rowCount(migrated.connection, "turns"), 1);
+    assert.equal(rowCount(migrated.connection, "outbox"), 1);
+    assert.equal(
+      (
+        migrated.connection.prepare("PRAGMA foreign_keys").get() as {
+          foreign_keys: bigint;
+        }
+      ).foreign_keys,
+      1n,
+    );
+    assert.deepEqual(
+      migrated.connection.prepare("PRAGMA foreign_key_check").all(),
+      [],
+    );
+  } finally {
+    migrated.close();
+  }
+});
+
+test("schema 8 migration rolls back on foreign-key violations", () => {
+  const setup = fixture();
+  const initial = bootstrapFoundation(setup.config());
+  seedDurableState(initial.database.connection);
+  downgradeToSchema8(initial.database.connection);
+  initial.database.connection.exec(
+    "PRAGMA foreign_keys=OFF; DELETE FROM sessions WHERE id='migration-session'; PRAGMA foreign_keys=ON; UPDATE app_meta SET value='hitch-pi-mvp-schema-8' WHERE key='schema_id'; PRAGMA user_version=8;",
+  );
+  initial.close();
+
+  assert.throws(
+    () => openFoundationDatabase(setup.dataRoot),
+    /foreign key check failed/u,
+  );
+  const raw = new DatabaseSync(join(setup.dataRoot, "hitch.sqlite"), {
+    enableForeignKeyConstraints: true,
+  });
+  try {
+    assert.equal(
+      (raw.prepare("PRAGMA user_version").get() as { user_version: number })
+        .user_version,
+      8,
+    );
+    assert.equal(
+      (
+        raw.prepare("PRAGMA table_info(users)").all() as Array<{ name: string }>
+      ).some((column) => column.name === "scope_kind"),
+      false,
+    );
+    assert.equal(
+      (
+        raw.prepare("PRAGMA table_info(channel_endpoints)").all() as Array<{
+          name: string;
+        }>
+      ).some((column) => column.name === "discord_mode"),
+      false,
+    );
+  } finally {
+    raw.close();
+  }
+});
+
+test("actual-like schema 7 migrates non-empty state and repairs the FIFO index", () => {
+  const setup = fixture();
+  const initial = bootstrapFoundation(setup.config());
+  seedDurableState(initial.database.connection);
+  downgradeToSchema8(initial.database.connection);
   initial.database.connection.exec(
     "DROP TABLE local_requests; DROP INDEX turns_user_state_ordinal; UPDATE app_meta SET value='hitch-pi-mvp-schema-7' WHERE key='schema_id'; PRAGMA user_version=7;",
   );
@@ -664,7 +820,7 @@ test("actual-like schema 7 migrates local receipts and repairs the FIFO index", 
           user_version: bigint;
         }
       ).user_version,
-      8n,
+      9n,
     );
     assert.ok(
       migrated.connection
@@ -673,6 +829,17 @@ test("actual-like schema 7 migrates local receipts and repairs the FIFO index", 
         .some((row) => row.name === "turns_user_state_ordinal"),
     );
     assert.equal(rowCount(migrated.connection, "local_requests"), 0);
+    assert.equal(rowCount(migrated.connection, "sessions"), 1);
+    assert.equal(rowCount(migrated.connection, "turns"), 1);
+    assert.equal(rowCount(migrated.connection, "outbox"), 1);
+    assert.equal(
+      (
+        migrated.connection.prepare("PRAGMA foreign_keys").get() as {
+          foreign_keys: bigint;
+        }
+      ).foreign_keys,
+      1n,
+    );
     assert.deepEqual(
       migrated.connection.prepare("PRAGMA foreign_key_check").all(),
       [],

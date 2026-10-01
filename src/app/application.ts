@@ -9,7 +9,11 @@ import {
   classifyTelegramIdentity,
   readTelegramContent,
 } from "../channels/telegram-ingress.js";
-import type { MediaMode } from "../config/config.js";
+import type {
+  DiscordEndpointConfig,
+  MediaMode,
+  UserConfig,
+} from "../config/config.js";
 import type { MediaStore } from "../media/media-store.js";
 import {
   classifyWeChatIdentity,
@@ -19,6 +23,11 @@ import {
   classifyWeComIdentity,
   readWeComContent,
 } from "../channels/wecom-ingress.js";
+import {
+  classifyDiscordMessage,
+  discordDigest,
+  discordPrompt,
+} from "../channels/discord-ingress.js";
 import { parseCommand, type WakeCommand } from "./commands.js";
 import { AppError, type FailureCategory } from "./errors.js";
 import {
@@ -182,6 +191,7 @@ export class HitchApplication {
     readonly wakeUserIds: readonly string[] = [],
     readonly wakeTickMs: number = WAKE_TICK_MS,
     readonly wakeGraceMs: number = WAKE_GRACE_MS,
+    readonly discordUsers: readonly UserConfig[] = [],
   ) {
     this.#wakeUsers = new Set(wakeUserIds);
   }
@@ -563,6 +573,174 @@ export class HitchApplication {
         category: "internal-error",
         message: "internal-error: WeCom message could not be admitted",
         ...(replyPeerId === undefined ? {} : { replyPeerId }),
+      };
+    }
+  }
+
+  public discordRouteAllowed(
+    accountId: string,
+    mode: "dm" | "server",
+    scopeId: string,
+    channelId: string,
+  ): boolean {
+    const configured = this.discordUsers.some((user) => {
+      const discord = user.discord;
+      if (
+        discord === undefined ||
+        discord.account !== accountId ||
+        discord.mode !== mode
+      )
+        return false;
+      if (mode === "dm") {
+        return (
+          discord.mode === "dm" &&
+          discord.userId === scopeId &&
+          discord.channelId === channelId
+        );
+      }
+      return (
+        discord.mode === "server" &&
+        discord.guildId === scopeId &&
+        discord.channelIds.includes(channelId)
+      );
+    });
+    return (
+      configured &&
+      this.store.resolveDiscordEndpoint(accountId, mode, scopeId, channelId) !==
+        null
+    );
+  }
+
+  public receiveDiscord(
+    accountId: string,
+    botUserId: string,
+    value: unknown,
+  ): IngressResult {
+    try {
+      if (this.#stopping)
+        throw new AppError("busy", "Hitch is stopping; try again shortly");
+      const ingress = classifyDiscordMessage(botUserId, value);
+      if (ingress === null)
+        throw new AppError("rejected", "Discord message did not trigger Luna");
+      if (ingress.hasAttachments)
+        throw new AppError(
+          "rejected",
+          "Discord attachments are not supported in M1",
+        );
+      if (
+        !this.discordRouteAllowed(
+          accountId,
+          ingress.mode,
+          ingress.scopeId,
+          ingress.channelId,
+        )
+      )
+        throw new AppError("rejected", "Discord endpoint is not configured");
+      const endpoint = this.store.resolveDiscordEndpoint(
+        accountId,
+        ingress.mode,
+        ingress.scopeId,
+        ingress.channelId,
+      );
+      if (endpoint === null)
+        throw new AppError("rejected", "Discord endpoint is not configured");
+      if (ingress.mode === "dm" && ingress.authorId !== ingress.scopeId)
+        throw new AppError(
+          "rejected",
+          "Discord DM author is not the configured owner",
+        );
+
+      const rawText = ingress.text;
+      if (
+        rawText.length === 0 ||
+        Buffer.byteLength(discordPrompt(ingress.source, rawText), "utf8") >
+          32 * 1024
+      )
+        throw new AppError(
+          "rejected",
+          "Discord text must be nonempty and fit the prompt limit",
+        );
+      const command = parseCommand(rawText);
+      const discordUser = this.discordUsers.find((user) => {
+        const config = user.discord;
+        return (
+          config?.mode === "server" &&
+          config.account === accountId &&
+          config.guildId === ingress.scopeId
+        );
+      });
+      const discordConfig: DiscordEndpointConfig | undefined =
+        discordUser?.discord;
+      if (
+        ingress.mode === "server" &&
+        command !== null &&
+        (discordConfig?.mode !== "server" ||
+          !discordConfig.adminUserIds.includes(ingress.authorId))
+      )
+        throw new AppError(
+          "rejected",
+          "only a configured Discord server admin may use commands",
+        );
+      if (
+        rawText.trimStart().startsWith("/") ||
+        command?.kind === "send" ||
+        command?.kind === "wake" ||
+        command?.kind === "profile" ||
+        command?.kind === "preset" ||
+        (command?.kind === "unknown" && command.name === "commands")
+      )
+        throw new AppError(
+          "rejected",
+          "this Discord command is not supported in M1",
+        );
+
+      const identity: MessageIdentity = {
+        endpoint,
+        idempotencyKey: ingress.idempotencyKey,
+        contentDigest: discordDigest(ingress.source, rawText),
+        discordSource: ingress.source,
+      };
+      if (command === null) {
+        const admitted = this.store.admitPrompt(
+          identity,
+          discordPrompt(ingress.source, rawText),
+        );
+        this.#schedule(admitted.userId);
+        return {
+          accepted: true,
+          duplicate: admitted.duplicate,
+          replyPrivateChatId: endpoint.privateChatId,
+        };
+      }
+      const result = this.store.executeCommand(
+        identity,
+        command,
+        rawText,
+        this.runtime.models ?? [],
+        this.runtime.forge,
+      );
+      if (result.abortTurnId !== null)
+        this.#controllers.get(result.abortTurnId)?.abort();
+      this.#schedule(result.userId);
+      return {
+        accepted: true,
+        duplicate: result.duplicate,
+        replyPrivateChatId: endpoint.privateChatId,
+      };
+    } catch (error) {
+      if (error instanceof AppError)
+        return {
+          accepted: false,
+          duplicate: false,
+          category: error.category,
+          message: error.message,
+        };
+      process.stderr.write("Discord admission internal error\n");
+      return {
+        accepted: false,
+        duplicate: false,
+        category: "internal-error",
+        message: "internal-error: Discord message could not be admitted",
       };
     }
   }

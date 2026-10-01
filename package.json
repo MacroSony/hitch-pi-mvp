@@ -31,6 +31,7 @@
     "@earendil-works/pi-coding-agent": "0.85.1",
     "@modelcontextprotocol/sdk": "1.30.0",
     "@zihanw/pi-forge": "file:vendor/zihanw-pi-forge-0.5.3-hitch.1.tgz",
+    "discord.js": "14.19.3",
     "pi-agy": "file:vendor/pi-agy-0.6.1-hitch.2.tgz",
     "proper-lockfile": "4.1.2",
     "undici": "8.9.0",

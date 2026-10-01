@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "dataRoot": "/srv/hitch-discord-test/data",
+  "piProfileDir": "/srv/hitch-discord-test/pi-profile",
+  "minimumFreeBytes": 104857600,
+  "telegramAccounts": [],
+  "wechatAccounts": [],
+  "discordAccounts": [
+    {
+      "id": "luna-test",
+      "botTokenEnv": "HITCH_DISCORD_TEST_TOKEN",
+      "messageContent": true
+    }
+  ],
+  "users": [
+    {
+      "id": "luna-test-server",
+      "workspace": "/srv/hitch-discord-test/workspaces/server",
+      "discord": {
+        "mode": "server",
+        "account": "luna-test",
+        "guildId": "111111111111111111",
+        "channelIds": ["222222222222222222", "333333333333333333"],
+        "adminUserIds": ["444444444444444444"]
+      }
+    },
+    {
+      "id": "luna-test-owner-dm",
+      "workspace": "/srv/hitch-discord-test/workspaces/owner-dm",
+      "discord": {
+        "mode": "dm",
+        "account": "luna-test",
+        "userId": "444444444444444444",
+        "channelId": "555555555555555555"
+      }
+    }
+  ]
+}

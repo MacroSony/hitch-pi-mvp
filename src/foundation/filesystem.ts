@@ -23,16 +23,21 @@ export interface DirectoryIdentity {
 }
 
 export interface PublishedEndpoint {
-  readonly kind: "telegram" | "wechat" | "wecom";
+  readonly kind: "telegram" | "wechat" | "wecom" | "discord";
   readonly accountId: string;
+  /** Discord DM peer or guild; legacy channels retain their historical user id. */
   readonly platformUserId: string;
+  /** For Discord this is the configured destination channel id. */
   readonly privateChatId: string | null;
+  readonly discordMode?: "dm" | "server";
   readonly tupleKey: string;
 }
 
 export interface PublishedUser {
   readonly id: string;
   readonly workspace: DirectoryIdentity;
+  /** Omitted by old callers/fixtures and interpreted as private. */
+  readonly scopeKind?: "private" | "discord-dm" | "discord-server";
   readonly endpoints: readonly PublishedEndpoint[];
 }
 
@@ -138,6 +143,15 @@ function wecomTuple(accountId: string, userId: string): string {
   return JSON.stringify(["wecom", accountId, userId]);
 }
 
+function discordTuple(
+  accountId: string,
+  mode: "dm" | "server",
+  scopeId: string,
+  channelId: string,
+): string {
+  return JSON.stringify(["discord", accountId, mode, scopeId, channelId]);
+}
+
 export function validateTopology(config: AppConfig): ValidatedTopology {
   const dataRoot = inspectPrivateDirectory(config.dataRoot, "data root", true);
   const piProfileDir = inspectPrivateDirectory(
@@ -159,6 +173,7 @@ export function validateTopology(config: AppConfig): ValidatedTopology {
       false,
     );
     const endpoints: PublishedEndpoint[] = [];
+    let scopeKind: PublishedUser["scopeKind"] = "private";
     if (user.telegram !== undefined) {
       endpoints.push({
         kind: "telegram",
@@ -190,7 +205,41 @@ export function validateTopology(config: AppConfig): ValidatedTopology {
         tupleKey: wecomTuple(user.wecom.account, user.wecom.userId),
       });
     }
-    return { id: user.id, workspace, endpoints };
+    if (user.discord !== undefined) {
+      scopeKind = user.discord.mode === "dm" ? "discord-dm" : "discord-server";
+      if (user.discord.mode === "dm") {
+        endpoints.push({
+          kind: "discord",
+          accountId: user.discord.account,
+          platformUserId: user.discord.userId,
+          privateChatId: user.discord.channelId,
+          discordMode: "dm",
+          tupleKey: discordTuple(
+            user.discord.account,
+            "dm",
+            user.discord.userId,
+            user.discord.channelId,
+          ),
+        });
+      } else {
+        for (const channelId of user.discord.channelIds) {
+          endpoints.push({
+            kind: "discord",
+            accountId: user.discord.account,
+            platformUserId: user.discord.guildId,
+            privateChatId: channelId,
+            discordMode: "server",
+            tupleKey: discordTuple(
+              user.discord.account,
+              "server",
+              user.discord.guildId,
+              channelId,
+            ),
+          });
+        }
+      }
+    }
+    return { id: user.id, workspace, scopeKind, endpoints };
   });
 
   assertDisjoint([

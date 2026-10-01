@@ -9,8 +9,8 @@ import {
   type ValidatedTopology,
 } from "./filesystem.js";
 
-const SCHEMA_VERSION = 8;
-const SCHEMA_ID = "hitch-pi-mvp-schema-8";
+const SCHEMA_VERSION = 9;
+const SCHEMA_ID = "hitch-pi-mvp-schema-9";
 const EXPECTED_TABLES = [
   "app_meta",
   "artifacts",
@@ -44,6 +44,7 @@ CREATE TABLE users (
   workspace_device TEXT NOT NULL,
   workspace_inode TEXT NOT NULL,
   enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+  scope_kind TEXT NOT NULL DEFAULT 'private' CHECK (scope_kind IN ('private', 'discord-dm', 'discord-server')),
   published_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   UNIQUE (workspace_device, workspace_inode)
@@ -77,10 +78,11 @@ CREATE TABLE channel_endpoints (
   id TEXT PRIMARY KEY,
   tuple_key TEXT NOT NULL UNIQUE,
   user_id TEXT NOT NULL REFERENCES users(id),
-  kind TEXT NOT NULL CHECK (kind IN ('telegram', 'wechat', 'wecom')),
+  kind TEXT NOT NULL CHECK (kind IN ('telegram', 'wechat', 'wecom', 'discord')),
   account_id TEXT NOT NULL,
   platform_user_id TEXT NOT NULL,
   private_chat_id TEXT,
+  discord_mode TEXT CHECK (discord_mode IS NULL OR discord_mode IN ('dm', 'server')),
   selected_session_id TEXT,
   enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
   published_at INTEGER NOT NULL,
@@ -88,8 +90,10 @@ CREATE TABLE channel_endpoints (
   UNIQUE (id, user_id),
   FOREIGN KEY (selected_session_id, user_id) REFERENCES sessions(id, user_id),
   CHECK (
-    (kind = 'telegram' AND private_chat_id IS NOT NULL) OR
-    (kind IN ('wechat', 'wecom') AND private_chat_id IS NULL)
+    (kind IN ('telegram', 'wechat', 'wecom') AND discord_mode IS NULL AND
+      ((kind = 'telegram' AND private_chat_id IS NOT NULL) OR
+       (kind IN ('wechat', 'wecom') AND private_chat_id IS NULL))) OR
+    (kind = 'discord' AND private_chat_id IS NOT NULL AND discord_mode IS NOT NULL)
   )
 ) STRICT;
 
@@ -107,6 +111,7 @@ CREATE TABLE turns (
   state TEXT NOT NULL CHECK (state IN ('queued', 'starting', 'running', 'terminal')),
   outcome TEXT CHECK (outcome IN ('succeeded', 'failed', 'cancelled', 'timed-out', 'unknown')),
   result_text TEXT,
+  discord_source TEXT CHECK (discord_source IS NULL OR json_valid(discord_source)),
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   UNIQUE (endpoint_id, idempotency_key),
@@ -309,6 +314,45 @@ CREATE INDEX IF NOT EXISTS local_requests_caller_created ON local_requests(calle
 CREATE INDEX IF NOT EXISTS turns_user_state_ordinal ON turns(user_id, state, ordinal);
 `;
 
+const MIGRATE_8_TO_9 = `
+ALTER TABLE users ADD COLUMN scope_kind TEXT NOT NULL DEFAULT 'private'
+  CHECK (scope_kind IN ('private', 'discord-dm', 'discord-server'));
+ALTER TABLE turns ADD COLUMN discord_source TEXT
+  CHECK (discord_source IS NULL OR json_valid(discord_source));
+
+CREATE TABLE channel_endpoints_new (
+  id TEXT PRIMARY KEY,
+  tuple_key TEXT NOT NULL UNIQUE,
+  user_id TEXT NOT NULL REFERENCES users(id),
+  kind TEXT NOT NULL CHECK (kind IN ('telegram', 'wechat', 'wecom', 'discord')),
+  account_id TEXT NOT NULL,
+  platform_user_id TEXT NOT NULL,
+  private_chat_id TEXT,
+  discord_mode TEXT CHECK (discord_mode IS NULL OR discord_mode IN ('dm', 'server')),
+  selected_session_id TEXT,
+  enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+  published_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE (id, user_id),
+  FOREIGN KEY (selected_session_id, user_id) REFERENCES sessions(id, user_id),
+  CHECK (
+    (kind IN ('telegram', 'wechat', 'wecom') AND discord_mode IS NULL AND
+      ((kind = 'telegram' AND private_chat_id IS NOT NULL) OR
+       (kind IN ('wechat', 'wecom') AND private_chat_id IS NULL))) OR
+    (kind = 'discord' AND private_chat_id IS NOT NULL AND discord_mode IS NOT NULL)
+  )
+) STRICT;
+INSERT INTO channel_endpoints_new(
+  id, tuple_key, user_id, kind, account_id, platform_user_id, private_chat_id,
+  discord_mode, selected_session_id, enabled, published_at, updated_at
+)
+SELECT id, tuple_key, user_id, kind, account_id, platform_user_id, private_chat_id,
+       NULL, selected_session_id, enabled, published_at, updated_at
+FROM channel_endpoints;
+DROP TABLE channel_endpoints;
+ALTER TABLE channel_endpoints_new RENAME TO channel_endpoints;
+`;
+
 const MIGRATE_1_TO_2 = `
 ALTER TABLE turns ADD COLUMN operation_kind TEXT NOT NULL DEFAULT 'prompt'
   CHECK (operation_kind IN ('prompt', 'publish'));
@@ -437,6 +481,14 @@ function tableNames(connection: DatabaseSync): unknown[] {
     .map((entry) => (entry as { name: unknown }).name);
 }
 
+function assertForeignKeyIntegrity(connection: DatabaseSync): void {
+  const violations = connection
+    .prepare("PRAGMA foreign_key_check")
+    .all() as unknown[];
+  if (violations.length > 0)
+    throw new FoundationError("database foreign key check failed");
+}
+
 function verifySchema(connection: DatabaseSync): void {
   const row = connection.prepare("PRAGMA user_version").get() as
     | { user_version?: unknown }
@@ -450,6 +502,7 @@ function verifySchema(connection: DatabaseSync): void {
         .prepare("INSERT INTO app_meta(key, value) VALUES (?, ?)")
         .run("schema_id", SCHEMA_ID);
       connection.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+      assertForeignKeyIntegrity(connection);
       connection.exec("COMMIT");
     } catch (error) {
       connection.exec("ROLLBACK");
@@ -476,16 +529,13 @@ function verifySchema(connection: DatabaseSync): void {
       connection.exec(MIGRATE_5_TO_6);
       connection.exec(MIGRATE_6_TO_7);
       connection.exec(MIGRATE_7_TO_8);
+      connection.exec(MIGRATE_8_TO_9);
       connection
         .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
         .run(SCHEMA_ID, "schema_id");
       connection.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+      assertForeignKeyIntegrity(connection);
       connection.exec("COMMIT");
-      const violations = connection
-        .prepare("PRAGMA foreign_key_check")
-        .all() as unknown[];
-      if (violations.length > 0)
-        throw new FoundationError("database schema 6 foreign key check failed");
     } catch (error) {
       connection.exec("ROLLBACK");
       connection.exec("PRAGMA foreign_keys = ON");
@@ -507,16 +557,13 @@ function verifySchema(connection: DatabaseSync): void {
       connection.exec(MIGRATE_5_TO_6);
       connection.exec(MIGRATE_6_TO_7);
       connection.exec(MIGRATE_7_TO_8);
+      connection.exec(MIGRATE_8_TO_9);
       connection
         .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
         .run(SCHEMA_ID, "schema_id");
       connection.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+      assertForeignKeyIntegrity(connection);
       connection.exec("COMMIT");
-      const violations = connection
-        .prepare("PRAGMA foreign_key_check")
-        .all() as unknown[];
-      if (violations.length > 0)
-        throw new FoundationError("database schema 6 foreign key check failed");
     } catch (error) {
       connection.exec("ROLLBACK");
       connection.exec("PRAGMA foreign_keys = ON");
@@ -537,15 +584,18 @@ function verifySchema(connection: DatabaseSync): void {
       connection.exec(MIGRATE_5_TO_6);
       connection.exec(MIGRATE_6_TO_7);
       connection.exec(MIGRATE_7_TO_8);
+      connection.exec(MIGRATE_8_TO_9);
       connection
         .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
         .run(SCHEMA_ID, "schema_id");
       connection.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+      assertForeignKeyIntegrity(connection);
       connection.exec("COMMIT");
     } catch (error) {
       connection.exec("ROLLBACK");
       throw error;
     }
+    connection.exec("PRAGMA foreign_keys = ON");
   } else if (version === 4) {
     connection.exec("PRAGMA foreign_keys = OFF");
     connection.exec("BEGIN IMMEDIATE");
@@ -559,16 +609,13 @@ function verifySchema(connection: DatabaseSync): void {
       connection.exec(MIGRATE_5_TO_6);
       connection.exec(MIGRATE_6_TO_7);
       connection.exec(MIGRATE_7_TO_8);
+      connection.exec(MIGRATE_8_TO_9);
       connection
         .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
         .run(SCHEMA_ID, "schema_id");
       connection.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+      assertForeignKeyIntegrity(connection);
       connection.exec("COMMIT");
-      const violations = connection
-        .prepare("PRAGMA foreign_key_check")
-        .all() as unknown[];
-      if (violations.length > 0)
-        throw new FoundationError("database schema 6 foreign key check failed");
     } catch (error) {
       connection.exec("ROLLBACK");
       connection.exec("PRAGMA foreign_keys = ON");
@@ -582,16 +629,13 @@ function verifySchema(connection: DatabaseSync): void {
       connection.exec(MIGRATE_5_TO_6);
       connection.exec(MIGRATE_6_TO_7);
       connection.exec(MIGRATE_7_TO_8);
+      connection.exec(MIGRATE_8_TO_9);
       connection
         .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
         .run(SCHEMA_ID, "schema_id");
       connection.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+      assertForeignKeyIntegrity(connection);
       connection.exec("COMMIT");
-      const violations = connection
-        .prepare("PRAGMA foreign_key_check")
-        .all() as unknown[];
-      if (violations.length > 0)
-        throw new FoundationError("database schema 6 foreign key check failed");
     } catch (error) {
       connection.exec("ROLLBACK");
       connection.exec("PRAGMA foreign_keys = ON");
@@ -609,10 +653,12 @@ function verifySchema(connection: DatabaseSync): void {
     try {
       connection.exec(MIGRATE_6_TO_7);
       connection.exec(MIGRATE_7_TO_8);
+      connection.exec(MIGRATE_8_TO_9);
       connection
         .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
         .run(SCHEMA_ID, "schema_id");
       connection.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+      assertForeignKeyIntegrity(connection);
       connection.exec("COMMIT");
     } catch (error) {
       connection.exec("ROLLBACK");
@@ -626,18 +672,45 @@ function verifySchema(connection: DatabaseSync): void {
       .get() as { value: string } | undefined;
     if (schemaId?.value !== "hitch-pi-mvp-schema-7")
       throw new FoundationError("database schema 7 identity is unknown");
+    connection.exec("PRAGMA foreign_keys = OFF");
     connection.exec("BEGIN IMMEDIATE");
     try {
       connection.exec(MIGRATE_7_TO_8);
+      connection.exec(MIGRATE_8_TO_9);
       connection
         .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
         .run(SCHEMA_ID, "schema_id");
       connection.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+      assertForeignKeyIntegrity(connection);
       connection.exec("COMMIT");
     } catch (error) {
       connection.exec("ROLLBACK");
+      connection.exec("PRAGMA foreign_keys = ON");
       throw error;
     }
+    connection.exec("PRAGMA foreign_keys = ON");
+  } else if (version === 8) {
+    const schemaId = connection
+      .prepare("SELECT value FROM app_meta WHERE key = 'schema_id'")
+      .get() as { value: string } | undefined;
+    if (schemaId?.value !== "hitch-pi-mvp-schema-8")
+      throw new FoundationError("database schema 8 identity is unknown");
+    connection.exec("PRAGMA foreign_keys = OFF");
+    connection.exec("BEGIN IMMEDIATE");
+    try {
+      connection.exec(MIGRATE_8_TO_9);
+      connection
+        .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
+        .run(SCHEMA_ID, "schema_id");
+      connection.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+      assertForeignKeyIntegrity(connection);
+      connection.exec("COMMIT");
+    } catch (error) {
+      connection.exec("ROLLBACK");
+      connection.exec("PRAGMA foreign_keys = ON");
+      throw error;
+    }
+    connection.exec("PRAGMA foreign_keys = ON");
   } else if (version !== SCHEMA_VERSION) {
     throw new FoundationError(
       `unsupported database schema version: ${version}`,
@@ -718,23 +791,29 @@ export function publishStaticTopology(
       .run(now);
 
     const findUser = foundation.connection.prepare(
-      "SELECT workspace_path, workspace_device, workspace_inode FROM users WHERE id = ?",
+      "SELECT workspace_path, workspace_device, workspace_inode, scope_kind FROM users WHERE id = ?",
     );
     const insertUser = foundation.connection.prepare(
-      `INSERT INTO users(id, workspace_path, workspace_device, workspace_inode, enabled, published_at, updated_at)
-       VALUES (?, ?, ?, ?, 1, ?, ?)`,
+      `INSERT INTO users(id, workspace_path, workspace_device, workspace_inode, enabled, scope_kind, published_at, updated_at)
+       VALUES (?, ?, ?, ?, 1, ?, ?, ?)`,
     );
     const enableUser = foundation.connection.prepare(
       "UPDATE users SET enabled = 1, updated_at = ? WHERE id = ?",
     );
     const findEndpoint = foundation.connection.prepare(
-      "SELECT user_id, kind, account_id, platform_user_id, private_chat_id FROM channel_endpoints WHERE tuple_key = ?",
+      "SELECT user_id, kind, account_id, platform_user_id, private_chat_id, discord_mode FROM channel_endpoints WHERE tuple_key = ?",
+    );
+    const findDiscordScope = foundation.connection.prepare(
+      "SELECT user_id FROM channel_endpoints WHERE kind = 'discord' AND account_id = ? AND discord_mode = ? AND platform_user_id = ?",
+    );
+    const findDiscordOwnerScopes = foundation.connection.prepare(
+      "SELECT DISTINCT account_id, discord_mode, platform_user_id FROM channel_endpoints WHERE kind = 'discord' AND user_id = ?",
     );
     const insertEndpoint = foundation.connection.prepare(
       `INSERT INTO channel_endpoints(
          id, tuple_key, user_id, kind, account_id, platform_user_id, private_chat_id,
-         selected_session_id, enabled, published_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 1, ?, ?)`,
+         discord_mode, selected_session_id, enabled, published_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 1, ?, ?)`,
     );
     const enableEndpoint = foundation.connection.prepare(
       "UPDATE channel_endpoints SET enabled = 1, updated_at = ? WHERE tuple_key = ?",
@@ -746,6 +825,7 @@ export function publishStaticTopology(
             workspace_path: unknown;
             workspace_device: unknown;
             workspace_inode: unknown;
+            scope_kind: unknown;
           }
         | undefined;
       if (existingUser === undefined) {
@@ -754,6 +834,7 @@ export function publishStaticTopology(
           user.workspace.path,
           user.workspace.device,
           user.workspace.inode,
+          user.scopeKind ?? "private",
           now,
           now,
         );
@@ -761,7 +842,8 @@ export function publishStaticTopology(
         if (
           existingUser.workspace_path !== user.workspace.path ||
           existingUser.workspace_device !== user.workspace.device ||
-          existingUser.workspace_inode !== user.workspace.inode
+          existingUser.workspace_inode !== user.workspace.inode ||
+          existingUser.scope_kind !== (user.scopeKind ?? "private")
         ) {
           throw new FoundationError(
             `published workspace identity changed for user ${user.id}`,
@@ -771,6 +853,35 @@ export function publishStaticTopology(
       }
 
       for (const endpoint of user.endpoints) {
+        if (endpoint.kind === "discord") {
+          const existingScopes = findDiscordScope.all(
+            endpoint.accountId,
+            endpoint.discordMode ?? null,
+            endpoint.platformUserId,
+          ) as Array<{ user_id: unknown }>;
+          if (existingScopes.some((scope) => scope.user_id !== user.id)) {
+            throw new FoundationError(
+              "Discord account scope cannot be reassigned or split across owners",
+            );
+          }
+          const ownerScopes = findDiscordOwnerScopes.all(user.id) as Array<{
+            account_id: unknown;
+            discord_mode: unknown;
+            platform_user_id: unknown;
+          }>;
+          if (
+            ownerScopes.some(
+              (scope) =>
+                scope.account_id !== endpoint.accountId ||
+                scope.discord_mode !== endpoint.discordMode ||
+                scope.platform_user_id !== endpoint.platformUserId,
+            )
+          ) {
+            throw new FoundationError(
+              "Discord owner scope cannot be changed or reassigned or split across scopes",
+            );
+          }
+        }
         const existingEndpoint = findEndpoint.get(endpoint.tupleKey) as
           | {
               user_id: unknown;
@@ -778,6 +889,7 @@ export function publishStaticTopology(
               account_id: unknown;
               platform_user_id: unknown;
               private_chat_id: unknown;
+              discord_mode: unknown;
             }
           | undefined;
         if (existingEndpoint === undefined) {
@@ -789,6 +901,7 @@ export function publishStaticTopology(
             endpoint.accountId,
             endpoint.platformUserId,
             endpoint.privateChatId,
+            endpoint.discordMode ?? null,
             now,
             now,
           );
@@ -798,7 +911,8 @@ export function publishStaticTopology(
             existingEndpoint.kind !== endpoint.kind ||
             existingEndpoint.account_id !== endpoint.accountId ||
             existingEndpoint.platform_user_id !== endpoint.platformUserId ||
-            existingEndpoint.private_chat_id !== endpoint.privateChatId
+            existingEndpoint.private_chat_id !== endpoint.privateChatId ||
+            existingEndpoint.discord_mode !== (endpoint.discordMode ?? null)
           ) {
             throw new FoundationError(
               "published endpoint tuple cannot be reassigned or changed",

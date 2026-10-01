@@ -15,6 +15,7 @@ import type {
 } from "../runtime/runtime.js";
 import { HELP_TEXT, type Command, type WakeCommand } from "./commands.js";
 import { AppError } from "./errors.js";
+import type { DiscordSource } from "../channels/discord-ingress.js";
 
 const MAX_SESSIONS_PER_USER = 32;
 const MAX_ACTIVE_AND_QUEUED = 4;
@@ -39,12 +40,14 @@ export interface EndpointContext {
   readonly accountId: string;
   readonly platformUserId: string;
   readonly privateChatId: string;
+  readonly discordMode?: "dm" | "server";
 }
 
 export interface MessageIdentity {
   readonly endpoint: EndpointContext;
   readonly idempotencyKey: string;
   readonly contentDigest: string;
+  readonly discordSource?: DiscordSource;
 }
 
 export interface AdmissionResult {
@@ -69,6 +72,7 @@ export interface OutboxDelivery {
   readonly kind: "text" | "artifact";
   readonly text?: string;
   readonly artifact?: RuntimeArtifact;
+  readonly discordSource?: DiscordSource;
 }
 
 export interface LocalTarget {
@@ -272,6 +276,44 @@ export class HitchStore {
         };
   }
 
+  public resolveDiscordEndpoint(
+    accountId: string,
+    mode: "dm" | "server",
+    scopeId: string,
+    channelId: string,
+  ): EndpointContext | null {
+    const row = this.#database
+      .prepare(
+        `SELECT e.id, e.user_id, e.account_id, e.platform_user_id,
+                e.private_chat_id, e.discord_mode
+         FROM channel_endpoints e
+         JOIN users u ON u.id = e.user_id
+         WHERE e.kind = 'discord' AND e.discord_mode = ?
+           AND e.account_id = ? AND e.platform_user_id = ?
+           AND e.private_chat_id = ? AND e.enabled = 1 AND u.enabled = 1`,
+      )
+      .get(mode, accountId, scopeId, channelId) as
+      | {
+          id: string;
+          user_id: string;
+          account_id: string;
+          platform_user_id: string;
+          private_chat_id: string;
+          discord_mode: "dm" | "server";
+        }
+      | undefined;
+    return row === undefined
+      ? null
+      : {
+          id: row.id,
+          userId: row.user_id,
+          accountId: row.account_id,
+          platformUserId: row.platform_user_id,
+          privateChatId: row.private_chat_id,
+          discordMode: row.discord_mode,
+        };
+  }
+
   public resolveWeChatEndpoint(
     accountId: string,
     platformUserId: string,
@@ -337,7 +379,8 @@ export class HitchStore {
   public endpointContext(endpointId: string): EndpointContext | null {
     const row = this.#database
       .prepare(
-        `SELECT e.id, e.user_id, e.account_id, e.platform_user_id, e.private_chat_id
+        `SELECT e.id, e.user_id, e.account_id, e.platform_user_id, e.private_chat_id,
+                e.discord_mode
          FROM channel_endpoints e
          JOIN users u ON u.id = e.user_id
          WHERE e.id = ? AND e.enabled = 1 AND u.enabled = 1`,
@@ -349,6 +392,7 @@ export class HitchStore {
           account_id: string;
           platform_user_id: string;
           private_chat_id: string | null;
+          discord_mode: "dm" | "server" | null;
         }
       | undefined;
     return row === undefined
@@ -359,6 +403,9 @@ export class HitchStore {
           accountId: row.account_id,
           platformUserId: row.platform_user_id,
           privateChatId: row.private_chat_id ?? row.platform_user_id,
+          ...(row.discord_mode === null
+            ? {}
+            : { discordMode: row.discord_mode }),
         };
   }
 
@@ -366,12 +413,14 @@ export class HitchStore {
     const targets: LocalTarget[] = [];
     for (const userId of userIds) {
       const user = this.#database
-        .prepare("SELECT 1 FROM users WHERE id = ? AND enabled = 1")
+        .prepare(
+          "SELECT 1 FROM users WHERE id = ? AND enabled = 1 AND scope_kind = 'private'",
+        )
         .get(userId);
       if (user === undefined) continue;
       const endpoints = this.#database
         .prepare(
-          "SELECT id AS endpointId, kind AS channel FROM channel_endpoints WHERE user_id = ? AND enabled = 1 ORDER BY id",
+          "SELECT id AS endpointId, kind AS channel FROM channel_endpoints WHERE user_id = ? AND enabled = 1 AND kind IN ('telegram', 'wechat', 'wecom') ORDER BY id",
         )
         .all(userId) as unknown as Array<{
         endpointId: string;
@@ -395,6 +444,7 @@ export class HitchStore {
          FROM channel_endpoints e
          JOIN users u ON u.id = e.user_id
          WHERE e.user_id = ? AND e.enabled = 1 AND u.enabled = 1
+           AND e.kind IN ('telegram', 'wechat', 'wecom')
          ORDER BY e.id`,
       )
       .all(userId)
@@ -426,7 +476,7 @@ export class HitchStore {
   ): "telegram" | "wechat" | "wecom" | null {
     const row = this.#database
       .prepare(
-        "SELECT kind FROM channel_endpoints WHERE id = ? AND user_id = ? AND enabled = 1",
+        "SELECT kind FROM channel_endpoints WHERE id = ? AND user_id = ? AND enabled = 1 AND kind IN ('telegram', 'wechat', 'wecom')",
       )
       .get(endpointId, userId) as
       | { kind: "telegram" | "wechat" | "wecom" }
@@ -439,7 +489,11 @@ export class HitchStore {
     deliveryId: string,
   ): { deliveryId: string; status: string } | null {
     const row = this.#database
-      .prepare("SELECT id, state FROM outbox WHERE id = ? AND user_id = ?")
+      .prepare(
+        `SELECT o.id, o.state FROM outbox o
+         JOIN channel_endpoints e ON e.id = o.endpoint_id AND e.user_id = o.user_id
+         WHERE o.id = ? AND o.user_id = ? AND e.kind IN ('telegram', 'wechat', 'wecom')`,
+      )
       .get(deliveryId, userId) as { id: string; state: string } | undefined;
     return row === undefined ? null : { deliveryId: row.id, status: row.state };
   }
@@ -522,7 +576,8 @@ export class HitchStore {
       const endpoint = this.#database
         .prepare(
           `SELECT 1 FROM channel_endpoints e JOIN users u ON u.id = e.user_id
-           WHERE e.id = ? AND e.user_id = ? AND e.enabled = 1 AND u.enabled = 1`,
+           WHERE e.id = ? AND e.user_id = ? AND e.kind IN ('telegram', 'wechat', 'wecom')
+             AND e.enabled = 1 AND u.enabled = 1`,
         )
         .get(endpointId, userId);
       if (endpoint === undefined)
@@ -662,10 +717,38 @@ export class HitchStore {
         `SELECT s.id, s.name, s.state
          FROM channel_endpoints e
          JOIN sessions s ON s.id = e.selected_session_id AND s.user_id = e.user_id
-         WHERE e.id = ? AND e.user_id = ? AND e.enabled = 1`,
+         WHERE e.id = ? AND e.user_id = ? AND e.enabled = 1
+         UNION ALL
+         SELECT s.id, s.name, s.state
+         FROM channel_endpoints e
+         JOIN channel_endpoints source ON source.user_id = e.user_id
+           AND source.kind = 'discord' AND source.discord_mode = 'server'
+           AND source.account_id = e.account_id
+           AND source.platform_user_id = e.platform_user_id
+         JOIN sessions s ON s.id = source.selected_session_id AND s.user_id = source.user_id
+         WHERE e.id = ? AND e.user_id = ? AND e.kind = 'discord'
+           AND e.discord_mode = 'server' AND e.enabled = 1
+         LIMIT 1`,
       )
-      .get(endpointId, userId) as SessionRow | undefined;
+      .get(endpointId, userId, endpointId, userId) as SessionRow | undefined;
     return row ?? null;
+  }
+
+  #syncDiscordServerSelection(
+    endpointId: string,
+    userId: string,
+    sessionId: string,
+    now: number,
+  ): void {
+    this.#database
+      .prepare(
+        `UPDATE channel_endpoints SET selected_session_id = ?, updated_at = ?
+         WHERE user_id = ? AND kind = 'discord' AND discord_mode = 'server'
+           AND account_id = (SELECT account_id FROM channel_endpoints WHERE id = ? AND user_id = ?)
+           AND platform_user_id = (SELECT platform_user_id FROM channel_endpoints WHERE id = ? AND user_id = ?)
+           `,
+      )
+      .run(sessionId, now, userId, endpointId, userId, endpointId, userId);
   }
 
   #sessionName(userId: string, requested?: string): string {
@@ -730,6 +813,7 @@ export class HitchStore {
       .run(session.id, now, endpointId, userId);
     if (changed.changes !== 1n)
       throw new AppError("rejected", "endpoint is no longer enabled");
+    this.#syncDiscordServerSelection(endpointId, userId, session.id, now);
     return session;
   }
 
@@ -893,8 +977,8 @@ export class HitchStore {
         .prepare(
           `INSERT INTO turns(
              id, user_id, session_id, endpoint_id, idempotency_key, content_digest,
-             prompt_text, ordinal, state, created_at, updated_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
+             prompt_text, discord_source, ordinal, state, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
         )
         .run(
           turnId,
@@ -904,6 +988,9 @@ export class HitchStore {
           identity.idempotencyKey,
           identity.contentDigest,
           prompt,
+          identity.discordSource === undefined
+            ? null
+            : JSON.stringify(identity.discordSource),
           this.#nextOrdinal(identity.endpoint.userId),
           now,
           now,
@@ -1107,6 +1194,12 @@ export class HitchStore {
               identity.endpoint.id,
               identity.endpoint.userId,
             );
+          this.#syncDiscordServerSelection(
+            identity.endpoint.id,
+            identity.endpoint.userId,
+            session.id,
+            now,
+          );
           response = `Selected ${session.name}.`;
           break;
         }
@@ -1695,8 +1788,8 @@ export class HitchStore {
             .prepare(
               `INSERT INTO turns(
                  id, user_id, session_id, endpoint_id, idempotency_key, content_digest,
-                 prompt_text, operation_kind, ordinal, state, created_at, updated_at
-               ) VALUES (?, ?, ?, ?, ?, ?, ?, 'compact', ?, 'queued', ?, ?)`,
+                 prompt_text, discord_source, operation_kind, ordinal, state, created_at, updated_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'compact', ?, 'queued', ?, ?)`,
             )
             .run(
               turnId,
@@ -1706,6 +1799,9 @@ export class HitchStore {
               identity.idempotencyKey,
               identity.contentDigest,
               sourceText,
+              identity.discordSource === undefined
+                ? null
+                : JSON.stringify(identity.discordSource),
               this.#nextOrdinal(identity.endpoint.userId),
               now,
               now,
@@ -1772,8 +1868,8 @@ export class HitchStore {
             .prepare(
               `INSERT INTO turns(
                  id, user_id, session_id, endpoint_id, idempotency_key, content_digest,
-                 prompt_text, operation_kind, publish_path, ordinal, state, created_at, updated_at
-               ) VALUES (?, ?, ?, ?, ?, ?, ?, 'publish', ?, ?, 'queued', ?, ?)`,
+                 prompt_text, discord_source, operation_kind, publish_path, ordinal, state, created_at, updated_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'publish', ?, ?, 'queued', ?, ?)`,
             )
             .run(
               turnId,
@@ -1783,6 +1879,9 @@ export class HitchStore {
               identity.idempotencyKey,
               identity.contentDigest,
               sourceText,
+              identity.discordSource === undefined
+                ? null
+                : JSON.stringify(identity.discordSource),
               command.path,
               this.#nextOrdinal(identity.endpoint.userId),
               now,
@@ -1796,7 +1895,17 @@ export class HitchStore {
           };
         }
         case "help":
-          response = HELP_TEXT;
+          response =
+            identity.endpoint.discordMode === undefined
+              ? HELP_TEXT
+              : [
+                  "Discord M1 commands (server: configured admins only; DM: owner)",
+                  "!new [name] · !sessions · !switch <id-or-name>",
+                  "!status · !abort · !stop · !recover · !compact",
+                  "!models [filter] · !model <provider>/<id> · !thinking <level> · !help",
+                  "Server commands require @mention or reply to the bot. All allowed server channels share context and workspace.",
+                  "Attachments, file delivery, wake/LOCAL, profile/preset and slash commands are not available in Discord M1.",
+                ].join("\n\n");
           break;
         case "wake": {
           if (wakeHandler === undefined) {
@@ -1818,8 +1927,8 @@ export class HitchStore {
         .prepare(
           `INSERT INTO turns(
              id, user_id, session_id, endpoint_id, idempotency_key, content_digest,
-             prompt_text, ordinal, state, outcome, result_text, created_at, updated_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'terminal', ?, ?, ?, ?)`,
+             prompt_text, discord_source, ordinal, state, outcome, result_text, created_at, updated_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'terminal', ?, ?, ?, ?)`,
         )
         .run(
           turnId,
@@ -1829,6 +1938,9 @@ export class HitchStore {
           identity.idempotencyKey,
           identity.contentDigest,
           sourceText,
+          identity.discordSource === undefined
+            ? null
+            : JSON.stringify(identity.discordSource),
           this.#nextOrdinal(identity.endpoint.userId),
           commandSucceeded ? "succeeded" : "failed",
           response,
@@ -1974,6 +2086,13 @@ export class HitchStore {
         )
         .get(turn.turnId, turn.userId);
       if (stillRunning === undefined) return;
+      const endpoint = this.#database
+        .prepare(
+          "SELECT kind FROM channel_endpoints WHERE id = ? AND user_id = ?",
+        )
+        .get(turn.endpointId, turn.userId) as { kind: string } | undefined;
+      // Discord M1 sends typing from its worker but never persists progress chunks.
+      if (endpoint?.kind === "discord") return;
       this.#insertOutbox(turn.userId, turn.endpointId, turn.turnId, text);
     });
   }
@@ -2275,7 +2394,7 @@ export class HitchStore {
     endpointId: string;
     platformUserId: string;
     privateChatId: string | null;
-    kind: "telegram" | "wechat" | "wecom";
+    kind: string;
   }[] {
     return this.#database
       .prepare(
@@ -2292,7 +2411,7 @@ export class HitchStore {
       endpointId: string;
       platformUserId: string;
       privateChatId: string | null;
-      kind: "telegram" | "wechat" | "wecom";
+      kind: string;
     }[];
   }
 
@@ -2303,17 +2422,25 @@ export class HitchStore {
     return this.#pendingOutbox("telegram", accountId, limit);
   }
 
+  public pendingDiscordOutbox(
+    accountId: string,
+    limit = 20,
+  ): readonly OutboxDelivery[] {
+    return this.#pendingOutbox("discord", accountId, limit);
+  }
+
   #pendingOutbox(
-    channel: "telegram" | "wechat" | "wecom",
+    channel: "telegram" | "wechat" | "wecom" | "discord",
     accountId: string,
     limit: number,
   ): readonly OutboxDelivery[] {
     return this.#database
       .prepare(
         `SELECT o.id, o.user_id AS userId, e.account_id AS accountId,
-                CASE WHEN e.kind = 'telegram' THEN e.private_chat_id
+                CASE WHEN e.kind IN ('telegram', 'discord') THEN e.private_chat_id
                      ELSE e.platform_user_id END AS privateChatId,
                 o.kind, o.payload_text AS text,
+                t.discord_source AS discordSource,
                 a.id AS artifactId, a.storage_key AS storageKey, a.sha256,
                 a.bytes, a.media_kind AS mediaKind, a.mime_type AS mimeType,
                 a.display_name AS displayName
@@ -2321,6 +2448,7 @@ export class HitchStore {
          JOIN channel_endpoints e ON e.id = o.endpoint_id AND e.user_id = o.user_id
          JOIN users u ON u.id = o.user_id
          LEFT JOIN artifacts a ON a.id = o.artifact_id AND a.user_id = o.user_id
+         LEFT JOIN turns t ON t.id = o.turn_id AND t.user_id = o.user_id
          WHERE e.kind = ? AND e.account_id = ? AND e.enabled = 1 AND u.enabled = 1
            AND o.state IN ('pending', 'retryable') AND o.attempts < 5
          ORDER BY o.created_at, o.id LIMIT ?`,
@@ -2334,6 +2462,7 @@ export class HitchStore {
           privateChatId: string;
           kind: "text" | "artifact";
           text: string | null;
+          discordSource: string | null;
           artifactId: string | null;
           storageKey: string | null;
           sha256: string | null;
@@ -2348,6 +2477,11 @@ export class HitchStore {
           accountId: row.accountId,
           privateChatId: row.privateChatId,
           kind: row.kind,
+          ...(row.discordSource === null
+            ? {}
+            : {
+                discordSource: JSON.parse(row.discordSource) as DiscordSource,
+              }),
         };
         if (row.kind === "text") {
           if (row.text === null)

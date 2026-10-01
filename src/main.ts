@@ -6,6 +6,7 @@ import { directFetcher } from "./channels/direct-fetch.js";
 import { proxyFetcher } from "./channels/proxy-fetch.js";
 import { TelegramBotClient, TelegramWorker } from "./channels/telegram.js";
 import { WeComWorker } from "./channels/wecom.js";
+import { DiscordWorker } from "./channels/discord.js";
 
 // The pinned WeChat client always uses the global fetch. Route it through
 // the direct HTTPS implementation: the WeChat API returns a content-length
@@ -106,7 +107,8 @@ async function main(): Promise<void> {
     if (
       config.telegramAccounts.length === 0 &&
       config.wechatAccounts.length === 0 &&
-      config.wecomAccounts.length === 0
+      config.wecomAccounts.length === 0 &&
+      (config.discordAccounts ?? []).length === 0
     ) {
       throw new Error("channel mode requires at least one configured account");
     }
@@ -188,7 +190,12 @@ async function main(): Promise<void> {
       undefined,
       (userId) => join(foundation.topology.dataRoot.path, "users", userId),
       undefined,
-      foundation.topology.users.map((user) => user.id),
+      foundation.topology.users
+        .filter((user) => user.scopeKind === "private")
+        .map((user) => user.id),
+      undefined,
+      undefined,
+      config.users,
     );
     const telegramWorkers = telegramClients.map(
       ({ account, client }) =>
@@ -214,7 +221,25 @@ async function main(): Promise<void> {
           media,
         ),
     );
-    const workers = [...telegramWorkers, ...wechatWorkers, ...wecomWorkers];
+    const discordWorkers = (config.discordAccounts ?? []).map(
+      (account) =>
+        new DiscordWorker(
+          {
+            id: account.id,
+            botToken: readRequiredSecret(account.botTokenEnv),
+            messageContent: account.messageContent ?? false,
+          },
+          application,
+          store,
+          { logger: (message) => process.stderr.write(`${message}\n`) },
+        ),
+    );
+    const workers = [
+      ...telegramWorkers,
+      ...wechatWorkers,
+      ...wecomWorkers,
+      ...discordWorkers,
+    ];
     const shutdown = new AbortController();
     let stoppedBySignal = false;
     let localClosePromise: Promise<void> | null = null;
@@ -254,6 +279,7 @@ async function main(): Promise<void> {
           telegramAccounts: config.telegramAccounts.length,
           wechatAccounts: config.wechatAccounts.length,
           wecomAccounts: config.wecomAccounts.length,
+          discordAccounts: (config.discordAccounts ?? []).length,
         })}\n`,
       );
       await Promise.all(workers.map((worker) => worker.run(shutdown.signal)));

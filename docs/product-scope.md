@@ -1,5 +1,13 @@
 # Product scope
 
+> **2026-10-01 Discord M1 amendment:** the operator authorized static Discord
+> DM and trusted server connections with shared server context/workspace and
+> separately attributed authors. [Discord scope and controls](discord.md)
+> narrowly supersede the private-only/group exclusions below for configured
+> Discord servers only. Other channels, credential separation, mandatory
+> sandboxing and owner isolation are unchanged. Local implementation is not
+> live/production acceptance.
+
 > **2026-09-19 narrow scope amendment:** the operator-approved
 > [UX/local-notification increment](ux-notifications-plan.md) adds optional
 > host-only notification/scheduling control for trusted static callers. See
