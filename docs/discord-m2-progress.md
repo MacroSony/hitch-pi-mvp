@@ -31,3 +31,11 @@ Added test/discord-files.test.ts: injected file transport with real MediaStore +
 ## Verification checkpoint
 
 Full npm run check passed: 352 total / 328 pass / 24 skip / 0 fail (+14 passing vs M1). Initial new busy-queue test yielded while constructing a media object, allowing fake Pi to drain; fixed the fixture to prepare media before filling the queue. This was a test timing error, not a transport failure. Added one final SDK payload/verified-hash/no-network URL test; rerunning final check below.
+
+## Completed
+
+- `f1b5938`: inbound/outbound pipeline and durable oversized delivery notice.
+- `1de77ba`: atomic staged admission + offline integration/SDK tests.
+- Final `npm run check`: **353 total / 329 pass / 24 opt-in skip / 0 fail** (+15 passing vs M1). No live network/credentials/services used.
+- Final pointers, reused limits and owner LunaTest checklist: docs/discord-m2-result.md. Updated docs/discord.md to reflect file transport.
+- Remaining: attended live acceptance only (not authorized/run here), especially intents, attachment permissions and effective upload limit. No implementation deviations beyond explicitly documenting 10 MiB byte interpretation. No push.
