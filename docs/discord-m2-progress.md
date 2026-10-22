@@ -23,3 +23,11 @@ Implement transport and admission; targeted tests; npm run check; result documen
 ## Implementation checkpoint
 
 Inbound adapter + MediaStore ingestion, owner checks, attachment-only staging/fallback, content-hash digest and durable staging dedup implemented. Outbound verified-path upload and atomic failed-artifact + queued text notice implemented; main passes shared MediaStore. Existing worker fakes updated for new transport contract. Next: end-to-end fake transport/media tests, review staging rejection behavior, full check and docs.
+
+## Tests checkpoint
+
+Added test/discord-files.test.ts: injected file transport with real MediaStore + SQLite + fake Pi, DM/server staging and dedup, no-download gates, limits, attachment-only fallback/inbox, shared server vs DM isolation, image/document upload, durable oversize notice after reopen, upload retry/cancellation. Targeted Discord suite passed 37/37 before the final extra rejection tests. Hardened staged consumption: nested SQLite savepoints make Discord stage/take/admit atomic; rejected admission must preserve prior staging. Next full check and docs.
+
+## Verification checkpoint
+
+Full npm run check passed: 352 total / 328 pass / 24 skip / 0 fail (+14 passing vs M1). Initial new busy-queue test yielded while constructing a media object, allowing fake Pi to drain; fixed the fixture to prepare media before filling the queue. This was a test timing error, not a transport failure. Added one final SDK payload/verified-hash/no-network URL test; rerunning final check below.

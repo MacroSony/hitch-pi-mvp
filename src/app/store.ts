@@ -165,13 +165,17 @@ function contextSnapshot(value: string | null): ContextSnapshot | null {
 }
 
 function transaction<T>(database: DatabaseSync, operation: () => T): T {
-  database.exec("BEGIN IMMEDIATE");
+  const nested = database.isTransaction;
+  database.exec(nested ? "SAVEPOINT hitch_nested" : "BEGIN IMMEDIATE");
   try {
     const result = operation();
-    database.exec("COMMIT");
+    database.exec(nested ? "RELEASE hitch_nested" : "COMMIT");
     return result;
   } catch (error) {
-    database.exec("ROLLBACK");
+    if (nested) {
+      database.exec("ROLLBACK TO hitch_nested");
+      database.exec("RELEASE hitch_nested");
+    } else database.exec("ROLLBACK");
     throw error;
   }
 }
@@ -900,6 +904,44 @@ export class HitchStore {
         )
         .run(this.ids.next("pi"), this.clock.now(), selected.id, userId);
       return { id: selected.id };
+    });
+  }
+
+  /** Consume owner staging atomically with admission so rejection never loses files. */
+  public admitDiscordMedia(
+    identity: MessageIdentity,
+    prompt: string,
+    artifacts: readonly RuntimeArtifact[],
+    textTrigger: boolean,
+    textProvided: boolean,
+  ): { duplicate: boolean; expired: RuntimeArtifact[]; staged: boolean } {
+    return transaction(this.#database, () => {
+      if (this.#existingMessage(identity) !== null)
+        return { duplicate: true, expired: [], staged: false };
+      const previous = textTrigger
+        ? this.takeStagedArtifacts(identity.endpoint.userId, this.clock.now())
+        : { artifacts: [], expired: [] };
+      const effective = [...previous.artifacts, ...artifacts];
+      if (textTrigger && !textProvided && effective.length > 0) {
+        const staged = this.stageArtifacts(
+          identity.endpoint.userId,
+          identity.endpoint.id,
+          effective,
+          this.clock.now(),
+          identity,
+        );
+        return {
+          duplicate: staged.duplicate ?? false,
+          expired: [...previous.expired, ...staged.expired],
+          staged: true,
+        };
+      }
+      const admitted = this.admitPrompt(identity, prompt, effective);
+      return {
+        duplicate: admitted.duplicate,
+        expired: previous.expired,
+        staged: false,
+      };
     });
   }
 

@@ -708,31 +708,21 @@ export class HitchApplication {
       if (command !== null && artifacts.length > 0)
         throw new AppError("rejected", "commands cannot include media");
       if (command === null) {
-        const effective = [
-          ...this.#takeStaged(endpoint.userId, endpoint.id),
-          ...artifacts,
-        ];
-        if (
-          this.mediaMode === "text-trigger" &&
-          effective.length > 0 &&
-          ingress.text.length === 0
-        ) {
-          const { expired, duplicate } = this.store.stageArtifacts(
-            endpoint.userId,
-            endpoint.id,
-            effective,
-            this.store.clock.now(),
-            identity,
-          );
-          for (const artifact of expired) this.media?.discard(artifact);
-          return { accepted: true, duplicate: duplicate ?? false };
-        }
-        const admitted = this.store.admitPrompt(
+        const admitted = this.store.admitDiscordMedia(
           identity,
           discordPrompt(ingress.source, rawText),
-          effective,
+          artifacts,
+          this.mediaMode === "text-trigger",
+          ingress.text.length > 0,
         );
-        this.#schedule(admitted.userId);
+        for (const artifact of admitted.expired) this.media?.discard(artifact);
+        if (admitted.expired.length > 0)
+          this.store.enqueueSystemNotice(
+            endpoint.userId,
+            endpoint.id,
+            `${admitted.expired.length} staged attachment(s) expired after 10 minutes; please resend them with your text.`,
+          );
+        if (!admitted.staged) this.#schedule(endpoint.userId);
         return {
           accepted: true,
           duplicate: admitted.duplicate,
