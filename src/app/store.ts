@@ -903,6 +903,10 @@ export class HitchStore {
     });
   }
 
+  public messageAlreadyReceived(identity: MessageIdentity): boolean {
+    return this.#existingMessage(identity) !== null;
+  }
+
   public admitPrompt(
     identity: MessageIdentity,
     prompt: string,
@@ -2253,8 +2257,11 @@ export class HitchStore {
     endpointId: string,
     artifacts: readonly RuntimeArtifact[],
     now: number,
-  ): { expired: RuntimeArtifact[] } {
+    identity?: MessageIdentity,
+  ): { expired: RuntimeArtifact[]; duplicate?: boolean } {
     return transaction(this.#database, () => {
+      if (identity !== undefined && this.#existingMessage(identity) !== null)
+        return { expired: [], duplicate: true };
       const expired = this.#expireStagedArtifacts(userId, now);
       if (artifacts.length === 0) return { expired };
       if (
@@ -2293,6 +2300,28 @@ export class HitchStore {
           "busy",
           "staged attachments would exceed the 40 MiB bound",
         );
+      }
+      if (identity !== undefined) {
+        const session = this.#ensurePromptSession(endpointId, userId);
+        this.#database
+          .prepare(
+            `INSERT INTO turns(
+          id, user_id, session_id, endpoint_id, idempotency_key, content_digest,
+          prompt_text, discord_source, ordinal, state, outcome, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, 'terminal', 'succeeded', ?, ?)`,
+          )
+          .run(
+            this.ids.next("turn"),
+            userId,
+            session.id,
+            endpointId,
+            identity.idempotencyKey,
+            identity.contentDigest,
+            JSON.stringify(identity.discordSource),
+            this.#nextOrdinal(userId),
+            now,
+            now,
+          );
       }
       let ordinal = Number(existing.count);
       for (const artifact of artifacts) {
@@ -2559,12 +2588,26 @@ export class HitchStore {
       .run(this.clock.now(), delivery.id, delivery.userId);
   }
 
-  public markOutboxFailed(delivery: OutboxDelivery, _reason: string): void {
-    this.#database
-      .prepare(
-        "UPDATE outbox SET state = 'failed', updated_at = ? WHERE id = ? AND user_id = ? AND state = 'sending'",
-      )
-      .run(this.clock.now(), delivery.id, delivery.userId);
+  public markOutboxFailed(
+    delivery: OutboxDelivery,
+    _reason: string,
+    notice?: string,
+  ): void {
+    transaction(this.#database, () => {
+      const changed = this.#database
+        .prepare(
+          "UPDATE outbox SET state = 'failed', updated_at = ? WHERE id = ? AND user_id = ? AND state = 'sending'",
+        )
+        .run(this.clock.now(), delivery.id, delivery.userId);
+      if (changed.changes > 0 && notice !== undefined) {
+        const row = this.#database
+          .prepare(
+            "SELECT endpoint_id FROM outbox WHERE id = ? AND user_id = ?",
+          )
+          .get(delivery.id, delivery.userId) as { endpoint_id: string };
+        this.#insertOutbox(delivery.userId, row.endpoint_id, null, notice);
+      }
+    });
   }
 
   public count(

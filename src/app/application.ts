@@ -615,6 +615,7 @@ export class HitchApplication {
     accountId: string,
     botUserId: string,
     value: unknown,
+    artifacts: readonly RuntimeArtifact[] = [],
   ): IngressResult {
     try {
       if (this.#stopping)
@@ -622,11 +623,7 @@ export class HitchApplication {
       const ingress = classifyDiscordMessage(botUserId, value);
       if (ingress === null)
         throw new AppError("rejected", "Discord message did not trigger Luna");
-      if (ingress.hasAttachments)
-        throw new AppError(
-          "rejected",
-          "Discord attachments are not supported in M1",
-        );
+
       if (
         !this.discordRouteAllowed(
           accountId,
@@ -650,7 +647,21 @@ export class HitchApplication {
           "Discord DM author is not the configured owner",
         );
 
-      const rawText = ingress.text;
+      if (artifacts.some((artifact) => artifact.userId !== endpoint.userId))
+        throw new AppError("rejected", "Discord media owner does not match");
+      if (ingress.hasAttachments && artifacts.length === 0)
+        throw new AppError("media-invalid", "Discord media is not attached");
+      const identity: MessageIdentity = {
+        endpoint,
+        idempotencyKey: ingress.idempotencyKey,
+        contentDigest: discordDigest(ingress.source, ingress.text, artifacts),
+        discordSource: ingress.source,
+      };
+      if (this.store.messageAlreadyReceived(identity))
+        return { accepted: true, duplicate: true };
+      const rawText =
+        ingress.text ||
+        (artifacts.length > 0 ? "Please inspect the attached media." : "");
       if (
         rawText.length === 0 ||
         Buffer.byteLength(discordPrompt(ingress.source, rawText), "utf8") >
@@ -694,16 +705,32 @@ export class HitchApplication {
           "this Discord command is not supported in M1",
         );
 
-      const identity: MessageIdentity = {
-        endpoint,
-        idempotencyKey: ingress.idempotencyKey,
-        contentDigest: discordDigest(ingress.source, rawText),
-        discordSource: ingress.source,
-      };
+      if (command !== null && artifacts.length > 0)
+        throw new AppError("rejected", "commands cannot include media");
       if (command === null) {
+        const effective = [
+          ...this.#takeStaged(endpoint.userId, endpoint.id),
+          ...artifacts,
+        ];
+        if (
+          this.mediaMode === "text-trigger" &&
+          effective.length > 0 &&
+          ingress.text.length === 0
+        ) {
+          const { expired, duplicate } = this.store.stageArtifacts(
+            endpoint.userId,
+            endpoint.id,
+            effective,
+            this.store.clock.now(),
+            identity,
+          );
+          for (const artifact of expired) this.media?.discard(artifact);
+          return { accepted: true, duplicate: duplicate ?? false };
+        }
         const admitted = this.store.admitPrompt(
           identity,
           discordPrompt(ingress.source, rawText),
+          effective,
         );
         this.#schedule(admitted.userId);
         return {

@@ -231,7 +231,7 @@ async function main(): Promise<void> {
           },
           application,
           store,
-          { logger: (message) => process.stderr.write(`${message}\n`) },
+          { media, logger: (message) => process.stderr.write(`${message}\n`) },
         ),
     );
     const workers = [

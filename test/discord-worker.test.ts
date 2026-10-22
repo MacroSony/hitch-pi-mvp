@@ -86,6 +86,12 @@ class FakeClient implements DiscordClient {
     }
   }
 
+  public async downloadAttachment(): Promise<AsyncIterable<Uint8Array>> {
+    return (async function* () {
+      yield Buffer.from("hello");
+    })();
+  }
+  public async sendArtifact(): Promise<void> {}
   public async sendTyping(): Promise<void> {}
   public async close(): Promise<void> {}
 }
@@ -95,6 +101,9 @@ class FakeStore implements DiscordStore {
   sent = 0;
   failed = 0;
   retryable = 0;
+  public resolveDiscordEndpoint(): null {
+    return null;
+  }
   public runningTurnEndpoints(): [] {
     return [];
   }
@@ -229,7 +238,7 @@ test("failed delivery remains retryable and cancellation after send is never mar
   assert.equal(cancelledStore.retryable, 1);
 });
 
-test("artifact outbox rows fail terminally and text replies reference the source", async () => {
+test("unavailable artifact delivery stays retryable and text replies reference the source", async () => {
   const client = new FakeClient(incoming());
   const store = new FakeStore();
   store.deliveries.push(
@@ -264,9 +273,9 @@ test("artifact outbox rows fail terminally and text replies reference the source
     { client },
   );
   assert.equal(await worker.deliverPending(), 1);
-  assert.equal(store.failed, 1);
+  assert.equal(store.retryable, 1);
   assert.equal(store.sent, 1);
-  assert.deepEqual(client.sent[1], {
+  assert.deepEqual(client.sent[0], {
     channelId: "c1",
     text: "done",
     reply: "m1",

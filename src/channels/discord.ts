@@ -1,4 +1,5 @@
 import {
+  AttachmentBuilder,
   Client,
   GatewayIntentBits,
   Partials,
@@ -6,6 +7,15 @@ import {
   MessageType,
   type Message,
 } from "discord.js";
+import { AppError } from "../app/errors.js";
+import {
+  MediaStore,
+  MAX_INPUT_ARTIFACTS,
+  MAX_INPUT_ARTIFACT_BYTES,
+  MAX_INPUT_TOTAL_BYTES,
+} from "../media/media-store.js";
+import type { RuntimeArtifact } from "../runtime/runtime.js";
+import type { DiscordAttachment } from "./discord-ingress.js";
 import type { HitchApplication, IngressResult } from "../app/application.js";
 import type { HitchStore, OutboxDelivery } from "../app/store.js";
 import {
@@ -18,6 +28,7 @@ export type DiscordOutboxDelivery = OutboxDelivery;
 export type DiscordIngressResult = IngressResult;
 export type DiscordStore = Pick<
   HitchStore,
+  | "resolveDiscordEndpoint"
   | "pendingDiscordOutbox"
   | "claimOutbox"
   | "markOutboxSent"
@@ -58,6 +69,17 @@ export interface DiscordClient {
     options?: DiscordSendOptions,
     signal?: AbortSignal,
   ): Promise<void>;
+  downloadAttachment(
+    attachment: DiscordAttachment,
+    signal?: AbortSignal,
+  ): Promise<AsyncIterable<Uint8Array>>;
+  sendArtifact(
+    channelId: string,
+    artifact: RuntimeArtifact,
+    media: MediaStore,
+    options?: DiscordSendOptions,
+    signal?: AbortSignal,
+  ): Promise<void>;
   sendTyping(channelId: string, signal?: AbortSignal): Promise<void>;
   close(): Promise<void>;
 }
@@ -67,6 +89,7 @@ export class DiscordTransportError extends Error {
     this.name = "DiscordTransportError";
   }
 }
+export const DISCORD_UPLOAD_LIMIT_BYTES = 10 * 1024 * 1024;
 const MAX_TEXT_UNITS = 2_000;
 const MAX_CHUNKS = 16;
 const TRUNCATION_NOTICE = "\n[…truncated…]";
@@ -181,6 +204,12 @@ export function normalizeDiscordMessage(message: Message): DiscordMessage {
     ...(sameChannelReply ? { replyToMessageId: reference.messageId! } : {}),
     timestamp: message.createdAt.toISOString(),
     hasAttachments: message.attachments.size > 0,
+    attachments: [...message.attachments.values()].map((file) => ({
+      url: file.url,
+      name: file.name,
+      size: file.size,
+      ...(file.contentType === null ? {} : { contentType: file.contentType }),
+    })),
   };
 }
 /** Pinned discord.js owns heartbeat, resume and REST rate-limit buckets. */
@@ -317,6 +346,83 @@ export class DiscordJsClient implements DiscordClient {
       throw new DiscordTransportError("Discord text delivery failed");
     }
   }
+  public async downloadAttachment(
+    attachment: DiscordAttachment,
+    signal?: AbortSignal,
+  ): Promise<AsyncIterable<Uint8Array>> {
+    abortCheck(signal);
+    try {
+      const url = new URL(attachment.url);
+      if (
+        url.protocol !== "https:" ||
+        !["cdn.discordapp.com", "media.discordapp.net"].includes(
+          url.hostname,
+        ) ||
+        url.username ||
+        url.password ||
+        url.port
+      )
+        throw new Error("invalid CDN URL");
+      const downloadSignal = AbortSignal.any([
+        AbortSignal.timeout(30_000),
+        ...(signal === undefined ? [] : [signal]),
+      ]);
+      const response = await fetch(url, {
+        redirect: "error",
+        signal: downloadSignal,
+      });
+      if (!response.ok || response.body === null)
+        throw new Error("download failed");
+      return response.body as ReadableStream<Uint8Array> &
+        AsyncIterable<Uint8Array>;
+    } catch {
+      throw new AppError("media-invalid", "Discord attachment download failed");
+    }
+  }
+  public async sendArtifact(
+    channelId: string,
+    artifact: RuntimeArtifact,
+    media: MediaStore,
+    options: DiscordSendOptions = {},
+    signal?: AbortSignal,
+  ): Promise<void> {
+    abortCheck(signal);
+    this.assertHealthy();
+    try {
+      if (artifact.bytes > DISCORD_UPLOAD_LIMIT_BYTES)
+        throw new Error("oversize");
+      const path = media.verifiedObjectPath(artifact);
+      const channel = await bounded(
+        this.#client.channels.fetch(channelId),
+        signal,
+      );
+      abortCheck(signal);
+      if (
+        channel === null ||
+        (channel.type !== ChannelType.GuildText &&
+          channel.type !== ChannelType.DM)
+      )
+        throw new Error("unsupported destination");
+      await bounded<unknown>(
+        channel.send({
+          files: [new AttachmentBuilder(path, { name: artifact.displayName })],
+          allowedMentions: { parse: [], repliedUser: false },
+          ...(options.replyToMessageId === undefined
+            ? {}
+            : {
+                reply: {
+                  messageReference: options.replyToMessageId,
+                  failIfNotExists: false,
+                },
+              }),
+        }),
+        signal,
+      );
+      abortCheck(signal);
+    } catch {
+      throw new DiscordTransportError("Discord artifact delivery failed");
+    }
+  }
   public async sendTyping(
     channelId: string,
     signal?: AbortSignal,
@@ -350,12 +456,14 @@ export class DiscordJsClient implements DiscordClient {
 }
 export interface DiscordWorkerOptions {
   readonly client?: DiscordClient;
+  readonly media?: MediaStore;
   readonly logger?: (message: string) => void;
   readonly typingIntervalMs?: number;
   readonly reconnectDelayMs?: number;
 }
 export class DiscordWorker {
   readonly #client: DiscordClient;
+  readonly #media: MediaStore | undefined;
   readonly #logger: (message: string) => void;
   readonly #typingIntervalMs: number;
   readonly #reconnectDelayMs: number;
@@ -376,6 +484,7 @@ export class DiscordWorker {
         account.botToken ?? "",
         account.messageContent ?? false,
       );
+    this.#media = options.media;
     this.#logger = options.logger ?? (() => undefined);
     this.#typingIntervalMs = options.typingIntervalMs ?? 7_500;
     this.#reconnectDelayMs = options.reconnectDelayMs ?? 1_000;
@@ -429,22 +538,79 @@ export class DiscordWorker {
     if (signal.aborted) return;
     const ingress = classifyDiscordMessage(botId, normalized);
     if (ingress === null) return;
-    if (ingress.hasAttachments || ingress.text.length === 0) {
+    if (!ingress.hasAttachments && ingress.text.length === 0) {
       await this.#safeSend(
         message.channelId,
-        ingress.hasAttachments
-          ? "Discord attachments are not supported in M1."
-          : DISCORD_MESSAGE_CONTENT_UNAVAILABLE,
+        DISCORD_MESSAGE_CONTENT_UNAVAILABLE,
         { replyToMessageId: ingress.source.messageId },
         signal,
       );
       return;
     }
-    const result = this.application.receiveDiscord(
-      this.account.id,
-      botId,
-      normalized,
-    );
+    const artifacts: RuntimeArtifact[] = [];
+    let result: IngressResult;
+    try {
+      if (ingress.hasAttachments) {
+        const files = normalized.attachments ?? [];
+        const endpoint = this.store.resolveDiscordEndpoint(
+          this.account.id,
+          ingress.mode,
+          ingress.scopeId,
+          ingress.channelId,
+        );
+        if (endpoint === null || this.#media === undefined)
+          throw new AppError("media-invalid", "media storage is unavailable");
+        if (
+          files.length === 0 ||
+          files.length > MAX_INPUT_ARTIFACTS ||
+          files.some(
+            (file) =>
+              !Number.isSafeInteger(file.size) ||
+              file.size < 1 ||
+              file.size > MAX_INPUT_ARTIFACT_BYTES,
+          ) ||
+          files.reduce((sum, file) => sum + file.size, 0) >
+            MAX_INPUT_TOTAL_BYTES
+        )
+          throw new AppError(
+            "media-invalid",
+            "Discord attachments exceed MVP limits (8 files, 20 MiB each, 40 MiB total)",
+          );
+        for (const file of files) {
+          const source = await this.#client.downloadAttachment(file, signal);
+          artifacts.push(
+            await this.#media.ingest(endpoint.userId, source, {
+              advertisedBytes: file.size,
+              ...(file.contentType === undefined
+                ? {}
+                : { advertisedMime: file.contentType }),
+              displayName: file.name,
+              expectImage: file.contentType?.startsWith("image/") ?? false,
+            }),
+          );
+        }
+      }
+      abortCheck(signal);
+      result = this.application.receiveDiscord(
+        this.account.id,
+        botId,
+        normalized,
+        artifacts,
+      );
+      if (!result.accepted || result.duplicate)
+        for (const artifact of artifacts) this.#media?.discard(artifact);
+    } catch (error) {
+      for (const artifact of artifacts) this.#media?.discard(artifact);
+      result = {
+        accepted: false,
+        duplicate: false,
+        category: error instanceof AppError ? error.category : "media-invalid",
+        message:
+          error instanceof AppError
+            ? error.message
+            : "Discord attachment intake failed",
+      };
+    }
     if (!result.accepted && result.message !== undefined)
       await this.#safeSend(
         message.channelId,
@@ -519,27 +685,43 @@ export class DiscordWorker {
       if (signal?.aborted) break;
       if (!this.store.claimOutbox(delivery)) continue;
       try {
-        if (delivery.kind !== "text" || delivery.text === undefined) {
-          this.store.markOutboxFailed(
-            delivery,
-            "discord-artifacts-unsupported",
-          );
-          await this.#safeSend(
-            delivery.privateChatId,
-            "A file was produced, but Discord file delivery is not supported in M1.",
-            {},
-            signal,
-          );
-          continue;
-        }
-        await this.#client.sendText(
-          delivery.privateChatId,
-          delivery.text,
+        const options =
           delivery.discordSource === undefined
             ? {}
-            : { replyToMessageId: delivery.discordSource.messageId },
-          signal,
-        );
+            : { replyToMessageId: delivery.discordSource.messageId };
+        if (
+          delivery.kind === "artifact" &&
+          delivery.artifact !== undefined &&
+          this.#media !== undefined
+        ) {
+          const artifact = delivery.artifact;
+          if (artifact.userId !== delivery.userId)
+            throw new DiscordTransportError("artifact owner mismatch");
+          if (artifact.bytes > DISCORD_UPLOAD_LIMIT_BYTES) {
+            this.store.markOutboxFailed(
+              delivery,
+              "discord-artifact-too-large",
+              `File "${artifact.displayName}" is too large for Discord: ${artifact.bytes} bytes (limit ${DISCORD_UPLOAD_LIMIT_BYTES} bytes / 10 MiB).`,
+            );
+            continue;
+          }
+          await this.#client.sendArtifact(
+            delivery.privateChatId,
+            artifact,
+            this.#media,
+            options,
+            signal,
+          );
+        } else if (delivery.kind === "text" && delivery.text !== undefined) {
+          await this.#client.sendText(
+            delivery.privateChatId,
+            delivery.text,
+            options,
+            signal,
+          );
+        } else {
+          throw new DiscordTransportError("artifact delivery is unavailable");
+        }
         abortCheck(signal);
         this.store.markOutboxSent(delivery);
         sent += 1;
