@@ -39,3 +39,14 @@ Full npm run check passed: 352 total / 328 pass / 24 skip / 0 fail (+14 passing 
 - Final `npm run check`: **353 total / 329 pass / 24 opt-in skip / 0 fail** (+15 passing vs M1). No live network/credentials/services used.
 - Final pointers, reused limits and owner LunaTest checklist: docs/discord-m2-result.md. Updated docs/discord.md to reflect file transport.
 - Remaining: attended live acceptance only (not authorized/run here), especially intents, attachment permissions and effective upload limit. No implementation deviations beyond explicitly documenting 10 MiB byte interpretation. No push.
+
+## Parent review follow-up: CDN deadline ownership
+
+Confirmed the only Discord `AbortSignal.any` / `AbortSignal.timeout` occurrence is in `DiscordJsClient.downloadAttachment`. Replace it with one controller held by the stream generator and an unref'd 30-second timer. Fetch starts when the worker immediately consumes the iterable; an unconsumed iterable owns no timer/listener. Generator finally clears the timer, removes parent forwarding and cancels incomplete transfers. Add injectable fetch/deadline for offline regression tests of stalled bodies, normal completion, errors, parent abort and early abandonment. Other channels remain untouched. Verification pending.
+
+### Follow-up completed
+
+- `src/channels/discord.ts:362,386`: validated URLs feed a lazy stream generator; strongly held controller, unref'd deadline timer, parent forwarding and finally cleanup cover headers and body. Incomplete transfers abort on early termination; errors remain sanitized.
+- `test/discord-download.test.ts`: six deterministic offline regression tests with mocked timers and injected fetch/10 ms timeout. Targeted run **6/6 passed**.
+- `npm run check`: **359 total / 335 pass / 24 opt-in skip / 0 fail** (+6 pass vs parent-reviewed M2; +21 pass vs M1).
+- Grep `src/channels/discord* test/discord*`: no remaining weak composition/timeout API uses. `git diff --check` passed. Result document updated. No other channel files changed; no live network, credentials or push.

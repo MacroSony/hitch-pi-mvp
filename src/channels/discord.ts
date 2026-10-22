@@ -212,16 +212,29 @@ export function normalizeDiscordMessage(message: Message): DiscordMessage {
     })),
   };
 }
+export interface DiscordDownloadOptions {
+  readonly fetcher?: typeof fetch;
+  readonly timeoutMs?: number;
+}
 /** Pinned discord.js owns heartbeat, resume and REST rate-limit buckets. */
 export class DiscordJsClient implements DiscordClient {
   readonly #token: string;
   readonly #client: Client;
+  readonly #downloadFetcher: typeof fetch;
+  readonly #downloadTimeoutMs: number;
   #onMessage: ((message: DiscordMessage) => void) | null = null;
   #invalidated = false;
-  public constructor(token: string, messageContent = false, client?: Client) {
+  public constructor(
+    token: string,
+    messageContent = false,
+    client?: Client,
+    downloadOptions: DiscordDownloadOptions = {},
+  ) {
     if (token.length === 0)
       throw new DiscordTransportError("Discord token is unavailable");
     this.#token = token;
+    this.#downloadFetcher = downloadOptions.fetcher ?? fetch;
+    this.#downloadTimeoutMs = downloadOptions.timeoutMs ?? 30_000;
     this.#client =
       client ??
       new Client({
@@ -363,20 +376,46 @@ export class DiscordJsClient implements DiscordClient {
         url.port
       )
         throw new Error("invalid CDN URL");
-      const downloadSignal = AbortSignal.any([
-        AbortSignal.timeout(30_000),
-        ...(signal === undefined ? [] : [signal]),
-      ]);
-      const response = await fetch(url, {
+      return this.#downloadBody(url, signal);
+    } catch {
+      throw new AppError("media-invalid", "Discord attachment download failed");
+    }
+  }
+  /** Resource lifetime includes body streaming, not only receipt of headers.
+   * Deferred setup also means an iterable never consumed has nothing to leak. */
+  async *#downloadBody(
+    url: URL,
+    signal?: AbortSignal,
+  ): AsyncGenerator<Uint8Array> {
+    const controller = new AbortController();
+    const forwardAbort = (): void => controller.abort();
+    // Unlike weakly composed timeout signals, this timer strongly holds its controller.
+    const timer = setTimeout(() => controller.abort(), this.#downloadTimeoutMs);
+    timer.unref();
+    signal?.addEventListener("abort", forwardAbort, { once: true });
+    if (signal?.aborted) forwardAbort();
+    let complete = false;
+    try {
+      controller.signal.throwIfAborted();
+      const response = await this.#downloadFetcher(url, {
         redirect: "error",
-        signal: downloadSignal,
+        signal: controller.signal,
       });
       if (!response.ok || response.body === null)
         throw new Error("download failed");
-      return response.body as ReadableStream<Uint8Array> &
-        AsyncIterable<Uint8Array>;
+      for await (const chunk of response.body as ReadableStream<Uint8Array> &
+        AsyncIterable<Uint8Array>) {
+        controller.signal.throwIfAborted();
+        yield chunk;
+      }
+      controller.signal.throwIfAborted();
+      complete = true;
     } catch {
       throw new AppError("media-invalid", "Discord attachment download failed");
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", forwardAbort);
+      if (!complete) controller.abort();
     }
   }
   public async sendArtifact(

@@ -4,13 +4,13 @@ Date: 2026-10-21. Branch: `feat/discord-files`, based on M1 `51ede5e`.
 
 ## Scope and design
 
-Inbound Discord attachments now use the existing owner-bound immutable MediaStore and staged/artifacts/turn_artifacts pipeline. Worker route + trigger classification precedes downloads (`src/channels/discord.ts:539`); bots/webhooks/denied/nontrigger messages never download. DM owners remain private; server members and allowed channels share their configured server owner's files/context/workspace.
+Inbound Discord attachments now use the existing owner-bound immutable MediaStore and staged/artifacts/turn_artifacts pipeline. Worker route + trigger classification precedes downloads (`src/channels/discord.ts:578`); bots/webhooks/denied/nontrigger messages never download. DM owners remain private; server members and allowed channels share their configured server owner's files/context/workspace.
 
 `text-trigger` stages attachment-only messages; `always-trigger` admits them with the existing inspect-media prompt. Attachment digests use content hashes, not expiring URLs/generated IDs. Terminal admission records deduplicate staging without a schema migration. Discord consumes staging and admits/stages atomically with SQLite savepoints (`src/app/store.ts:911`), preserving files on rejected admission. Duplicate downloads are discarded like the other transports.
 
 Pi receives existing artifacts; native runtime uses images or read-only `/inbox` files (`src/pi/native-runtime.ts:1783,1851`). Workspace copies use existing sandbox tools, not a new Discord file writer.
 
-Outbound images/documents use `MediaStore.verifiedObjectPath` then discord.js attachment upload (`src/channels/discord.ts:382`). Mentions/reply pings stay disabled. Oversized artifact failure and explanatory text enqueue are atomic (`src/app/store.ts:2633`); normal outbox retry/restart/cancellation semantics remain. No raw SDK errors are logged.
+Outbound images/documents use `MediaStore.verifiedObjectPath` then discord.js attachment upload (`src/channels/discord.ts:421`). Mentions/reply pings stay disabled. Oversized artifact failure and explanatory text enqueue are atomic (`src/app/store.ts:2633`); normal outbox retry/restart/cancellation semantics remain. No raw SDK errors are logged.
 
 ## Limits actually reused
 
@@ -19,15 +19,21 @@ Outbound images/documents use `MediaStore.verifiedObjectPath` then discord.js at
 - `src/app/store.ts:24,2297`: staged files expire after 10 minutes; maximum 8 staged/40 MiB owner-wide. Expiry produces the existing resend notice.
 - `src/media/media-store.ts:701,725`: outbound digest/path verification and read-only inbox materialization.
 - New Discord-specific outbound cap: `DISCORD_UPLOAD_LIMIT_BYTES`, `src/channels/discord.ts:92`, **10 MiB = 10,485,760 bytes** (named constant, not a new config field). No split/compression. SDK and worker both enforce it.
-- CDN download transport: HTTPS `cdn.discordapp.com` / `media.discordapp.net`, no redirects, 30-second deadline (`src/channels/discord.ts:349`).
+- CDN download transport: HTTPS `cdn.discordapp.com` / `media.discordapp.net`, no redirects, 30-second deadline (`src/channels/discord.ts:362`).
 
 ## Verification
 
-Final `npm run check` passed (format:check, typecheck, build and full tests): **353 total / 329 pass / 24 opt-in skip / 0 fail**. M1: **338 / 314 / 24 / 0**; delta **+15 passing tests**, no added skips. Evidence: `test/discord-files.test.ts`; existing Discord/other-channel tests also ran. Local check output: `/tmp/discord-files-check.log` (ephemeral).
+Final `npm run check` passed (format:check, typecheck, build and full tests): **359 total / 335 pass / 24 opt-in skip / 0 fail**. M1: **338 / 314 / 24 / 0**; delta **+21 passing tests**, no added skips. Evidence: `test/discord-files.test.ts` and `test/discord-download.test.ts`; existing Discord/other-channel tests also ran. The deadline follow-up adds six passing tests to the parent-reviewed M2 baseline of **353 / 329 / 24 / 0**.
 
 Coverage includes DM/server mention staging/dedup; attachment-only always-trigger/inbox; ignored/denied/bot/webhook no-download; inbound over-limit and stream-size mismatch; server cross-channel sharing versus DM isolation; image/document outbound; verified SDK payload and mention policy; oversized durable failure + notice after reopen; upload retry/cancellation; staged-file preservation on busy rejection and duplicate text.
 
 No Discord login/network, live provider, credential file, production data/service, sibling worktree or push was used. No packages added. No functional owner-decision deviations. Implementation interprets the named 10 MB default as 10 MiB and exposes the exact bytes in notices; owner should verify live Discord's effective account limit.
+
+## Parent review follow-up: GC-safe CDN deadline
+
+Replaced weakly composed timeout signals with one strongly held AbortController and an unref'd 30-second timer (`src/channels/discord.ts:386`). The generator owns the controller across fetch and all body streaming, including after `downloadAttachment` returns. Its finally clears the timer and removes the parent-abort listener on completion, fetch/body errors or early iteration termination, aborting incomplete transfers. Unconsumed iterables allocate no timer/listener; the worker starts consumption immediately. Download/stream errors still map to the sanitized `AppError("media-invalid", …)`.
+
+Offline tests inject a 10 ms deadline and fake fetch, then advance mocked timers deterministically: stalled body abort after headers; normal completion with no remaining deadline or parent forwarding; parent cancellation; early abandonment/body cancellation; sanitized header and body errors; never-consumed iterable cleanup. A grep of `src/channels/discord*` and `test/discord*` found no remaining `AbortSignal.any` or `AbortSignal.timeout` uses. No other channels changed. Full `npm run check` passed with the totals above; no live CDN/Discord calls were used.
 
 ## Owner-only attended LunaTest acceptance (not run)
 
