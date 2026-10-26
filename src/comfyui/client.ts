@@ -105,6 +105,9 @@ export class ComfyBackendClient {
     if (
       !PROMPT_ID.test(promptId) ||
       !Array.isArray(outputNodes) ||
+      outputNodes.length < 1 ||
+      outputNodes.length > IMAGE_LIMIT ||
+      new Set(outputNodes).size !== outputNodes.length ||
       outputNodes.some(
         (node) => typeof node !== "string" || !SAFE_SEGMENT.test(node),
       )
@@ -127,7 +130,8 @@ export class ComfyBackendClient {
 
     try {
       const root: unknown = JSON.parse(result.text);
-      if (!isRecord(root) || !Object.hasOwn(root, promptId)) throw new Error();
+      if (!isRecord(root)) throw new Error();
+      if (!Object.hasOwn(root, promptId)) return { state: "pending" };
       const entry = root[promptId];
       if (
         !isRecord(entry) ||
@@ -138,6 +142,8 @@ export class ComfyBackendClient {
       if (entry.status.status_str.toLowerCase() === "error")
         return { state: "failed" };
       if (entry.status.completed !== true) return { state: "pending" };
+      if (entry.status.status_str.toLowerCase() !== "success")
+        throw new Error();
       if (!isRecord(entry.outputs)) throw new Error();
       const images: ComfyImageRef[] = [];
       for (const node of outputNodes) {
@@ -168,6 +174,7 @@ export class ComfyBackendClient {
           if (images.length > IMAGE_LIMIT) throw new Error();
         }
       }
+      if (images.length === 0) throw new Error();
       return { state: "complete", images };
     } catch {
       throw new ComfyBackendError("history-invalid");
@@ -213,8 +220,15 @@ export class ComfyBackendClient {
       throw new ComfyBackendError("cancel-failed");
     }
     if (result.status === 404 || result.status === 405) return "unsupported";
-    if (result.status >= 200 && result.status < 300) return true;
-    return false;
+    if (result.status !== 200) throw new ComfyBackendError("cancel-failed");
+    try {
+      const data: unknown = JSON.parse(result.text);
+      if (!isRecord(data) || typeof data.cancelled !== "boolean")
+        throw new Error();
+      return data.cancelled;
+    } catch {
+      throw new ComfyBackendError("cancel-failed");
+    }
   }
 }
 
@@ -223,8 +237,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function safeSubfolder(value: string): boolean {
+  if (value === "") return true;
   if (
-    value.length === 0 ||
     value.length > 512 ||
     value.startsWith("/") ||
     value.includes("\\") ||

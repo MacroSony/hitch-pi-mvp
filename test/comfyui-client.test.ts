@@ -141,12 +141,79 @@ test("downloads exact bytes and maps malformed/non-200 results to fixed errors",
   );
 });
 
-test("cancels only the targeted job and reports unsupported without interrupt fallback", async (t) => {
-  const f = await fixture((path) =>
-    path.endsWith("/job_1/cancel") ? { status: 405 } : { status: 500 },
-  );
+test("Comfy-shaped history supports pending empty objects and root-level PNG outputs", async (t) => {
+  const f = await fixture((path) => {
+    if (path === "/history/pending") return { body: "{}" };
+    return {
+      body: JSON.stringify({
+        real_id: {
+          status: { status_str: "success", completed: true },
+          outputs: {
+            save: {
+              images: [
+                {
+                  filename: "ComfyUI_00001_.png",
+                  subfolder: "",
+                  type: "output",
+                },
+              ],
+            },
+          },
+        },
+      }),
+    };
+  });
   t.after(() => close(f.server));
-  assert.equal(await f.client.cancel("job_1"), "unsupported");
-  assert.deepEqual(f.calls, ["POST /api/jobs/job_1/cancel"]);
-  await rejectsCode(f.client.cancel("../all"), "cancel-failed");
+  assert.deepEqual(await f.client.history("pending", ["save"]), {
+    state: "pending",
+  });
+  assert.deepEqual(await f.client.history("real_id", ["save"]), {
+    state: "complete",
+    images: [{ filename: "ComfyUI_00001_.png", subfolder: "", type: "output" }],
+  });
+});
+
+test("history requires bounded unique outputs and nonempty selected successful images", async (t) => {
+  const f = await fixture((_path) => ({
+    body: JSON.stringify({
+      p1: {
+        status: { status_str: "success", completed: true },
+        outputs: {
+          unrelated: { images: [{ filename: "x.png", type: "output" }] },
+        },
+      },
+    }),
+  }));
+  t.after(() => close(f.server));
+  await rejectsCode(f.client.history("p1", []), "history-invalid");
+  await rejectsCode(
+    f.client.history("p1", ["save", "save"]),
+    "history-invalid",
+  );
+  await rejectsCode(f.client.history("p1", ["save"]), "history-invalid");
+});
+
+test("cancellation parses exact backend result, sanitizes malformed/errors, and never interrupts globally", async (t) => {
+  const f = await fixture((path) => {
+    if (path.endsWith("/true/cancel"))
+      return { status: 200, body: '{"cancelled":true}' };
+    if (path.endsWith("/false/cancel"))
+      return { status: 200, body: '{"cancelled":false}' };
+    if (path.endsWith("/bad/cancel")) return { status: 200, body: "not-json" };
+    if (path.endsWith("/error/cancel")) return { status: 500, body: "secret" };
+    return { status: 405 };
+  });
+  t.after(() => close(f.server));
+  assert.equal(await f.client.cancel("true"), true);
+  assert.equal(await f.client.cancel("false"), false);
+  assert.equal(await f.client.cancel("legacy"), "unsupported");
+  await rejectsCode(f.client.cancel("bad"), "cancel-failed");
+  await rejectsCode(f.client.cancel("error"), "cancel-failed");
+  assert.deepEqual(f.calls, [
+    "POST /api/jobs/true/cancel",
+    "POST /api/jobs/false/cancel",
+    "POST /api/jobs/legacy/cancel",
+    "POST /api/jobs/bad/cancel",
+    "POST /api/jobs/error/cancel",
+  ]);
 });
