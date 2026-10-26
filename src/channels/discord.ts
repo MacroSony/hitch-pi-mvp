@@ -6,6 +6,7 @@ import {
   ChannelType,
   MessageType,
   type Message,
+  type ClientOptions,
 } from "discord.js";
 import { AppError } from "../app/errors.js";
 import {
@@ -23,6 +24,17 @@ import {
   DISCORD_MESSAGE_CONTENT_UNAVAILABLE,
   type DiscordMessage,
 } from "./discord-ingress.js";
+
+// Capture Node's platform fetch while this static module graph is evaluated.
+// main.ts later replaces globalThis.fetch for WeChat; discord.js REST's nested
+// Undici dispatcher is incompatible with the root Undici dispatcher in that
+// import graph. Discord REST must use this captured platform implementation.
+const discordPlatformFetch: typeof fetch = globalThis.fetch;
+export const discordRestMakeRequest = ((url: string, init: unknown) =>
+  discordPlatformFetch(url, init as RequestInit)) as unknown as NonNullable<
+  NonNullable<ClientOptions["rest"]>["makeRequest"]
+>;
+
 export type { DiscordMessage } from "./discord-ingress.js";
 export type DiscordOutboxDelivery = OutboxDelivery;
 export type DiscordIngressResult = IngressResult;
@@ -416,7 +428,10 @@ export class DiscordJsClient implements DiscordClient {
         ],
         partials: [Partials.Channel],
         allowedMentions: { parse: [], repliedUser: false },
-        rest: { timeout: 15_000 },
+        rest: {
+          timeout: 15_000,
+          makeRequest: discordRestMakeRequest,
+        },
       });
     // SDK error events must not crash the shared service or log credential-bearing objects.
     this.#client.on("error", () => undefined);

@@ -1,6 +1,8 @@
+import { createServer } from "node:http";
+// Intentionally load root Undici before discord.js's nested REST dependency.
+import { Response as UndiciResponse } from "undici";
 import assert from "node:assert/strict";
 import { Client } from "discord.js";
-import { Response as UndiciResponse } from "undici";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -20,6 +22,7 @@ import {
 } from "../src/media/media-store.js";
 import {
   DiscordJsClient,
+  discordRestMakeRequest,
   DiscordTransportError,
   discordFailureDiagnostic,
   DiscordWorker,
@@ -672,6 +675,170 @@ test("Pinned discord.js REST multipart upload works through an offline request f
     await sdk.close();
   } finally {
     f.foundation.close();
+  }
+});
+
+test("Discord REST captured fetch sends real multipart over loopback after global fetch replacement", async () => {
+  const f = fixture();
+  const requests: Array<{
+    method: string;
+    path: string;
+    headers: import("node:http").IncomingHttpHeaders;
+    body: Buffer;
+  }> = [];
+  const server = createServer((request, response) => {
+    const chunks: Buffer[] = [];
+    request.on("data", (chunk: Buffer) => chunks.push(chunk));
+    request.on("end", () => {
+      const body = Buffer.concat(chunks);
+      requests.push({
+        method: request.method ?? "GET",
+        path: request.url ?? "",
+        headers: request.headers,
+        body,
+      });
+      const value =
+        request.method === "GET"
+          ? {
+              id: "123456789012345678",
+              type: 1,
+              recipients: [
+                {
+                  id: "223456789012345678",
+                  username: "fixture",
+                  discriminator: "0",
+                  avatar: null,
+                },
+              ],
+            }
+          : {
+              id: "323456789012345678",
+              channel_id: "123456789012345678",
+              type: 0,
+              content: "",
+              author: {
+                id: "423456789012345678",
+                username: "fixture",
+                discriminator: "0",
+                avatar: null,
+                global_name: null,
+                bot: true,
+              },
+              attachments: [],
+              embeds: [],
+              timestamp: new Date().toISOString(),
+              edited_timestamp: null,
+              flags: 0,
+              components: [],
+              mention_everyone: false,
+              mentions: [],
+              pinned: false,
+              tts: false,
+            };
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify(value));
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const originalFetch = globalThis.fetch;
+  let sdk: DiscordJsClient | undefined;
+  try {
+    const artifact = await object(
+      f,
+      Buffer.from("multipart payload"),
+      "payload.txt",
+    );
+    globalThis.fetch = (async () => {
+      throw new Error("replacement fetch must not be used by Discord REST");
+    }) as typeof fetch;
+    const client = new Client({
+      intents: [],
+      rest: {
+        api: `http://127.0.0.1:${address.port}`,
+        retries: 0,
+        makeRequest: discordRestMakeRequest,
+      },
+    });
+    client.rest.setToken("loopback-fixture-token");
+    sdk = new DiscordJsClient("loopback-fixture-token", false, client);
+    await sdk.sendArtifact("123456789012345678", artifact, f.media);
+    assert.deepEqual(
+      requests.map(({ method }) => method),
+      ["GET", "POST"],
+    );
+    const upload = requests[1]!;
+    assert.match(
+      upload.path,
+      /\/v10\/channels\/123456789012345678\/messages$/u,
+    );
+    const contentType = upload.headers["content-type"];
+    assert.match(contentType ?? "", /^multipart\/form-data; boundary=/u);
+    const boundary = /boundary=(.+)$/u.exec(contentType ?? "")?.[1];
+    assert.ok(boundary);
+    assert.ok(upload.body.includes(Buffer.from(`--${boundary}`)));
+    assert.ok(upload.body.includes(Buffer.from('name="payload_json"')));
+    assert.ok(
+      upload.body.includes(
+        Buffer.from('"allowed_mentions":{"parse":[],"replied_user":false}'),
+      ),
+    );
+    assert.ok(
+      upload.body.includes(
+        Buffer.from('name="files[0]"; filename="payload.txt"'),
+      ),
+    );
+    assert.ok(upload.body.includes(Buffer.from("multipart payload")));
+    assert.ok(upload.body.includes(Buffer.from(`--${boundary}--`)));
+  } finally {
+    globalThis.fetch = originalFetch;
+    await sdk?.close();
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+    f.foundation.close();
+  }
+});
+
+test("captured Discord REST fetch preserves HTTP status, body, and abort behavior", async () => {
+  let signalRequestSeen!: () => void;
+  const seen = new Promise<void>((resolve) => (signalRequestSeen = resolve));
+  const server = createServer((request, response) => {
+    if (request.url === "/status") {
+      response.writeHead(403, { "content-type": "application/json" });
+      response.end(JSON.stringify({ message: "fixture denied", code: 50013 }));
+      return;
+    }
+    signalRequestSeen();
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  try {
+    const denied = await discordRestMakeRequest(
+      `http://127.0.0.1:${address.port}/status`,
+      { method: "GET" },
+    );
+    assert.equal(denied.status, 403);
+    assert.deepEqual(await denied.json(), {
+      message: "fixture denied",
+      code: 50013,
+    });
+
+    const controller = new AbortController();
+    const pending = discordRestMakeRequest(
+      `http://127.0.0.1:${address.port}/stall`,
+      { method: "GET", signal: controller.signal },
+    );
+    await seen;
+    controller.abort();
+    await assert.rejects(pending);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
   }
 });
 
