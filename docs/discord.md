@@ -1,6 +1,6 @@
 # Discord Luna — text and file connections
 
-Status: local implementation; live Discord / real-model acceptance is a separate attended gate. Implementation scope is [discord-plan.md](discord-plan.md). M2 file transport is implemented locally; see [M2 results](discord-m2-result.md). M3 ComfyUI Paint remains out of scope.
+Status: M1/M2, including cross-Turn originals and combined replies, have isolated LunaTest user acceptance. Implementation scope is [discord-plan.md](discord-plan.md). Optional M3 Anima generation code and an isolated real-model/GPU probe are accepted; live test-instance enablement/receipt remain an attended gate. See [M3 results](discord-m3-result.md).
 
 ## Connection selection
 
@@ -65,4 +65,4 @@ Supported M1 commands: `!new`, `!sessions`, `!switch`, `!status`, `!abort`, `!st
 7. Upload an image without asking for preservation; on a later Turn ask to copy and return that original. Verify the original path still works within the recent window, returned bytes match, and short explanatory text plus files arrive in one message. Repeat across restart, and verify another owner/new session cannot retrieve the old inbox originals. Workspace copies intentionally remain owner-persistent. Test long/oversize/partial/retry fallbacks separately.
 8. Only after user-visible acceptance and explicit approval, prepare a separate production rollout/backup plan. This implementation does not authorize connecting the real server or changing the existing service.
 
-Future stages: M3 ComfyUI Paint with workflow allowlisting, owner-bound jobs, queue/cancellation and publication. Real-time voice, unsolicited speech and public multi-server enrollment remain out of scope.
+M3's first opt-in Anima text-to-image path now has fixed workflow policy, owner-bound durable jobs, targeted cancellation and background publication; see [M3 plan](discord-m3-plan.md) and [results](discord-m3-result.md). Image editing, broader model/workflow selection and video remain deferred. Real-time voice, unsolicited speech and public multi-server enrollment remain out of scope.

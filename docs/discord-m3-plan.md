@@ -1,6 +1,6 @@
 # Discord M3: ComfyUI — implementation plan
 
-Status: authorized development after user accepted M2 cross-Turn originals and combined replies. Stage A foundations are implemented and code-tested; B/C remain pending. **Not enabled in LunaTest or production; no GPU generation performed.**
+Status: A/B/C code is integrated and accepted by deterministic tests, real-Pi fake-provider acceptance, and one explicitly authorized real 6 Luna → Anima GPU probe. **Not enabled in the running LunaTest or production.** Live test-instance migration/switch is the remaining attended gate. See [M3 results](discord-m3-result.md).
 
 ## First playable slice
 
@@ -12,14 +12,14 @@ Do not build a generic extension loader or general-purpose GPU platform. `extens
 
 ## Staged implementation
 
-### A. Bounded backend and workflow primitives (this development slice)
+### A. Bounded backend and workflow primitives (implemented)
 
 - `ComfyWorkflowPolicy`: trusted graph + explicit bindings, immutable private copy; unknown variables/targets/graph mutation rejected. Bounds for prompts, numeric/enum values, graph size and output nodes. No global config discovery, filesystem paths, arbitrary workflow JSON, model/LoRA selectors or backend URLs in model input.
 - `EgressClient.requestBytes`: the existing fixed-origin/DNS-pinned/deadline/byte-bounded HTTP path, with a host-internal binary response variant. Text sanitization and existing callers unchanged. Bounds are applied while reading the response, not only after buffering it.
 - A small host-only Comfy backend adapter using those controlled clients: submit, inspect one known prompt, download declared image outputs and targeted cancellation. No raw backend error text in outward errors, no automatic submission replay, no backend-wide interrupt. This adapter alone is **not** an authorization or image-validation layer.
 - Deterministic loopback/unit tests; no GPU work.
 
-### B. Durable owner-bound jobs and publication
+### B. Durable owner-bound jobs and publication (implemented)
 
 - Dedicated durable job rows in Hitch SQLite (attended test-only schema migration), not desktop Paint's global job directory. Bind owner, origin Turn/session/endpoint and workflow snapshot to each job. A model supplies neither owner nor backend prompt ID.
 - Persist before submission. If acceptance is uncertain, preserve `submission_unknown`; never automatically resubmit user work. Accepted jobs survive fresh Pi controllers and process restart. Keep short waits and bounded/fair polling; do not occupy the global Pi slot for minutes.
@@ -29,12 +29,12 @@ Do not build a generic extension loader or general-purpose GPU platform. `extens
 - Completion is an explicit idempotent host event with its own terminal outbox group and copied authenticated source reference. Do not replay the original model Turn, append files to an already-partially-delivered group, change selected sessions, or fabricate user input. Atomically record completion and text/artifact outbox rows once.
 - Modern targeted cancel is preferred. If unsupported, report that running work cannot safely be stopped; never call `/interrupt`. Turn cancellation does not prove an accepted external job stopped. Preserve honest recoverable state.
 
-### C. Attested Luna tools and attended acceptance
+### C. Attested Luna tools and attended acceptance (code accepted; live enable pending)
 
 - Explicit opt-in configuration and enabled owners; default off. Use a narrow attested host bridge analogous to the current web-search bridge, not the desktop Pi extension entry point.
 - Initial user surface: workflow description, `paint`, owner-only job status and targeted cancel. Tool schemas never accept paths, graph/node mutation, raw backend prompt IDs, arbitrary origins, headers or caller identity. Backend status projections must not enumerate other owners' jobs.
 - Test fake backend through real Store/runtime bridge/outbox before enabling the isolated LunaTest instance. Check owner/session/channel boundaries, cancellation/restart/unknown submission, malformed/oversize outputs, source references, no leaked host metadata, full tool attestation, and existing-channel regressions.
-- Only after explicit approval for a real GPU smoke test: recheck backend/workflow/models/queue, submit one plain test image, inspect pixels, verify immutable output and actual same-message text+attachment delivery. Then request user acceptance.
+- User subsequently authorized using the running ComfyUI/model backends for this M3 work. One isolated real GPU probe completed, pixels were inspected, and immutable bytes plus the DiscordWorker rich-reply payload were verified. No live Discord send or running-instance migration was performed by that probe. Explicitly coordinate backup/schema10 migration and live test-instance enablement before claiming user-visible M3 acceptance.
 
 ## Stage A acceptance (2026-10-26)
 
@@ -55,4 +55,4 @@ Image editing via immutable inbound/job-result handles (Qwen workflow observed, 
 - Base is accepted `feat/discord-files` at `0d90e56`; implementation lives in isolated `comfyui-*` worktrees.
 - Do not edit the live LunaTest checkout/config/database or the installed desktop Paint package while building foundations.
 - No production/dad bot service, credentials, config, database or schedules; no push/release/deployment in this slice.
-- Real image generation is a separate explicit gate, not an automatic unit-test side effect.
+- GPU generation was explicitly authorized for this M3 work; this is not permanent permission or an automatic unit-test side effect. Never interrupt another user's/backend's work. Live migration/enablement remains a separate attended action.
