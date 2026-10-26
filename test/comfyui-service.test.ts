@@ -7,7 +7,12 @@ import { ComfyService } from "../src/comfyui/service.js";
 import { ComfyBackendError } from "../src/comfyui/client.js";
 import { ComfyWorkflowPolicy } from "../src/comfyui/workflow.js";
 import { MediaStore } from "../src/media/media-store.js";
-import type { ComfyJob, ComfyJobLedger } from "../src/comfyui/types.js";
+import type {
+  ComfyJob,
+  ComfyJobLedger,
+  ComfyToolContext,
+} from "../src/comfyui/types.js";
+import type { RuntimeArtifact } from "../src/runtime/runtime.js";
 
 const png = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
@@ -213,6 +218,145 @@ test("Comfy service enforces owners, strict tool inputs, and reports cancel bool
     )) as { state: string; cancel_result: boolean };
     assert.equal(lostRace.state, "submitted");
     assert.equal(lostRace.cancel_result, false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("paint_result exposes only callback-mounted completed results and rejects unsafe previews", async () => {
+  const f = fixture();
+  const root = mkdtempSync(join(tmpdir(), "comfy-service-"));
+  try {
+    const backend = {
+      async submit() {
+        return "backend";
+      },
+      async cancel() {
+        return false as const;
+      },
+      async history() {
+        return { state: "pending" as const };
+      },
+      async download() {
+        return png;
+      },
+    };
+    const service = new ComfyService({
+      ledger: f.ledger,
+      media: new MediaStore(root),
+      backend: backend as never,
+      workflows: [f.policy],
+      enabledUsers: ["alice"],
+    });
+    const created = (await service.execute(
+      { userId: "alice", turnId: "t" },
+      "paint",
+      { prompt: "test" },
+    )) as { id: string };
+    const job = f.jobs.get(created.id)!;
+    f.jobs.set(created.id, { ...job, state: "completed" });
+    const artifact = {
+      id: "artifact_123e4567-e89b-42d3-a456-426614174000",
+      userId: "alice",
+      storageKey: "alice/123e4567-e89b-42d3-a456-426614174000.blob",
+      sha256: "a".repeat(64),
+      bytes: 12,
+      mediaKind: "image" as const,
+      mimeType: "image/png",
+      displayName: "result.png",
+    };
+    f.ledger.getComfyResult = (user, id) =>
+      user === "alice" && id === created.id ? artifact : null;
+    let callbackCount = 0;
+    const context: ComfyToolContext = {
+      userId: "alice",
+      turnId: "t",
+      async attachResult(value: RuntimeArtifact, preview: boolean) {
+        callbackCount++;
+        assert.equal(value, artifact);
+        return {
+          path: "/inbox/results/generated.png",
+          bytes: 12,
+          mimeType: "image/png",
+          sha256: artifact.sha256,
+          ...(preview
+            ? {
+                preview: {
+                  data: png.toString("base64"),
+                  mimeType: "image/png" as const,
+                },
+              }
+            : {}),
+        };
+      },
+    };
+    const output = (await service.execute(
+      context,
+      "paint_result",
+      { job_id: created.id },
+      undefined,
+    )) as Record<string, unknown>;
+    assert.equal(callbackCount, 1);
+    assert.deepEqual(output.original, {
+      path: "/inbox/results/generated.png",
+      bytes: 12,
+      mimeType: "image/png",
+      sha256: artifact.sha256,
+    });
+    assert.equal(
+      (output.preview as { mimeType: string }).mimeType,
+      "image/png",
+    );
+    await assert.rejects(
+      service.execute(
+        {
+          ...context,
+          async attachResult() {
+            return {
+              path: "/inbox/results/x",
+              bytes: 12,
+              mimeType: "image/png",
+              sha256: artifact.sha256,
+              preview: {
+                data: Buffer.alloc(512 * 1024 + 1).toString("base64"),
+                mimeType: "image/png" as const,
+              },
+            };
+          },
+        },
+        "paint_result",
+        { job_id: created.id },
+      ),
+    );
+    await assert.rejects(
+      service.execute(
+        {
+          ...context,
+          async attachResult() {
+            return {
+              path: "file:///etc/passwd",
+              bytes: 12,
+              mimeType: "image/png",
+              sha256: artifact.sha256,
+            };
+          },
+        },
+        "paint_result",
+        { job_id: created.id, preview: false },
+      ),
+    );
+    assert.deepEqual(
+      await service.execute(context, "paint_result", { job_id: "foreign" }),
+      {
+        kind: "paint-result",
+        job: { id: "unknown", workflow: "unknown", state: "unknown" },
+      },
+    );
+    await assert.rejects(
+      service.execute({ ...context, userId: "disabled" }, "paint_result", {
+        job_id: created.id,
+      }),
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -119,6 +119,8 @@ export class ComfyService implements ComfyToolHost {
     switch (tool) {
       case "paint":
         return this.#paint(context, input, signal);
+      case "paint_result":
+        return this.#paintResult(context, input, signal);
       case "paint_list_workflows":
         exact(input, []);
         return this.#workflowList();
@@ -217,6 +219,74 @@ export class ComfyService implements ComfyToolHost {
       state:
         this.#ledger.getComfyJob(context.userId, job.id)?.state ??
         "submission_unknown",
+    };
+  }
+
+  async #paintResult(
+    context: ComfyToolContext,
+    input: unknown,
+    signal?: AbortSignal,
+  ): Promise<unknown> {
+    const args = exact(input, ["job_id"], ["preview"]);
+    if (
+      typeof args.job_id !== "string" ||
+      args.job_id.length < 1 ||
+      args.job_id.length > 128 ||
+      (args.preview !== undefined && typeof args.preview !== "boolean")
+    )
+      throw new Error(SAFE);
+    const preview = args.preview !== false;
+    const job = this.#ledger.getComfyJob(context.userId, args.job_id);
+    if (!job)
+      return {
+        kind: "paint-result",
+        job: { id: "unknown", workflow: "unknown", state: "unknown" },
+      };
+    const projection = { kind: "paint-result", job: safeJob(job) };
+    if (job.state !== "completed") return projection;
+    if (!this.#ledger.getComfyResult || !context.attachResult)
+      throw new Error(SAFE);
+    const artifact = this.#ledger.getComfyResult(context.userId, job.id);
+    if (!artifact || artifact.userId !== context.userId) throw new Error(SAFE);
+    if (signal?.aborted) throw new Error(SAFE);
+    const attachment = await context.attachResult(artifact, preview);
+    if (
+      !/^\/inbox\/results\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(
+        attachment.path,
+      ) ||
+      attachment.bytes !== artifact.bytes ||
+      attachment.mimeType !== artifact.mimeType ||
+      attachment.sha256 !== artifact.sha256
+    )
+      throw new Error(SAFE);
+    if (attachment.preview !== undefined) {
+      const p = attachment.preview;
+      if (
+        !preview ||
+        (p.mimeType !== "image/png" && p.mimeType !== "image/jpeg") ||
+        typeof p.data !== "string" ||
+        !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(
+          p.data,
+        )
+      )
+        throw new Error(SAFE);
+      const decoded = Buffer.from(p.data, "base64");
+      if (decoded.length > 512 * 1024 || decoded.toString("base64") !== p.data)
+        throw new Error(SAFE);
+      const detected = imageMime(decoded);
+      if (detected !== p.mimeType) throw new Error(SAFE);
+    }
+    return {
+      ...projection,
+      original: {
+        path: attachment.path,
+        bytes: attachment.bytes,
+        mimeType: attachment.mimeType,
+        sha256: attachment.sha256,
+      },
+      ...(attachment.preview === undefined
+        ? {}
+        : { preview: attachment.preview }),
     };
   }
 

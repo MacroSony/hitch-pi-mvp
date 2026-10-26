@@ -374,6 +374,44 @@ export class HitchStore implements ComfyJobLedger {
     return row === undefined ? null : comfyJob(row);
   }
 
+  public getComfyResult(userId: string, jobId: string): RuntimeArtifact | null {
+    const rows = this.#database
+      .prepare(
+        `
+      SELECT a.id, a.user_id AS userId, a.storage_key AS storageKey,
+             a.sha256, a.bytes, a.media_kind AS mediaKind,
+             a.mime_type AS mimeType, a.display_name AS displayName
+      FROM comfy_jobs j
+      JOIN users u ON u.id = j.user_id AND u.enabled = 1
+      JOIN turns source ON source.id = j.source_turn_id AND source.user_id = j.user_id
+        AND source.endpoint_id = j.endpoint_id AND source.session_id = j.session_id
+      JOIN turns completion ON completion.id = j.completion_turn_id AND completion.user_id = j.user_id
+        AND completion.endpoint_id = j.endpoint_id AND completion.session_id = j.session_id
+        AND completion.state = 'terminal' AND completion.outcome = 'succeeded'
+      JOIN turn_artifacts ta ON ta.turn_id = completion.id AND ta.user_id = j.user_id
+        AND ta.direction = 'outbound'
+      JOIN artifacts a ON a.id = ta.artifact_id AND a.user_id = ta.user_id
+      JOIN outbox ob ON ob.turn_id = completion.id AND ob.user_id = j.user_id
+        AND ob.endpoint_id = j.endpoint_id AND ob.kind = 'artifact'
+        AND ob.artifact_id = a.id
+      WHERE j.id = ? AND j.user_id = ? AND j.state = 'completed'
+        AND (SELECT COUNT(*) FROM turn_artifacts x WHERE x.turn_id = completion.id
+          AND x.user_id = j.user_id AND x.direction = 'outbound') = 1
+        AND (SELECT COUNT(*) FROM outbox x WHERE x.turn_id = completion.id
+          AND x.user_id = j.user_id AND x.endpoint_id = j.endpoint_id AND x.kind = 'artifact') = 1
+    `,
+      )
+      .all(jobId, userId) as unknown as RuntimeArtifact[];
+    if (rows.length !== 1) return null;
+    const artifact = rows[0]!;
+    return artifact.userId === userId &&
+      artifact.mediaKind === "image" &&
+      artifact.bytes > 0 &&
+      validArtifact(artifact, 10 * 1024 * 1024)
+      ? Object.freeze(artifact)
+      : null;
+  }
+
   public listComfyJobs(userId: string, limit = 20): readonly ComfyJob[] {
     const bounded = comfyJobLimit(limit);
     return (
