@@ -41,7 +41,8 @@ export interface EgressRequest {
   /** Root-relative path and query, such as /v1/search?q=pi. */
   readonly path: string;
   readonly method: EgressMethod;
-  readonly body?: string;
+  /** Host-internal request payload. Uint8Array is never exposed to model-controlled callers. */
+  readonly body?: string | Uint8Array;
   readonly signal?: AbortSignal;
 }
 
@@ -198,7 +199,11 @@ export class EgressClient {
     if (typeof input.path !== "string" || !isRelativePath(input.path)) {
       throw new EgressError("invalid-request");
     }
-    if (input.body !== undefined && typeof input.body !== "string") {
+    if (
+      input.body !== undefined &&
+      typeof input.body !== "string" &&
+      !(input.body instanceof Uint8Array)
+    ) {
       throw new EgressError("invalid-request");
     }
     if (method === "GET" && input.body !== undefined) {
@@ -206,12 +211,20 @@ export class EgressClient {
     }
     const pathBytes = Buffer.byteLength(input.path, "utf8");
     const bodyBytes =
-      input.body === undefined ? 0 : Buffer.byteLength(input.body, "utf8");
+      input.body === undefined
+        ? 0
+        : typeof input.body === "string"
+          ? Buffer.byteLength(input.body, "utf8")
+          : input.body.byteLength;
     if (pathBytes + bodyBytes > this.#limits.maxRequestBytes) {
       throw new EgressError("request-too-large");
     }
     const body =
-      input.body === undefined ? undefined : Buffer.from(input.body, "utf8");
+      input.body === undefined
+        ? undefined
+        : typeof input.body === "string"
+          ? Buffer.from(input.body, "utf8")
+          : Buffer.from(input.body);
     if (input.signal?.aborted) throw new EgressError("aborted");
 
     const first = parseRelativeUrl(
