@@ -86,11 +86,24 @@ function setup(t: test.TestContext) {
     now: () => now,
   });
   let ordinal = 0;
-  const turn = (id: string, state: "running" | "terminal" = "running") => {
+  const turn = (
+    id: string,
+    state: "running" | "terminal" = "running",
+    discordSource: string | null = source,
+  ) => {
     db.prepare(
       `INSERT INTO turns(id,user_id,session_id,endpoint_id,idempotency_key,content_digest,prompt_text,discord_source,ordinal,state,created_at,updated_at)
       VALUES(?,?,?,?,?,'digest','Draw a cat',?,?,?,1,1)`,
-    ).run(id, user.id, sessionId, endpoint.id, id, source, ++ordinal, state);
+    ).run(
+      id,
+      user.id,
+      sessionId,
+      endpoint.id,
+      id,
+      discordSource,
+      ++ordinal,
+      state,
+    );
   };
   const job = (id: string) => {
     turn(id);
@@ -199,22 +212,76 @@ test("submitted completion creates one audited rich outbox group and rejects rep
   foundation.close();
 });
 
-test("stale submission recovery never replays and pending excludes active origins", (t) => {
-  const { foundation, store, job, setNow } = setup(t);
-  const created = job("origin-pending");
-  store.markComfyJobSubmitting("alice", created.id);
-  setNow(200_000);
+test("startup recovery immediately marks all inflight jobs without replay", (t) => {
+  const { foundation, store, job } = setup(t);
+  const submitting = job("origin-submitting");
+  const prepared = job("origin-prepared");
+  store.markComfyJobSubmitting("alice", submitting.id);
   store.recoverComfyJobs();
   assert.equal(
-    store.getComfyJob("alice", created.id)?.state,
+    store.getComfyJob("alice", submitting.id)?.state,
     "submission_unknown",
   );
-  assert.equal(store.markComfyJobSubmitting("alice", created.id), false);
-  assert.deepEqual(store.pendingComfyJobs(), []);
-  const prepared = job("origin-prepared");
-  setNow(300_000);
-  store.recoverComfyJobs();
   assert.equal(store.getComfyJob("alice", prepared.id)?.state, "failed");
+  assert.equal(store.markComfyJobSubmitting("alice", submitting.id), false);
+  assert.deepEqual(store.pendingComfyJobs(), []);
+  foundation.close();
+});
+
+test("terminal job metadata is retained to 100 per owner and list bounds are strict", (t) => {
+  const { foundation, db, store, job, setNow } = setup(t);
+  let oldest = "";
+  for (let i = 0; i < 101; i++) {
+    setNow(100_000 + i);
+    const created = job(`retention-${i}`);
+    if (i === 0) oldest = created.id;
+    store.markComfyJobSubmitting("alice", created.id);
+    store.markComfyJobSubmitted("alice", created.id, `backend_${i}`);
+    store.markComfyJobCancelled("alice", created.id);
+  }
+  assert.equal(store.listComfyJobs("alice").length, 20);
+  assert.equal(store.listComfyJobs("alice", 20).length, 20);
+  assert.throws(() => store.listComfyJobs("alice", 21));
+  assert.throws(() => store.listComfyJobs("alice", Number.NaN));
+  assert.equal(store.getComfyJob("alice", oldest), null);
+  const count = db
+    .prepare(
+      "SELECT count(*) AS count FROM comfy_jobs WHERE user_id='alice' AND state IN ('completed','failed','cancelled')",
+    )
+    .get() as { count: bigint };
+  assert.equal(count.count, 100n);
+  foundation.close();
+});
+
+test("host operator Turn without Discord source can finish as one text-only failure", (t) => {
+  const { foundation, db, store, turn } = setup(t);
+  turn("operator-turn", "running", null);
+  const job = store.createComfyJob("alice", "operator-turn", "anima", snapshot);
+  assert.equal(store.markComfyJobSubmitting("alice", job.id), true);
+  assert.equal(store.markComfyJobSubmitted("alice", job.id, "backend"), true);
+  db.prepare(
+    "UPDATE turns SET state='terminal', outcome='succeeded' WHERE id='operator-turn'",
+  ).run();
+  assert.equal(store.finishComfyJob("alice", job.id, "failed"), true);
+  assert.equal(store.finishComfyJob("alice", job.id, "failed"), false);
+  const completed = store.getComfyJob("alice", job.id)!;
+  assert.equal(completed.state, "failed");
+  assert.ok(completed.completionTurnId);
+  const turnRow = db
+    .prepare("SELECT discord_source FROM turns WHERE id=?")
+    .get(completed.completionTurnId) as { discord_source: string | null };
+  assert.equal(turnRow.discord_source, null);
+  const group = db
+    .prepare("SELECT kind,payload_text FROM outbox WHERE turn_id=?")
+    .all(completed.completionTurnId) as Array<{
+    kind: string;
+    payload_text: string | null;
+  }>;
+  assert.deepEqual(
+    group.map(({ kind }) => kind),
+    ["text"],
+  );
+  assert.equal(group[0]?.payload_text, "图像生成失败。");
   foundation.close();
 });
 
@@ -224,7 +291,11 @@ test("job creation rejects terminal origins and disabled owners", (t) => {
   assert.throws(() =>
     store.createComfyJob("alice", "origin-terminal", "anima", snapshot),
   );
+  turn("origin-live");
+  const live = store.createComfyJob("alice", "origin-live", "anima", snapshot);
   db.prepare("UPDATE users SET enabled=0 WHERE id='alice'").run();
+  assert.equal(store.getComfyJob("alice", live.id), null);
+  assert.deepEqual(store.listComfyJobs("alice"), []);
   turn("origin-disabled");
   assert.throws(() =>
     store.createComfyJob("alice", "origin-disabled", "anima", snapshot),

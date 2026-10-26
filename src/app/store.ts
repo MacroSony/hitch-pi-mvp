@@ -126,6 +126,14 @@ interface ComfyJobRow {
   updated_at: number | bigint;
   last_polled_at: number | bigint;
 }
+function comfyJobLimit(limit: number): number {
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 20)
+    throw new AppError(
+      "rejected",
+      "Comfy job limit must be an integer from 1 to 20",
+    );
+  return limit;
+}
 function comfyJob(row: ComfyJobRow): ComfyJob {
   return {
     id: row.id,
@@ -303,7 +311,7 @@ export class HitchStore implements ComfyJobLedger {
           `SELECT t.session_id, t.endpoint_id FROM turns t
          JOIN users u ON u.id = t.user_id AND u.enabled = 1
          JOIN channel_endpoints e ON e.id = t.endpoint_id AND e.user_id = t.user_id AND e.enabled = 1 AND e.kind = 'discord'
-         WHERE t.id = ? AND t.user_id = ? AND t.state IN ('starting', 'running') AND t.discord_source IS NOT NULL`,
+         WHERE t.id = ? AND t.user_id = ? AND t.state IN ('starting', 'running')`,
         )
         .get(turnId, userId) as
         | { session_id: string; endpoint_id: string }
@@ -343,6 +351,7 @@ export class HitchStore implements ComfyJobLedger {
           now,
           0,
         );
+      this.#pruneComfyJobs(userId);
       return {
         id,
         userId,
@@ -358,31 +367,33 @@ export class HitchStore implements ComfyJobLedger {
 
   public getComfyJob(userId: string, jobId: string): ComfyJob | null {
     const row = this.#database
-      .prepare("SELECT * FROM comfy_jobs WHERE id = ? AND user_id = ?")
+      .prepare(
+        "SELECT j.* FROM comfy_jobs j JOIN users u ON u.id = j.user_id AND u.enabled = 1 WHERE j.id = ? AND j.user_id = ?",
+      )
       .get(jobId, userId) as ComfyJobRow | undefined;
     return row === undefined ? null : comfyJob(row);
   }
 
   public listComfyJobs(userId: string, limit = 20): readonly ComfyJob[] {
-    const bounded = Math.max(0, Math.min(20, Math.floor(limit)));
+    const bounded = comfyJobLimit(limit);
     return (
       this.#database
         .prepare(
-          "SELECT * FROM comfy_jobs WHERE user_id = ? ORDER BY created_at, id LIMIT ?",
+          "SELECT j.* FROM comfy_jobs j JOIN users u ON u.id = j.user_id AND u.enabled = 1 WHERE j.user_id = ? ORDER BY j.created_at DESC, j.id DESC LIMIT ?",
         )
         .all(userId, bounded) as unknown as ComfyJobRow[]
     ).map(comfyJob);
   }
 
   public pendingComfyJobs(limit = 20): readonly ComfyJob[] {
-    const bounded = Math.max(0, Math.min(20, Math.floor(limit)));
+    const bounded = comfyJobLimit(limit);
     return transaction(this.#database, () => {
       const rows = this.#database
         .prepare(
           `SELECT j.* FROM comfy_jobs j
-         JOIN turns t ON t.id = j.source_turn_id AND t.user_id = j.user_id AND t.state = 'terminal'
+         JOIN turns t ON t.id = j.source_turn_id AND t.user_id = j.user_id AND t.endpoint_id = j.endpoint_id AND t.session_id = j.session_id AND t.state = 'terminal'
          JOIN users u ON u.id = j.user_id AND u.enabled = 1
-         JOIN channel_endpoints e ON e.id = j.endpoint_id AND e.user_id = j.user_id AND e.enabled = 1
+         JOIN channel_endpoints e ON e.id = j.endpoint_id AND e.user_id = j.user_id AND e.enabled = 1 AND e.kind = 'discord'
          WHERE j.state = 'submitted' ORDER BY j.last_polled_at, j.updated_at, j.id LIMIT ?`,
         )
         .all(bounded) as unknown as ComfyJobRow[];
@@ -434,17 +445,17 @@ export class HitchStore implements ComfyJobLedger {
   }
   public recoverComfyJobs(): void {
     transaction(this.#database, () => {
-      const stale = this.clock.now() - 60_000;
+      const now = this.clock.now();
       this.#database
         .prepare(
-          "UPDATE comfy_jobs SET state = 'submission_unknown', updated_at = ? WHERE state = 'submitting' AND updated_at <= ?",
+          "UPDATE comfy_jobs SET state = 'submission_unknown', updated_at = ? WHERE state = 'submitting'",
         )
-        .run(this.clock.now(), stale);
+        .run(now);
       this.#database
         .prepare(
-          "UPDATE comfy_jobs SET state = 'failed', updated_at = ? WHERE state = 'prepared' AND updated_at <= ?",
+          "UPDATE comfy_jobs SET state = 'failed', updated_at = ? WHERE state = 'prepared'",
         )
-        .run(this.clock.now(), stale);
+        .run(now);
     });
   }
 
@@ -458,9 +469,9 @@ export class HitchStore implements ComfyJobLedger {
       const row = this.#database
         .prepare(
           `SELECT j.*, t.discord_source, t.prompt_text FROM comfy_jobs j
-         JOIN turns t ON t.id = j.source_turn_id AND t.user_id = j.user_id AND t.state = 'terminal'
+         JOIN turns t ON t.id = j.source_turn_id AND t.user_id = j.user_id AND t.endpoint_id = j.endpoint_id AND t.session_id = j.session_id AND t.state = 'terminal'
          JOIN users u ON u.id = j.user_id AND u.enabled = 1
-         JOIN channel_endpoints e ON e.id = j.endpoint_id AND e.user_id = j.user_id AND e.enabled = 1
+         JOIN channel_endpoints e ON e.id = j.endpoint_id AND e.user_id = j.user_id AND e.enabled = 1 AND e.kind = 'discord'
          WHERE j.id = ? AND j.user_id = ? AND j.state = 'submitted'`,
         )
         .get(jobId, userId) as
@@ -477,20 +488,10 @@ export class HitchStore implements ComfyJobLedger {
         (outcome === "failed" && artifact !== undefined)
       )
         return false;
-      let source: DiscordSource;
-      try {
-        const parsed = JSON.parse(row.discord_source ?? "null") as unknown;
-        if (parsed === null || typeof parsed !== "object") return false;
-        source = parsed as DiscordSource;
-      } catch {
-        return false;
-      }
       const now = this.clock.now();
       const turnId = this.ids.next("turn");
       const caption =
-        outcome === "completed"
-          ? "Your image is ready."
-          : "Image generation failed.";
+        outcome === "completed" ? "你的图像已生成。" : "图像生成失败。";
       this.#database
         .prepare(
           `INSERT INTO turns(id, user_id, session_id, endpoint_id, idempotency_key, content_digest,
@@ -505,7 +506,7 @@ export class HitchStore implements ComfyJobLedger {
           `paint-result:${jobId}`,
           createHash("sha256").update(`paint-result:${jobId}`).digest("hex"),
           `[host event: paint job ${jobId} ${outcome}]`,
-          JSON.stringify(source),
+          row.discord_source,
           this.#nextOrdinal(userId),
           outcome === "completed" ? "succeeded" : "failed",
           caption,
@@ -533,8 +534,19 @@ export class HitchStore implements ComfyJobLedger {
           "UPDATE comfy_jobs SET state = ?, completion_turn_id = ?, updated_at = ? WHERE id = ? AND user_id = ? AND state = 'submitted'",
         )
         .run(outcome, turnId, now, jobId, userId).changes;
+      if (changed === 1n) this.#pruneComfyJobs(userId);
       return changed === 1n;
     });
+  }
+
+  #pruneComfyJobs(userId: string): void {
+    this.#database
+      .prepare(
+        `DELETE FROM comfy_jobs WHERE user_id = ? AND state IN ('completed', 'failed', 'cancelled')
+       AND id NOT IN (SELECT id FROM comfy_jobs WHERE user_id = ? AND state IN ('completed', 'failed', 'cancelled')
+         ORDER BY updated_at DESC, created_at DESC, id DESC LIMIT 100)`,
+      )
+      .run(userId, userId);
   }
 
   #jobTransition(
@@ -543,15 +555,19 @@ export class HitchStore implements ComfyJobLedger {
     from: ComfyJobState,
     to: ComfyJobState,
   ): boolean {
-    return transaction(
-      this.#database,
-      () =>
-        this.#database
-          .prepare(
-            "UPDATE comfy_jobs SET state = ?, updated_at = ? WHERE id = ? AND user_id = ? AND state = ?",
-          )
-          .run(to, this.clock.now(), jobId, userId, from).changes === 1n,
-    );
+    return transaction(this.#database, () => {
+      const changed = this.#database
+        .prepare(
+          "UPDATE comfy_jobs SET state = ?, updated_at = ? WHERE id = ? AND user_id = ? AND state = ?",
+        )
+        .run(to, this.clock.now(), jobId, userId, from).changes;
+      if (
+        changed === 1n &&
+        (to === "completed" || to === "failed" || to === "cancelled")
+      )
+        this.#pruneComfyJobs(userId);
+      return changed === 1n;
+    });
   }
 
   public resolveTelegramEndpoint(

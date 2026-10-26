@@ -216,7 +216,8 @@ CREATE TABLE comfy_jobs (
   last_polled_at INTEGER NOT NULL,
   FOREIGN KEY (source_turn_id, user_id) REFERENCES turns(id, user_id),
   FOREIGN KEY (endpoint_id, user_id) REFERENCES channel_endpoints(id, user_id),
-  CHECK ((state = 'completed' AND completion_turn_id IS NOT NULL) OR (state != 'completed' AND completion_turn_id IS NULL)),
+  FOREIGN KEY (completion_turn_id, endpoint_id, user_id) REFERENCES turns(id, endpoint_id, user_id),
+  CHECK ((state = 'completed' AND completion_turn_id IS NOT NULL) OR state = 'failed' OR (state NOT IN ('completed', 'failed') AND completion_turn_id IS NULL)),
   CHECK ((state IN ('submitted', 'completed', 'cancelled') AND backend_prompt_id IS NOT NULL) OR state NOT IN ('submitted', 'completed', 'cancelled'))
 ) STRICT;
 CREATE INDEX comfy_jobs_owner_state ON comfy_jobs(user_id, state);
@@ -393,7 +394,8 @@ CREATE TABLE comfy_jobs (
   last_polled_at INTEGER NOT NULL,
   FOREIGN KEY (source_turn_id, user_id) REFERENCES turns(id, user_id),
   FOREIGN KEY (endpoint_id, user_id) REFERENCES channel_endpoints(id, user_id),
-  CHECK ((state = 'completed' AND completion_turn_id IS NOT NULL) OR (state != 'completed' AND completion_turn_id IS NULL)),
+  FOREIGN KEY (completion_turn_id, endpoint_id, user_id) REFERENCES turns(id, endpoint_id, user_id),
+  CHECK ((state = 'completed' AND completion_turn_id IS NOT NULL) OR state = 'failed' OR (state NOT IN ('completed', 'failed') AND completion_turn_id IS NULL)),
   CHECK ((state IN ('submitted', 'completed', 'cancelled') AND backend_prompt_id IS NOT NULL) OR state NOT IN ('submitted', 'completed', 'cancelled'))
 ) STRICT;
 CREATE INDEX comfy_jobs_owner_state ON comfy_jobs(user_id, state);
