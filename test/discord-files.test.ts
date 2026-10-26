@@ -354,6 +354,36 @@ test("Discord always-trigger attachment-only reaches Pi and materializes via exi
     f.foundation.close();
   }
 });
+test("Discord later turn claims prior originals at their original inbox ordinal", async () => {
+  const f = fixture("always-trigger");
+  try {
+    await receive(f, [dm("image-first")]);
+    const original = f.turns[0]!.artifacts![0]!;
+    f.client.messages = [dm("later", "use the earlier file", false)];
+    const abort = new AbortController();
+    f.client.abort = abort;
+    await f.worker.run(abort.signal);
+    await f.app.drain();
+    const later = f.turns[1]!;
+    assert.equal(later.historicalAttachments?.length, 1);
+    assert.equal(later.historicalAttachments![0]!.originalOrdinal, 0);
+    assert.equal(later.historicalAttachments![0]!.artifact.id, original.id);
+    const inbox = join(f.config.dataRoot, "inbox-later");
+    mkdirSync(inbox);
+    const path = f.media.materializeInbox(
+      original,
+      inbox,
+      Number(later.historicalAttachments![0]!.originalOrdinal),
+    );
+    assert.match(path, /\/1-.*\.txt$/u);
+    assert.equal(
+      readFileSync(join(inbox, path.slice("/inbox/".length)), "utf8"),
+      "hello",
+    );
+  } finally {
+    f.foundation.close();
+  }
+});
 test("Discord staged server files share channels, never cross into DM owners", async () => {
   const f = fixture();
   try {

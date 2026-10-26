@@ -2088,7 +2088,8 @@ export class HitchStore {
            JOIN artifacts a ON a.id = ta.artifact_id AND a.user_id = ta.user_id
            WHERE previous.user_id = ? AND previous.session_id = ?
              AND previous.state = 'terminal' AND previous.ordinal < ?
-           ORDER BY previous.ordinal DESC, ta.ordinal DESC`,
+           ORDER BY previous.ordinal DESC, ta.ordinal DESC
+           LIMIT 64`,
           )
           .all(
             row.user_id,
@@ -2103,7 +2104,7 @@ export class HitchStore {
           ) as Array<
           Omit<RuntimeArtifact, "bytes"> & {
             bytes: bigint;
-            originalOrdinal: number;
+            originalOrdinal: bigint;
           }
         >;
         const seen = new Set(artifacts.map((artifact) => artifact.id));
@@ -2112,19 +2113,23 @@ export class HitchStore {
           (sum, artifact) => sum + artifact.bytes,
           0,
         );
-        const occupiedOrdinals = new Set(
-          artifacts.map((_, ordinal) => ordinal),
+        const occupiedPaths = new Set(
+          artifacts.map(
+            (artifact, ordinal) => `${ordinal}:${artifact.id.slice(-12)}`,
+          ),
         );
         for (const value of rows) {
-          const artifact = { ...value, bytes: Number(value.bytes) };
-          if (
-            seen.has(artifact.id) ||
-            occupiedOrdinals.has(artifact.originalOrdinal)
-          )
+          const artifact = {
+            ...value,
+            bytes: Number(value.bytes),
+            originalOrdinal: Number(value.originalOrdinal),
+          };
+          const materializedKey = `${artifact.originalOrdinal}:${artifact.id.slice(-12)}`;
+          if (seen.has(artifact.id) || occupiedPaths.has(materializedKey))
             continue;
           if (count >= 8 || bytes + artifact.bytes > 40 * 1024 * 1024) continue;
           seen.add(artifact.id);
-          occupiedOrdinals.add(artifact.originalOrdinal);
+          occupiedPaths.add(materializedKey);
           count += 1;
           bytes += artifact.bytes;
           historicalAttachments.push({

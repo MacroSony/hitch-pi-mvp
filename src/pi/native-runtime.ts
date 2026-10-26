@@ -1873,11 +1873,20 @@ export class NativePiRuntime implements AgentRuntime {
     ];
     if (
       allArtifacts.length > 8 ||
+      new Set(allArtifacts.map((artifact) => artifact.id)).size !==
+        allArtifacts.length ||
       allArtifacts.some(
         (artifact) =>
           artifact.userId !== turn.userId ||
+          !Number.isFinite(artifact.bytes) ||
           artifact.bytes < 1 ||
           artifact.bytes > 20 * 1024 * 1024,
+      ) ||
+      historicalAttachments.some(
+        (item) =>
+          !Number.isSafeInteger(item.originalOrdinal) ||
+          item.originalOrdinal < 0 ||
+          item.originalOrdinal >= 8,
       ) ||
       allArtifacts.reduce((total, artifact) => total + artifact.bytes, 0) >
         40 * 1024 * 1024
@@ -1968,12 +1977,17 @@ export class NativePiRuntime implements AgentRuntime {
         }
       }
       for (const item of historicalAttachments) {
+        const expectedName = `${item.originalOrdinal + 1}-${item.artifact.id.slice(-12)}`;
+        if ([...usedPaths].some((used) => used.includes(`/${expectedName}`))) {
+          throw new Error("historical inbox path collision");
+        }
         const path = this.#media.materializeInbox(
           item.artifact,
           context.inbox,
           item.originalOrdinal,
         );
-        if (usedPaths.has(path)) continue;
+        if (usedPaths.has(path))
+          throw new Error("historical inbox path collision");
         usedPaths.add(path);
         historicalLines.push(
           `${path} (${item.artifact.displayName}; ${item.artifact.mimeType}; ${item.artifact.bytes} bytes; earlier turn original)`,
