@@ -159,6 +159,12 @@ class FileClient implements DiscordClient {
   downloads = 0;
   uploads: Array<{ channel: string; artifact: RuntimeArtifact }> = [];
   texts: string[] = [];
+  richReplies: Array<{
+    channel: string;
+    text: string;
+    artifacts: RuntimeArtifact[];
+    reply?: string;
+  }> = [];
   uploadFailure = false;
   cancelUpload: AbortController | undefined;
   messages: DiscordMessage[] = [];
@@ -183,6 +189,31 @@ class FileClient implements DiscordClient {
     return (async function* () {
       yield Buffer.from("hello");
     })();
+  }
+  async sendRichReply(
+    channel: string,
+    text: string,
+    artifacts: readonly RuntimeArtifact[],
+    media: MediaStore,
+    options?: { replyToMessageId?: string },
+  ): Promise<void> {
+    if (this.uploadFailure) throw new Error("raw SDK secret fixture");
+    for (const artifact of artifacts) {
+      assert.equal(
+        readFileSync(media.verifiedObjectPath(artifact)).length,
+        artifact.bytes,
+      );
+      this.uploads.push({ channel, artifact });
+    }
+    this.richReplies.push({
+      channel,
+      text,
+      artifacts: [...artifacts],
+      ...(options?.replyToMessageId === undefined
+        ? {}
+        : { reply: options.replyToMessageId }),
+    });
+    this.cancelUpload?.abort();
   }
   async sendArtifact(
     channel: string,
@@ -519,6 +550,10 @@ test("Discord uploads outbound image and document to originating channel with du
     await f.app.drain();
     await f.worker.deliverPending();
     assert.deepEqual(
+      f.client.richReplies.map((reply) => [reply.text, reply.artifacts.length]),
+      [["done", 2]],
+    );
+    assert.deepEqual(
       f.client.uploads.map((u) => [u.channel, u.artifact.mediaKind]),
       [
         ["20000000000000021", "image"],
@@ -530,6 +565,273 @@ test("Discord uploads outbound image and document to originating channel with du
     f.foundation.close();
   }
 });
+test("Discord rich group claim and sent updates roll back rather than partially changing rows", async () => {
+  const f = fixture();
+  try {
+    f.output([await object(f, Buffer.from("atomic bytes"), "atomic.txt")]);
+    f.app.receiveDiscord("bot", "bot-user", dm("rich-atomic", "create", false));
+    await f.app.drain();
+    const rows = f.store.discordRichReplyGroup(
+      f.store.pendingDiscordOutbox("bot")[0]!,
+    )!;
+    const last = rows.at(-1)!.id;
+    const turnId = rows[0]!.turnId!;
+    const db = f.foundation.database.connection;
+    db.exec(
+      `CREATE TRIGGER fail_group_claim BEFORE UPDATE OF state ON outbox WHEN OLD.id = '${last}' AND NEW.state = 'sending' BEGIN SELECT RAISE(ABORT, 'claim fixture'); END`,
+    );
+    assert.throws(() => f.store.claimDiscordOutboxGroup(rows));
+    let states = db
+      .prepare(
+        "SELECT state, attempts FROM outbox WHERE turn_id = ? ORDER BY created_at,id",
+      )
+      .all(turnId) as { state: string; attempts: number | bigint }[];
+    assert.deepEqual(
+      states.map((row) => [row.state, Number(row.attempts)]),
+      [
+        ["pending", 0],
+        ["pending", 0],
+      ],
+    );
+    db.exec("DROP TRIGGER fail_group_claim");
+    assert.equal(f.store.claimDiscordOutboxGroup(rows), true);
+    db.exec(
+      `CREATE TRIGGER fail_group_sent BEFORE UPDATE OF state ON outbox WHEN OLD.id = '${last}' AND NEW.state = 'sent' BEGIN SELECT RAISE(ABORT, 'sent fixture'); END`,
+    );
+    assert.throws(() => f.store.markDiscordOutboxGroupSent(rows));
+    states = db
+      .prepare(
+        "SELECT state, attempts FROM outbox WHERE turn_id = ? ORDER BY created_at,id",
+      )
+      .all(turnId) as { state: string; attempts: number | bigint }[];
+    assert.deepEqual(
+      states.map((row) => [row.state, Number(row.attempts)]),
+      [
+        ["sending", 1],
+        ["sending", 1],
+      ],
+    );
+  } finally {
+    f.foundation.close();
+  }
+});
+
+test("Discord rich Turn group survives retry/restart and claims and marks every row together", async () => {
+  const f = fixture();
+  try {
+    f.output([await object(f, Buffer.from("retry bytes"), "retry.txt")]);
+    f.app.receiveDiscord("bot", "bot-user", dm("rich-retry", "create", false));
+    await f.app.drain();
+    const group = f.store.discordRichReplyGroup(
+      f.store.pendingDiscordOutbox("bot")[0]!,
+    );
+    assert.equal(group?.length, 2);
+    assert.equal(f.store.pendingDiscordRichReplyCandidates("bot").length, 2);
+    const turnId = group![0]!.turnId!;
+    f.client.uploadFailure = true;
+    await f.worker.deliverPending();
+    let states = f.foundation.database.connection
+      .prepare(
+        "SELECT state, attempts FROM outbox WHERE turn_id = ? ORDER BY kind",
+      )
+      .all(turnId) as { state: string; attempts: number }[];
+    assert.deepEqual(
+      states.map((row) => row.state),
+      ["retryable", "retryable"],
+    );
+    assert.deepEqual(
+      states.map((row) => Number(row.attempts)),
+      [1, 1],
+    );
+    f.client.uploadFailure = false;
+    // Simulate a process crash after the rows were claimed but before SDK completion.
+    f.foundation.database.connection
+      .prepare("UPDATE outbox SET state = 'sending' WHERE turn_id = ?")
+      .run(turnId);
+    f.foundation.close();
+    const reopened = bootstrapFoundation(f.config);
+    try {
+      const store = new HitchStore(reopened.database, f.ids);
+      store.recoverAfterRestart();
+      const worker = new DiscordWorker({ id: "bot" }, f.app, store, {
+        client: f.client,
+        media: f.media,
+      });
+      await worker.deliverPending();
+      states = reopened.database.connection
+        .prepare(
+          "SELECT state, attempts FROM outbox WHERE turn_id = ? ORDER BY kind",
+        )
+        .all(turnId) as { state: string; attempts: number }[];
+      assert.deepEqual(
+        states.map((row) => row.state),
+        ["sent", "sent"],
+      );
+      assert.deepEqual(
+        states.map((row) => Number(row.attempts)),
+        [2, 2],
+      );
+      assert.equal(f.client.richReplies.length, 1);
+    } finally {
+      reopened.close();
+    }
+  } finally {
+    try {
+      f.foundation.close();
+    } catch {}
+  }
+});
+
+test("Discord rich selection crosses the pending page boundary and does not resend sent text", async () => {
+  const f = fixture();
+  try {
+    f.output([await object(f, Buffer.from("boundary bytes"), "boundary.txt")]);
+    f.app.receiveDiscord(
+      "bot",
+      "bot-user",
+      dm("rich-boundary", "create", false),
+    );
+    await f.app.drain();
+    const group = f.store
+      .pendingDiscordOutbox("bot")
+      .filter((row) => row.turnId !== undefined);
+    const endpointId = group[0]!.endpointId!;
+    const now = Date.now() - 1000;
+    const insert = f.foundation.database.connection.prepare(
+      "INSERT INTO outbox(id,user_id,endpoint_id,turn_id,kind,payload_text,state,attempts,created_at,updated_at) VALUES(?, 'dm-owner-a', ?, NULL, 'text', 'prefix', 'pending', 0, ?, ?)",
+    );
+    for (let i = 0; i < 20; i++)
+      insert.run(`prefix-${i}`, endpointId, now + i, now + i);
+    // The first 20-page is occupied by unrelated rows; the DB group API still returns the whole Turn.
+    assert.equal(
+      f.store
+        .pendingDiscordOutbox("bot", 20)
+        .some((row) => row.turnId === group[0]!.turnId),
+      false,
+    );
+    assert.equal(f.store.discordRichReplyGroup(group[0]!)?.length, 2);
+    await f.worker.deliverPending();
+    assert.equal(f.client.richReplies.length, 1);
+
+    // A partially delivered historical Turn is deliberately no longer groupable.
+    f.output([await object(f, Buffer.from("partial bytes"), "partial.txt")]);
+    f.app.receiveDiscord(
+      "bot",
+      "bot-user",
+      dm("rich-partial", "create", false),
+    );
+    await f.app.drain();
+    const pending = f.store
+      .pendingDiscordOutbox("bot")
+      .filter((row) => row.turnId !== undefined);
+    const partialTurn = pending[0]!.turnId!;
+    f.foundation.database.connection
+      .prepare(
+        "UPDATE outbox SET state = 'sent' WHERE turn_id = ? AND kind = 'text'",
+      )
+      .run(partialTurn);
+    assert.equal(f.store.discordRichReplyGroup(pending[0]!), null);
+    await f.worker.deliverPending();
+    assert.equal(f.client.richReplies.length, 1);
+    assert.equal(f.client.texts.includes("done"), false);
+  } finally {
+    f.foundation.close();
+  }
+});
+
+test("Discord rich groups stay separated by Turn, owner, and endpoint", async () => {
+  const f = fixture();
+  try {
+    const otherOwnerFile = await f.media.ingest(
+      "dm-owner-b",
+      (async function* () {
+        yield Buffer.from("owner b file");
+      })(),
+      { displayName: "owner-b.txt" },
+    );
+    f.output([otherOwnerFile]);
+    assert.equal(
+      f.app.receiveDiscord(
+        "bot",
+        "bot-user",
+        discordMessage(
+          "owner-b-rich",
+          "20000000000000022",
+          "20000000000000002",
+          "create",
+        ),
+      ).accepted,
+      true,
+    );
+    await f.app.drain();
+    const dmFile = await object(f, Buffer.from("dm file"), "dm.txt");
+    f.output([dmFile]);
+    f.app.receiveDiscord("bot", "bot-user", dm("dm-rich", "create", false));
+    await f.app.drain();
+    const candidates = f.store.pendingDiscordRichReplyCandidates("bot");
+    const groups = new Map(
+      candidates.map((row) => [
+        row.turnId,
+        candidates.filter((item) => item.turnId === row.turnId),
+      ]),
+    );
+    assert.equal(groups.size, 2);
+    assert.ok([...groups.values()].every((rows) => rows.length === 2));
+    const separated = [...groups.values()].map((rows) => rows[0]!);
+    assert.notEqual(separated[0]!.userId, separated[1]!.userId);
+    assert.notEqual(separated[0]!.endpointId, separated[1]!.endpointId);
+    await f.worker.deliverPending();
+    assert.deepEqual(
+      f.client.richReplies.map((reply) => reply.channel).sort(),
+      ["20000000000000021", "20000000000000022"],
+    );
+  } finally {
+    f.foundation.close();
+  }
+});
+
+test("Discord rich long text falls back to separate durable row delivery", async () => {
+  const f = fixture();
+  try {
+    f.output([await object(f, Buffer.from("long text bytes"), "long.txt")]);
+    f.app.receiveDiscord("bot", "bot-user", dm("rich-long", "create", false));
+    await f.app.drain();
+    const text = f.store
+      .pendingDiscordOutbox("bot")
+      .find((row) => row.kind === "text")!;
+    f.foundation.database.connection
+      .prepare("UPDATE outbox SET payload_text = ? WHERE id = ?")
+      .run("x".repeat(2001), text.id);
+    await f.worker.deliverPending();
+    assert.equal(f.client.richReplies.length, 0);
+    assert.equal(f.client.texts.length, 1);
+    assert.equal(f.store.pendingDiscordOutbox("bot").length, 0);
+  } finally {
+    f.foundation.close();
+  }
+});
+
+test("Discord rich aggregate file overflow falls back to separate row delivery", async () => {
+  const f = fixture();
+  try {
+    const one = await object(f, Buffer.alloc(6 * 1024 * 1024, 1), "one.bin");
+    const two = await object(f, Buffer.alloc(6 * 1024 * 1024, 2), "two.bin");
+    f.output([one, two]);
+    f.app.receiveDiscord(
+      "bot",
+      "bot-user",
+      dm("aggregate-overflow", "create", false),
+    );
+    await f.app.drain();
+    await f.worker.deliverPending();
+    assert.equal(f.client.richReplies.length, 0);
+    assert.equal(f.client.uploads.length, 2);
+    assert.equal(f.store.pendingDiscordOutbox("bot").length, 0);
+  } finally {
+    f.foundation.close();
+  }
+});
+
 test("Discord oversize failure and explanatory text are durable across reopen", async () => {
   const f = fixture();
   const large = await object(
@@ -577,11 +879,11 @@ test("Discord worker logs only safe artifact diagnostics and retains retry", asy
       code: { value: 50013 },
       headers: { value: { authorization: "secret" } },
     });
-    f.client.sendArtifact = async () => {
+    f.client.sendRichReply = async () => {
       throw DiscordTransportError.artifactFailure("upload", hostile);
     };
     await f.worker.deliverPending();
-    assert.equal(f.store.pendingDiscordOutbox("bot").length, 1);
+    assert.equal(f.store.pendingDiscordOutbox("bot").length, 2);
     assert.match(
       f.logs.join("\n"),
       /phase=upload kind=http status=403 code=50013/u,
@@ -867,7 +1169,13 @@ test("Discord REST captured fetch sends real multipart over loopback after globa
     });
     client.rest.setToken("loopback-fixture-token");
     sdk = new DiscordJsClient("loopback-fixture-token", false, client);
-    await sdk.sendArtifact("123456789012345678", artifact, f.media);
+    await sdk.sendRichReply(
+      "123456789012345678",
+      "rich reply text",
+      [artifact],
+      f.media,
+      { replyToMessageId: "source-message" },
+    );
     assert.deepEqual(
       requests.map(({ method }) => method),
       ["GET", "POST"],
@@ -883,6 +1191,15 @@ test("Discord REST captured fetch sends real multipart over loopback after globa
     assert.ok(boundary);
     assert.ok(upload.body.includes(Buffer.from(`--${boundary}`)));
     assert.ok(upload.body.includes(Buffer.from('name="payload_json"')));
+    assert.ok(upload.body.includes(Buffer.from('"content":"rich reply text"')));
+    assert.ok(
+      upload.body.includes(
+        Buffer.from(
+          '"message_reference":{"message_id":"source-message","fail_if_not_exists":false}',
+        ),
+      ),
+    );
+    assert.ok(upload.body.includes(Buffer.from('"fail_if_not_exists":false')));
     assert.ok(
       upload.body.includes(
         Buffer.from('"allowed_mentions":{"parse":[],"replied_user":false}'),

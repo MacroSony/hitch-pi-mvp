@@ -76,6 +76,7 @@ export interface OutboxDelivery {
   readonly turnId?: string;
   readonly endpointId?: string;
   readonly attempts?: number;
+  readonly outboxState?: "pending" | "retryable";
 }
 
 export interface LocalTarget {
@@ -2578,10 +2579,187 @@ export class HitchStore {
     return this.#pendingOutbox("discord", accountId, limit);
   }
 
+  /** Find eligible Turn-group seeds independently of the bounded ordinary outbox page. */
+  public pendingDiscordRichReplyCandidates(
+    accountId: string,
+  ): readonly OutboxDelivery[] {
+    const turns = this.#database
+      .prepare(
+        `SELECT o.turn_id AS turnId, min(o.created_at) AS createdAt
+      FROM outbox o JOIN channel_endpoints e ON e.id = o.endpoint_id AND e.user_id = o.user_id JOIN users u ON u.id = o.user_id
+      WHERE e.kind = 'discord' AND e.account_id = ? AND e.enabled = 1 AND u.enabled = 1 AND o.turn_id IS NOT NULL
+      GROUP BY o.turn_id
+      HAVING count(*) BETWEEN 2 AND 9 AND sum(CASE WHEN o.kind = 'text' THEN 1 ELSE 0 END) = 1
+        AND sum(CASE WHEN o.kind = 'artifact' THEN 1 ELSE 0 END) BETWEEN 1 AND 8
+        AND min(o.attempts) < 5 AND min(o.attempts) = max(o.attempts)
+        AND min(o.state) = max(o.state) AND min(o.state) IN ('pending','retryable')
+      ORDER BY createdAt, turnId`,
+      )
+      .all(accountId) as { turnId: string }[];
+    return turns.flatMap(({ turnId }) =>
+      this.#pendingOutbox("discord", accountId, 9, turnId),
+    );
+  }
+
+  /** Load an entire terminal Turn group directly from the DB, independent of the worker page size. */
+  public discordRichReplyGroup(
+    seed: OutboxDelivery,
+  ): readonly OutboxDelivery[] | null {
+    if (!seed.turnId || !seed.endpointId) return null;
+    const rows = this.#pendingOutbox("discord", seed.accountId, 9, seed.turnId);
+    const total = this.#database
+      .prepare(
+        "SELECT count(*) AS count FROM outbox WHERE turn_id = ? AND user_id = ?",
+      )
+      .get(seed.turnId, seed.userId) as { count: bigint };
+    if (
+      Number(total.count) !== rows.length ||
+      rows.length < 2 ||
+      rows.length > 9
+    )
+      return null;
+    if (
+      rows.some(
+        (row) =>
+          row.userId !== seed.userId ||
+          row.endpointId !== seed.endpointId ||
+          row.accountId !== seed.accountId ||
+          row.privateChatId !== seed.privateChatId ||
+          row.attempts !== seed.attempts ||
+          row.outboxState !== seed.outboxState ||
+          (row.kind !== "text" && row.kind !== "artifact"),
+      )
+    )
+      return null;
+    if (
+      rows.filter((row) => row.kind === "text").length !== 1 ||
+      rows.filter((row) => row.kind === "artifact").length < 1
+    )
+      return null;
+    return rows;
+  }
+
+  public claimDiscordOutboxGroup(rows: readonly OutboxDelivery[]): boolean {
+    return transaction(this.#database, () => {
+      if (!this.#validDiscordGroup(rows, "pending")) return false;
+      const now = this.clock.now();
+      for (const row of rows) {
+        const changed = this.#database
+          .prepare(
+            "UPDATE outbox SET state = 'sending', attempts = attempts + 1, updated_at = ? WHERE id = ? AND user_id = ? AND state IN ('pending','retryable') AND attempts = ?",
+          )
+          .run(now, row.id, row.userId, row.attempts ?? -1);
+        if (changed.changes !== 1n)
+          throw new Error("Discord group claim changed concurrently");
+      }
+      return true;
+    });
+  }
+
+  public markDiscordOutboxGroupSent(rows: readonly OutboxDelivery[]): boolean {
+    return this.#markDiscordOutboxGroup(rows, "sent");
+  }
+
+  public markDiscordOutboxGroupRetryable(
+    rows: readonly OutboxDelivery[],
+  ): boolean {
+    return this.#markDiscordOutboxGroup(rows, "retryable");
+  }
+
+  #markDiscordOutboxGroup(
+    rows: readonly OutboxDelivery[],
+    outcome: "sent" | "retryable",
+  ): boolean {
+    return transaction(this.#database, () => {
+      if (!this.#validDiscordGroup(rows, "sending")) return false;
+      const now = this.clock.now();
+      for (const row of rows) {
+        const state = outcome === "sent" ? "sent" : undefined;
+        const changed =
+          state === undefined
+            ? this.#database
+                .prepare(
+                  "UPDATE outbox SET state = CASE WHEN attempts >= 5 THEN 'failed' ELSE 'retryable' END, updated_at = ? WHERE id = ? AND user_id = ? AND state = 'sending'",
+                )
+                .run(now, row.id, row.userId)
+            : this.#database
+                .prepare(
+                  "UPDATE outbox SET state = ?, updated_at = ? WHERE id = ? AND user_id = ? AND state = 'sending'",
+                )
+                .run(state, now, row.id, row.userId);
+        if (changed.changes !== 1n)
+          throw new Error("Discord group completion changed concurrently");
+      }
+      return true;
+    });
+  }
+
+  #validDiscordGroup(
+    rows: readonly OutboxDelivery[],
+    expected: "pending" | "sending",
+  ): boolean {
+    if (rows.length < 2 || rows.length > 9) return false;
+    const first = rows[0]!;
+    if (
+      !first.turnId ||
+      !first.endpointId ||
+      rows.some(
+        (row) =>
+          row.turnId !== first.turnId ||
+          row.userId !== first.userId ||
+          row.endpointId !== first.endpointId ||
+          row.accountId !== first.accountId ||
+          row.attempts !== first.attempts,
+      )
+    )
+      return false;
+    const states = this.#database
+      .prepare(
+        `SELECT o.id, o.kind, o.state, o.attempts, o.endpoint_id AS endpointId, e.account_id AS accountId, e.private_chat_id AS privateChatId, e.kind AS channelKind FROM outbox o JOIN channel_endpoints e ON e.id = o.endpoint_id AND e.user_id = o.user_id WHERE o.turn_id = ? AND o.user_id = ? ORDER BY o.created_at, o.id`,
+      )
+      .all(first.turnId, first.userId) as {
+      id: string;
+      kind: "text" | "artifact";
+      state: string;
+      attempts: number | bigint;
+      endpointId: string;
+      accountId: string;
+      privateChatId: string;
+      channelKind: string;
+    }[];
+    if (
+      states.length !== rows.length ||
+      states.filter((row) => row.kind === "text").length !== 1 ||
+      states.filter((row) => row.kind === "artifact").length < 1 ||
+      states.some((row) => row.channelKind !== "discord")
+    )
+      return false;
+    const ids = new Set(rows.map((row) => row.id));
+    if (
+      states.some(
+        (row) =>
+          !ids.has(row.id) ||
+          row.endpointId !== first.endpointId ||
+          row.accountId !== first.accountId ||
+          row.privateChatId !== first.privateChatId,
+      )
+    )
+      return false;
+    const validStates = states.every((row) =>
+      expected === "sending"
+        ? row.state === "sending" &&
+          Number(row.attempts) === (first.attempts ?? 0) + 1
+        : row.state === first.outboxState &&
+          Number(row.attempts) === first.attempts,
+    );
+    return validStates;
+  }
+
   #pendingOutbox(
     channel: "telegram" | "wechat" | "wecom" | "discord",
     accountId: string,
     limit: number,
+    turnId?: string,
   ): readonly OutboxDelivery[] {
     return this.#database
       .prepare(
@@ -2589,7 +2767,7 @@ export class HitchStore {
                 CASE WHEN e.kind IN ('telegram', 'discord') THEN e.private_chat_id
                      ELSE e.platform_user_id END AS privateChatId,
                 o.kind, o.payload_text AS text, o.turn_id AS turnId,
-                o.endpoint_id AS endpointId, o.attempts,
+                o.endpoint_id AS endpointId, o.attempts, o.state AS outboxState,
                 t.discord_source AS discordSource,
                 a.id AS artifactId, a.storage_key AS storageKey, a.sha256,
                 a.bytes, a.media_kind AS mediaKind, a.mime_type AS mimeType,
@@ -2601,9 +2779,10 @@ export class HitchStore {
          LEFT JOIN turns t ON t.id = o.turn_id AND t.user_id = o.user_id
          WHERE e.kind = ? AND e.account_id = ? AND e.enabled = 1 AND u.enabled = 1
            AND o.state IN ('pending', 'retryable') AND o.attempts < 5
+           AND (? IS NULL OR o.turn_id = ?)
          ORDER BY o.created_at, o.id LIMIT ?`,
       )
-      .all(channel, accountId, limit)
+      .all(channel, accountId, turnId ?? null, turnId ?? null, limit)
       .map((value) => {
         const row = value as {
           id: string;
@@ -2615,6 +2794,7 @@ export class HitchStore {
           turnId: string | null;
           endpointId: string;
           attempts: number;
+          outboxState: "pending" | "retryable";
           discordSource: string | null;
           artifactId: string | null;
           storageKey: string | null;
@@ -2630,9 +2810,14 @@ export class HitchStore {
           accountId: row.accountId,
           privateChatId: row.privateChatId,
           kind: row.kind,
-          ...(row.turnId === null ? {} : { turnId: row.turnId }),
-          endpointId: row.endpointId,
-          attempts: row.attempts,
+          ...(channel === "discord"
+            ? {
+                ...(row.turnId === null ? {} : { turnId: row.turnId }),
+                endpointId: row.endpointId,
+                attempts: Number(row.attempts),
+                outboxState: row.outboxState,
+              }
+            : {}),
           ...(row.discordSource === null
             ? {}
             : {

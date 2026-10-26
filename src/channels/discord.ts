@@ -47,7 +47,17 @@ export type DiscordStore = Pick<
   | "markOutboxRetryable"
   | "markOutboxFailed"
   | "runningTurnEndpoints"
->;
+> &
+  Partial<
+    Pick<
+      HitchStore,
+      | "discordRichReplyGroup"
+      | "pendingDiscordRichReplyCandidates"
+      | "claimDiscordOutboxGroup"
+      | "markDiscordOutboxGroupSent"
+      | "markDiscordOutboxGroupRetryable"
+    >
+  >;
 export type DiscordRouteApplication = Pick<
   HitchApplication,
   "discordRouteAllowed" | "receiveDiscord"
@@ -977,11 +987,67 @@ export class DiscordWorker {
   }
   async #deliverPending(signal?: AbortSignal): Promise<number> {
     let sent = 0;
-    for (const delivery of this.store.pendingDiscordOutbox(
-      this.account.id,
-      20,
-    )) {
+    const consumed = new Set<string>();
+    const page = this.store.pendingDiscordOutbox(this.account.id, 20);
+    const candidates =
+      this.store.pendingDiscordRichReplyCandidates?.(this.account.id) ?? [];
+    for (const delivery of [...page, ...candidates]) {
       if (signal?.aborted) break;
+      if (consumed.has(delivery.id)) continue;
+      const group = this.store.discordRichReplyGroup?.(delivery);
+      const textRow = group?.find((row) => row.kind === "text");
+      const files = group?.filter((row) => row.kind === "artifact") ?? [];
+      const text = textRow?.text;
+      const fitsRichLimits =
+        group !== null &&
+        group !== undefined &&
+        textRow !== undefined &&
+        text !== undefined &&
+        text.length > 0 &&
+        text.length <= MAX_TEXT_UNITS &&
+        files.length > 0 &&
+        files.length <= 8 &&
+        files.every(
+          (row) =>
+            row.artifact !== undefined &&
+            row.artifact.userId === row.userId &&
+            row.artifact.bytes <= DISCORD_UPLOAD_LIMIT_BYTES,
+        ) &&
+        files.reduce((sum, row) => sum + (row.artifact?.bytes ?? 0), 0) <=
+          DISCORD_UPLOAD_LIMIT_BYTES;
+      const canRichSend =
+        fitsRichLimits &&
+        this.#client.sendRichReply !== undefined &&
+        this.#media !== undefined &&
+        this.store.claimDiscordOutboxGroup !== undefined;
+      if (canRichSend) {
+        if (!this.store.claimDiscordOutboxGroup!(group)) continue;
+        group.forEach((row) => consumed.add(row.id));
+        try {
+          const source = textRow.discordSource;
+          await this.#client.sendRichReply!(
+            delivery.privateChatId,
+            text!,
+            files.map((row) => row.artifact!),
+            this.#media!,
+            source === undefined ? {} : { replyToMessageId: source.messageId },
+            signal,
+          );
+          abortCheck(signal);
+          if (this.store.markDiscordOutboxGroupSent?.(group))
+            sent += group.length;
+        } catch (error) {
+          this.store.markDiscordOutboxGroupRetryable?.(group);
+          const diagnostic = discordFailureDiagnostic(error);
+          this.#log(
+            diagnostic === undefined
+              ? "delivery failed; outbox retry retained"
+              : `delivery failed; outbox retry retained; phase=${diagnostic.phase}${diagnostic.kind === undefined ? "" : ` kind=${diagnostic.kind}`}${diagnostic.status === undefined ? "" : ` status=${diagnostic.status}`}${diagnostic.code === undefined ? "" : ` code=${diagnostic.code}`}${diagnostic.transportCode === undefined ? "" : ` transport=${diagnostic.transportCode}`}`,
+          );
+        }
+        continue;
+      }
+      consumed.add(delivery.id);
       if (!this.store.claimOutbox(delivery)) continue;
       try {
         const options =
