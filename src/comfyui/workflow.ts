@@ -118,6 +118,8 @@ export class ComfyWorkflowPolicy {
   constructor(definition: ComfyWorkflowDefinition) {
     try {
       this.definition = freeze(this.compile(definition));
+      // TypeScript readonly alone does not stop replacing the policy at runtime.
+      Object.freeze(this);
     } catch {
       throw new Error(BAD);
     }

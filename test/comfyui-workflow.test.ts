@@ -185,3 +185,22 @@ test("limits outputs and serialized graph size at compile and render time", () =
   tooLarge.graph["2"]!.inputs.value = "x".repeat(256 * 1024);
   assert.throws(() => new ComfyWorkflowPolicy(tooLarge));
 });
+
+test("validated policy cannot be replaced or rebound at runtime", () => {
+  const policy = new ComfyWorkflowPolicy(fixture());
+  const definition = policy.definition;
+  const replacement = fixture();
+  replacement.outputNodes = ["1"];
+  assert.equal(Reflect.set(policy, "definition", replacement), false);
+  assert.throws(() =>
+    Object.defineProperty(policy, "definition", { value: replacement }),
+  );
+  assert.equal(
+    Reflect.set(definition.graph["2"]!.inputs, "value", "mutated"),
+    false,
+  );
+  assert.equal(policy.definition, definition);
+  assert.deepEqual(policy.render().outputNodes, ["5"]);
+  assert.equal(policy.render().graph["2"]!.inputs.value, "test prompt");
+  assert.throws(() => policy.render({ undeclared: "test prompt" }));
+});
