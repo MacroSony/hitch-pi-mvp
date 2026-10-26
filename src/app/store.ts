@@ -2582,7 +2582,12 @@ export class HitchStore {
   /** Find eligible Turn-group seeds independently of the bounded ordinary outbox page. */
   public pendingDiscordRichReplyCandidates(
     accountId: string,
+    limit = 20,
   ): readonly OutboxDelivery[] {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 20)
+      throw new RangeError(
+        "Discord rich reply candidate limit must be between 1 and 20",
+      );
     const turns = this.#database
       .prepare(
         `SELECT o.turn_id AS turnId, min(o.created_at) AS createdAt
@@ -2593,9 +2598,9 @@ export class HitchStore {
         AND sum(CASE WHEN o.kind = 'artifact' THEN 1 ELSE 0 END) BETWEEN 1 AND 8
         AND min(o.attempts) < 5 AND min(o.attempts) = max(o.attempts)
         AND min(o.state) = max(o.state) AND min(o.state) IN ('pending','retryable')
-      ORDER BY createdAt, turnId`,
+      ORDER BY createdAt, turnId LIMIT ?`,
       )
-      .all(accountId) as { turnId: string }[];
+      .all(accountId, limit) as { turnId: string }[];
     return turns.flatMap(({ turnId }) =>
       this.#pendingOutbox("discord", accountId, 9, turnId),
     );
@@ -2715,7 +2720,7 @@ export class HitchStore {
       return false;
     const states = this.#database
       .prepare(
-        `SELECT o.id, o.kind, o.state, o.attempts, o.endpoint_id AS endpointId, e.account_id AS accountId, e.private_chat_id AS privateChatId, e.kind AS channelKind FROM outbox o JOIN channel_endpoints e ON e.id = o.endpoint_id AND e.user_id = o.user_id WHERE o.turn_id = ? AND o.user_id = ? ORDER BY o.created_at, o.id`,
+        `SELECT o.id, o.kind, o.state, o.attempts, o.endpoint_id AS endpointId, e.account_id AS accountId, e.private_chat_id AS privateChatId, e.kind AS channelKind, e.enabled AS endpointEnabled, u.enabled AS userEnabled, t.state AS turnState FROM outbox o JOIN channel_endpoints e ON e.id = o.endpoint_id AND e.user_id = o.user_id JOIN users u ON u.id = o.user_id JOIN turns t ON t.id = o.turn_id AND t.user_id = o.user_id AND t.endpoint_id = o.endpoint_id WHERE o.turn_id = ? AND o.user_id = ? ORDER BY o.created_at, o.id`,
       )
       .all(first.turnId, first.userId) as {
       id: string;
@@ -2726,12 +2731,21 @@ export class HitchStore {
       accountId: string;
       privateChatId: string;
       channelKind: string;
+      endpointEnabled: number;
+      userEnabled: number;
+      turnState: string;
     }[];
     if (
       states.length !== rows.length ||
       states.filter((row) => row.kind === "text").length !== 1 ||
       states.filter((row) => row.kind === "artifact").length < 1 ||
-      states.some((row) => row.channelKind !== "discord")
+      states.some(
+        (row) =>
+          row.channelKind !== "discord" ||
+          Number(row.endpointEnabled) !== 1 ||
+          Number(row.userEnabled) !== 1 ||
+          row.turnState !== "terminal",
+      )
     )
       return false;
     const ids = new Set(rows.map((row) => row.id));

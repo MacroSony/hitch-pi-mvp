@@ -989,12 +989,25 @@ export class DiscordWorker {
     let sent = 0;
     const consumed = new Set<string>();
     const page = this.store.pendingDiscordOutbox(this.account.id, 20);
-    const candidates =
-      this.store.pendingDiscordRichReplyCandidates?.(this.account.id) ?? [];
+    const richStoreAvailable =
+      this.store.discordRichReplyGroup !== undefined &&
+      this.store.pendingDiscordRichReplyCandidates !== undefined &&
+      this.store.claimDiscordOutboxGroup !== undefined &&
+      this.store.markDiscordOutboxGroupSent !== undefined &&
+      this.store.markDiscordOutboxGroupRetryable !== undefined;
+    const richClientAvailable =
+      richStoreAvailable &&
+      this.#client.sendRichReply !== undefined &&
+      this.#media !== undefined;
+    const candidates = richStoreAvailable
+      ? this.store.pendingDiscordRichReplyCandidates!(this.account.id)
+      : [];
     for (const delivery of [...page, ...candidates]) {
       if (signal?.aborted) break;
       if (consumed.has(delivery.id)) continue;
-      const group = this.store.discordRichReplyGroup?.(delivery);
+      const group = richStoreAvailable
+        ? this.store.discordRichReplyGroup!(delivery)
+        : undefined;
       const textRow = group?.find((row) => row.kind === "text");
       const files = group?.filter((row) => row.kind === "artifact") ?? [];
       const text = textRow?.text;
@@ -1015,14 +1028,10 @@ export class DiscordWorker {
         ) &&
         files.reduce((sum, row) => sum + (row.artifact?.bytes ?? 0), 0) <=
           DISCORD_UPLOAD_LIMIT_BYTES;
-      const canRichSend =
-        fitsRichLimits &&
-        this.#client.sendRichReply !== undefined &&
-        this.#media !== undefined &&
-        this.store.claimDiscordOutboxGroup !== undefined;
+      const canRichSend = fitsRichLimits && richClientAvailable;
       if (canRichSend) {
-        if (!this.store.claimDiscordOutboxGroup!(group)) continue;
         group.forEach((row) => consumed.add(row.id));
+        if (!this.store.claimDiscordOutboxGroup!(group)) continue;
         try {
           const source = textRow.discordSource;
           await this.#client.sendRichReply!(

@@ -616,6 +616,85 @@ test("Discord rich group claim and sent updates roll back rather than partially 
   }
 });
 
+test("Discord group DB revalidation rejects stale disabled, nonterminal, and wrong-kind groups", async () => {
+  const f = fixture();
+  try {
+    f.output([
+      await object(f, Buffer.from("validation bytes"), "validate.txt"),
+    ]);
+    f.app.receiveDiscord(
+      "bot",
+      "bot-user",
+      dm("rich-validate", "create", false),
+    );
+    await f.app.drain();
+    const rows = f.store.discordRichReplyGroup(
+      f.store.pendingDiscordOutbox("bot")[0]!,
+    )!;
+    const endpointId = rows[0]!.endpointId!;
+    const userId = rows[0]!.userId;
+    const turnId = rows[0]!.turnId!;
+    const db = f.foundation.database.connection;
+    const state = (): Array<{ state: string; attempts: number | bigint }> =>
+      db
+        .prepare(
+          "SELECT state, attempts FROM outbox WHERE turn_id = ? ORDER BY created_at,id",
+        )
+        .all(turnId) as Array<{ state: string; attempts: number | bigint }>;
+    const assertPending = (): void =>
+      assert.deepEqual(
+        state().map((row) => [row.state, Number(row.attempts)]),
+        [
+          ["pending", 0],
+          ["pending", 0],
+        ],
+      );
+
+    db.prepare("UPDATE channel_endpoints SET enabled = 0 WHERE id = ?").run(
+      endpointId,
+    );
+    assert.equal(f.store.claimDiscordOutboxGroup(rows), false);
+    assertPending();
+    db.prepare("UPDATE channel_endpoints SET enabled = 1 WHERE id = ?").run(
+      endpointId,
+    );
+
+    db.prepare("UPDATE users SET enabled = 0 WHERE id = ?").run(userId);
+    assert.equal(f.store.claimDiscordOutboxGroup(rows), false);
+    assertPending();
+    db.prepare("UPDATE users SET enabled = 1 WHERE id = ?").run(userId);
+
+    db.prepare("UPDATE turns SET state = 'queued' WHERE id = ?").run(turnId);
+    assert.equal(f.store.claimDiscordOutboxGroup(rows), false);
+    assertPending();
+    db.prepare("UPDATE turns SET state = 'terminal' WHERE id = ?").run(turnId);
+
+    db.prepare(
+      "UPDATE channel_endpoints SET kind = 'telegram', discord_mode = NULL WHERE id = ?",
+    ).run(endpointId);
+    assert.equal(f.store.claimDiscordOutboxGroup(rows), false);
+    assertPending();
+    db.prepare(
+      "UPDATE channel_endpoints SET kind = 'discord', discord_mode = 'dm' WHERE id = ?",
+    ).run(endpointId);
+
+    assert.equal(f.store.claimDiscordOutboxGroup(rows), true);
+    db.prepare("UPDATE channel_endpoints SET enabled = 0 WHERE id = ?").run(
+      endpointId,
+    );
+    assert.equal(f.store.markDiscordOutboxGroupSent(rows), false);
+    assert.deepEqual(
+      state().map((row) => [row.state, Number(row.attempts)]),
+      [
+        ["sending", 1],
+        ["sending", 1],
+      ],
+    );
+  } finally {
+    f.foundation.close();
+  }
+});
+
 test("Discord rich Turn group survives retry/restart and claims and marks every row together", async () => {
   const f = fixture();
   try {
@@ -734,6 +813,102 @@ test("Discord rich selection crosses the pending page boundary and does not rese
     await f.worker.deliverPending();
     assert.equal(f.client.richReplies.length, 1);
     assert.equal(f.client.texts.includes("done"), false);
+  } finally {
+    f.foundation.close();
+  }
+});
+
+test("Discord missing rich completion API falls back to individual row delivery", async () => {
+  const f = fixture();
+  try {
+    f.output([await object(f, Buffer.from("fallback bytes"), "fallback.txt")]);
+    f.app.receiveDiscord(
+      "bot",
+      "bot-user",
+      dm("rich-no-completion", "create", false),
+    );
+    await f.app.drain();
+    const store = new Proxy(f.store, {
+      get(target, property) {
+        if (property === "markDiscordOutboxGroupRetryable") return undefined;
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const worker = new DiscordWorker({ id: "bot" }, f.app, store, {
+      client: f.client,
+      media: f.media,
+    });
+    await worker.deliverPending();
+    assert.equal(f.client.richReplies.length, 0);
+    assert.equal(f.client.texts.length, 1);
+    assert.equal(f.client.uploads.length, 1);
+    assert.equal(f.store.pendingDiscordOutbox("bot").length, 0);
+  } finally {
+    f.foundation.close();
+  }
+});
+
+test("Discord failed rich group claim consumes every snapshot member without sending", async () => {
+  const f = fixture();
+  try {
+    f.output([await object(f, Buffer.from("claim race"), "claim.txt")]);
+    f.app.receiveDiscord(
+      "bot",
+      "bot-user",
+      dm("rich-claim-race", "create", false),
+    );
+    await f.app.drain();
+    const store = new Proxy(f.store, {
+      get(target, property) {
+        if (property === "claimDiscordOutboxGroup") return () => false;
+        const value = Reflect.get(target, property, target) as unknown;
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const worker = new DiscordWorker({ id: "bot" }, f.app, store, {
+      client: f.client,
+      media: f.media,
+    });
+    await worker.deliverPending();
+    assert.equal(f.client.richReplies.length, 0);
+    assert.equal(f.client.texts.length, 0);
+    assert.equal(f.client.uploads.length, 0);
+    const rows = f.store.pendingDiscordOutbox("bot");
+    assert.equal(rows.length, 2);
+    assert.ok(
+      rows.every((row) => row.attempts === 0 && row.outboxState === "pending"),
+    );
+  } finally {
+    f.foundation.close();
+  }
+});
+
+test("Discord rich candidate turn page is bounded and advances after completed groups", async () => {
+  const f = fixture();
+  try {
+    const artifact = await object(f, Buffer.from("many groups"), "many.txt");
+    for (let i = 0; i < 21; i++) {
+      f.output([artifact]);
+      f.app.receiveDiscord("bot", "bot-user", dm(`many-${i}`, "create", false));
+      await f.app.drain();
+    }
+    const first = f.store.pendingDiscordRichReplyCandidates("bot");
+    const firstTurns = new Set(first.map((row) => row.turnId));
+    assert.equal(firstTurns.size, 20);
+    assert.equal(first.length, 40);
+    assert.equal(f.store.pendingDiscordRichReplyCandidates("bot", 1).length, 2);
+    assert.throws(
+      () => f.store.pendingDiscordRichReplyCandidates("bot", 21),
+      RangeError,
+    );
+    await f.worker.deliverPending();
+    assert.equal(f.client.richReplies.length, 20);
+    const remaining = f.store.pendingDiscordRichReplyCandidates("bot");
+    assert.equal(new Set(remaining.map((row) => row.turnId)).size, 1);
+    await f.worker.deliverPending();
+    assert.equal(f.client.richReplies.length, 21);
+    assert.equal(f.store.pendingDiscordRichReplyCandidates("bot").length, 0);
   } finally {
     f.foundation.close();
   }
