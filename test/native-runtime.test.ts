@@ -673,6 +673,94 @@ test(
   },
 );
 
+test(
+  "opt-in native-style image input remains read-only, can be copied into workspace, and persists across sandbox operations",
+  { skip: process.env.HITCH_RUN_SANDBOX_TESTS !== "1" },
+  async () => {
+    const repository = resolve(
+      dirname(fileURLToPath(import.meta.url)),
+      "../..",
+    );
+    const assets = join(repository, "dist", "sandbox");
+    const root = mkdtempSync(join(tmpdir(), "hitch-image-sandbox-test-"));
+    chmodSync(root, 0o700);
+    const workspace = join(root, "workspace");
+    const inbox = join(root, "inbox");
+    const publishRoot = join(root, "publish");
+    for (const path of [workspace, inbox, publishRoot]) privateDirectory(path);
+    const original = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/pWQAAAAASUVORK5CYII=",
+      "base64",
+    );
+    const inboxName = "1-0123456789ab.png";
+    const inboxImage = join(inbox, inboxName);
+    writeFileSync(inboxImage, original, { mode: 0o400 });
+    const worker = join(assets, "sandbox-worker.mjs");
+    const helper = join(assets, "secure-bwrap-helper");
+    const sha256 = (value: Buffer | string): string =>
+      createHash("sha256").update(value).digest("hex");
+    const backendInput = {
+      workspace,
+      inbox,
+      publishRoot,
+      worker,
+      helper,
+      log: join(root, "sandbox.log"),
+      turnHandle: randomBytes(16).toString("hex"),
+      unitPrefix: randomBytes(8).toString("hex"),
+      workerSha256: sha256(readFileSync(worker)),
+      helperSha256: sha256(readFileSync(helper)),
+      temporaryBytes: 4 * 1024 * 1024,
+      memoryBytes: 256 * 1024 * 1024,
+      maximumProcesses: 32,
+      wallMilliseconds: 8_000,
+    };
+    try {
+      const backend = (await import(
+        pathToFileURL(join(assets, "sandbox-backend.mjs")).href
+      )) as {
+        executeSandboxRequest(
+          input: Record<string, unknown>,
+          request: Record<string, unknown>,
+        ): Promise<unknown>;
+        activeSandboxUnitCount(): number;
+      };
+      const first = (await backend.executeSandboxRequest(backendInput, {
+        operation: "bash",
+        input: {
+          command: `cp /inbox/${inboxName} /workspace/saved.png && sha256sum /workspace/saved.png > /workspace/saved.sha256`,
+          timeoutMs: 5_000,
+        },
+      })) as { exitCode: number; output: string };
+      assert.equal(first.exitCode, 0, first.output);
+      assert.deepEqual(readFileSync(join(workspace, "saved.png")), original);
+      assert.equal(statSync(inboxImage).mode & 0o222, 0);
+      assert.equal(
+        readFileSync(join(workspace, "saved.sha256"), "utf8").trim(),
+        `${sha256(original)}  /workspace/saved.png`,
+      );
+
+      const second = (await backend.executeSandboxRequest(backendInput, {
+        operation: "bash",
+        input: {
+          command: `sha256sum -c /workspace/saved.sha256`,
+          timeoutMs: 5_000,
+        },
+      })) as { exitCode: number; output: string };
+      assert.equal(second.exitCode, 0, second.output);
+      assert.match(second.output, /saved\.png: OK/u);
+      const denied = (await backend.executeSandboxRequest(backendInput, {
+        operation: "bash",
+        input: { command: "cat /etc/shadow", timeoutMs: 5_000 },
+      })) as { exitCode: number };
+      assert.notEqual(denied.exitCode, 0);
+      assert.equal(backend.activeSandboxUnitCount(), 0);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
+
 test("toolArgPreview prefers primary keys, flattens whitespace, and clips", () => {
   assert.equal(toolArgPreview(undefined), "");
   assert.equal(toolArgPreview(null), "");
