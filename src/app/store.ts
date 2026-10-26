@@ -2066,6 +2066,73 @@ export class HitchStore {
           };
           return { ...artifact, bytes: Number(artifact.bytes) };
         });
+      let historicalAttachments: Array<{
+        artifact: RuntimeArtifact;
+        originalOrdinal: number;
+      }> = [];
+      const isDiscord =
+        this.#database
+          .prepare(
+            "SELECT 1 FROM channel_endpoints WHERE id = ? AND user_id = ? AND kind = 'discord'",
+          )
+          .get(row.endpoint_id, row.user_id) !== undefined;
+      if (isDiscord) {
+        const rows = this.#database
+          .prepare(
+            `SELECT a.id, a.user_id AS userId, a.storage_key AS storageKey,
+                  a.sha256, a.bytes, a.media_kind AS mediaKind,
+                  a.mime_type AS mimeType, a.display_name AS displayName,
+                  ta.ordinal AS originalOrdinal
+           FROM turns previous
+           JOIN turn_artifacts ta ON ta.turn_id = previous.id AND ta.user_id = previous.user_id AND ta.direction = 'inbound'
+           JOIN artifacts a ON a.id = ta.artifact_id AND a.user_id = ta.user_id
+           WHERE previous.user_id = ? AND previous.session_id = ?
+             AND previous.state = 'terminal' AND previous.ordinal < ?
+           ORDER BY previous.ordinal DESC, ta.ordinal DESC`,
+          )
+          .all(
+            row.user_id,
+            row.session_id,
+            (
+              this.#database
+                .prepare(
+                  "SELECT ordinal FROM turns WHERE id = ? AND user_id = ?",
+                )
+                .get(row.id, row.user_id) as { ordinal: number }
+            ).ordinal,
+          ) as Array<
+          Omit<RuntimeArtifact, "bytes"> & {
+            bytes: bigint;
+            originalOrdinal: number;
+          }
+        >;
+        const seen = new Set(artifacts.map((artifact) => artifact.id));
+        let count = artifacts.length;
+        let bytes = artifacts.reduce(
+          (sum, artifact) => sum + artifact.bytes,
+          0,
+        );
+        const occupiedOrdinals = new Set(
+          artifacts.map((_, ordinal) => ordinal),
+        );
+        for (const value of rows) {
+          const artifact = { ...value, bytes: Number(value.bytes) };
+          if (
+            seen.has(artifact.id) ||
+            occupiedOrdinals.has(artifact.originalOrdinal)
+          )
+            continue;
+          if (count >= 8 || bytes + artifact.bytes > 40 * 1024 * 1024) continue;
+          seen.add(artifact.id);
+          occupiedOrdinals.add(artifact.originalOrdinal);
+          count += 1;
+          bytes += artifact.bytes;
+          historicalAttachments.push({
+            artifact,
+            originalOrdinal: artifact.originalOrdinal,
+          });
+        }
+      }
       const changed = this.#database
         .prepare(
           "UPDATE turns SET state = 'running', updated_at = ? WHERE id = ? AND user_id = ? AND state = 'queued'",
@@ -2099,6 +2166,9 @@ export class HitchStore {
           : { thinkingLevel: row.thinking_level }),
         ...(forgeSelection === undefined ? {} : { forgeSelection }),
         ...(artifacts.length === 0 ? {} : { artifacts }),
+        ...(historicalAttachments.length === 0
+          ? {}
+          : { historicalAttachments }),
         ...(row.operation_kind === "publish" && row.publish_path !== null
           ? { publishPath: row.publish_path }
           : {}),

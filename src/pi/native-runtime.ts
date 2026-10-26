@@ -1866,10 +1866,20 @@ export class NativePiRuntime implements AgentRuntime {
         contextUsage: null,
       };
     const inputArtifacts = turn.artifacts ?? [];
+    const historicalAttachments = turn.historicalAttachments ?? [];
+    const allArtifacts = [
+      ...inputArtifacts,
+      ...historicalAttachments.map((item) => item.artifact),
+    ];
     if (
-      inputArtifacts.length > 8 ||
-      inputArtifacts.some((artifact) => artifact.userId !== turn.userId) ||
-      inputArtifacts.reduce((total, artifact) => total + artifact.bytes, 0) >
+      allArtifacts.length > 8 ||
+      allArtifacts.some(
+        (artifact) =>
+          artifact.userId !== turn.userId ||
+          artifact.bytes < 1 ||
+          artifact.bytes > 20 * 1024 * 1024,
+      ) ||
+      allArtifacts.reduce((total, artifact) => total + artifact.bytes, 0) >
         40 * 1024 * 1024
     ) {
       return { outcome: "unknown", text: "", sessionReusable: false };
@@ -1933,6 +1943,8 @@ export class NativePiRuntime implements AgentRuntime {
     }> = [];
     const inboxLines: string[] = [];
     const imageInboxLines: string[] = [];
+    const historicalLines: string[] = [];
+    const usedPaths = new Set<string>();
     try {
       for (const [ordinal, artifact] of inputArtifacts.entries()) {
         const path = this.#media.materializeInbox(
@@ -1940,6 +1952,7 @@ export class NativePiRuntime implements AgentRuntime {
           context.inbox,
           ordinal,
         );
+        usedPaths.add(path);
         const line = `${path} (${artifact.displayName}; ${artifact.mimeType}; ${artifact.bytes} bytes)`;
         if (artifact.mediaKind === "image") {
           imageInboxLines.push(line);
@@ -1954,6 +1967,18 @@ export class NativePiRuntime implements AgentRuntime {
           inboxLines.push(line);
         }
       }
+      for (const item of historicalAttachments) {
+        const path = this.#media.materializeInbox(
+          item.artifact,
+          context.inbox,
+          item.originalOrdinal,
+        );
+        if (usedPaths.has(path)) continue;
+        usedPaths.add(path);
+        historicalLines.push(
+          `${path} (${item.artifact.displayName}; ${item.artifact.mimeType}; ${item.artifact.bytes} bytes; earlier turn original)`,
+        );
+      }
     } catch {
       rmSync(context.root, { recursive: true, force: true });
       return { outcome: "unknown", text: "", sessionReusable: false };
@@ -1967,6 +1992,11 @@ export class NativePiRuntime implements AgentRuntime {
     if (inboxLines.length > 0) {
       promptSections.push(
         `Hitch attached these opaque read-only files for this Turn:\n${inboxLines.join("\n")}`,
+      );
+    }
+    if (historicalLines.length > 0) {
+      promptSections.push(
+        `Bounded earlier-turn original files (not visual model input):\n${historicalLines.join("\n")}\nThis is a bounded recent window from this user and session, not a complete archive. Files are read-only; copy needed files into /workspace. Current-turn files are turn-local; earlier originals remain available only when listed here.`,
       );
     }
     const prompt =

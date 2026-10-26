@@ -13,6 +13,10 @@ export interface RuntimeTurn {
   readonly thinkingLevel?: ThinkingLevel;
   readonly forgeSelection?: ForgeSelection;
   readonly artifacts?: readonly RuntimeArtifact[];
+  readonly historicalAttachments?: readonly {
+    readonly artifact: RuntimeArtifact;
+    readonly originalOrdinal: number;
+  }[];
   readonly publishPath?: string;
   readonly compact?: boolean;
 }
