@@ -385,6 +385,7 @@ export class HitchStore implements ComfyJobLedger {
       JOIN users u ON u.id = j.user_id AND u.enabled = 1
       JOIN turns source ON source.id = j.source_turn_id AND source.user_id = j.user_id
         AND source.endpoint_id = j.endpoint_id AND source.session_id = j.session_id
+        AND source.state = 'terminal'
       JOIN turns completion ON completion.id = j.completion_turn_id AND completion.user_id = j.user_id
         AND completion.endpoint_id = j.endpoint_id AND completion.session_id = j.session_id
         AND completion.state = 'terminal' AND completion.outcome = 'succeeded'
@@ -401,9 +402,14 @@ export class HitchStore implements ComfyJobLedger {
           AND x.user_id = j.user_id AND x.endpoint_id = j.endpoint_id AND x.kind = 'artifact') = 1
     `,
       )
-      .all(jobId, userId) as unknown as RuntimeArtifact[];
+      .all(jobId, userId) as unknown as Array<
+      Omit<RuntimeArtifact, "bytes"> & { bytes: number | bigint }
+    >;
     if (rows.length !== 1) return null;
-    const artifact = rows[0]!;
+    const raw = rows[0]!;
+    const bytes = Number(raw.bytes);
+    if (!Number.isSafeInteger(bytes)) return null;
+    const artifact: RuntimeArtifact = { ...raw, bytes };
     return artifact.userId === userId &&
       artifact.mediaKind === "image" &&
       artifact.bytes > 0 &&
