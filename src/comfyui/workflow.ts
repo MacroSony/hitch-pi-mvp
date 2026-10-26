@@ -30,7 +30,6 @@ export interface ComfyWorkflowDefinition {
         min: number;
         max: number;
         step?: number;
-        values: readonly string[];
       }
     | { nodeId: string; input: string; type: "enum"; values: readonly string[] }
   >;
@@ -118,38 +117,18 @@ function inputPathExists(
   inputs: Record<string, JSONValue>,
   path: string,
 ): boolean {
-  if (!path || path.split(".").some((k) => !k || POISON.has(k))) return false;
-  let current: unknown = inputs;
-  for (const key of path.split(".")) {
-    if (
-      !current ||
-      typeof current !== "object" ||
-      Array.isArray(current) ||
-      !hasOwn(current, key)
-    )
-      return false;
-    current = (current as Record<string, unknown>)[key];
-  }
-  return true;
+  return Boolean(path) && !POISON.has(path) && hasOwn(inputs, path);
 }
 function literalPath(inputs: Record<string, JSONValue>, path: string): boolean {
-  if (!inputPathExists(inputs, path)) return false;
-  let current: unknown = inputs;
-  for (const key of path.split("."))
-    current = (current as Record<string, unknown>)[key];
-  return typeof current === "string";
+  return inputPathExists(inputs, path) && typeof inputs[path] === "string";
 }
 function setPath(
   inputs: Record<string, JSONValue>,
   path: string,
   value?: JSONValue,
 ): void {
-  const parts = path.split(".");
-  let current = inputs;
-  for (const key of parts.slice(0, -1))
-    current = current[key] as Record<string, JSONValue>;
-  if (value === undefined) delete current[parts[parts.length - 1]!];
-  else current[parts[parts.length - 1]!] = value;
+  if (value === undefined) delete inputs[path];
+  else inputs[path] = value;
 }
 
 function validateValue(
@@ -165,7 +144,14 @@ function validateValue(
       (binding.type === "number" && !Number.isFinite(value)) ||
       value < binding.min ||
       value > binding.max ||
-      (binding.step !== undefined && (value - binding.min) % binding.step !== 0)
+      (binding.step !== undefined &&
+        (binding.type === "integer"
+          ? (value - binding.min) % binding.step !== 0
+          : Math.abs(
+              (value - binding.min) / binding.step -
+                Math.round((value - binding.min) / binding.step),
+            ) >
+            1e-9 * Math.max(1, Math.abs((value - binding.min) / binding.step))))
     )
       fail();
   } else if (typeof value !== "string" || !binding.values.includes(value))
@@ -313,15 +299,7 @@ export class ComfyWorkflowPolicy {
         if (
           keys(raw).some(
             (k) =>
-              ![
-                "nodeId",
-                "input",
-                "type",
-                "min",
-                "max",
-                "step",
-                ...(type === "number" ? ["values"] : []),
-              ].includes(k),
+              !["nodeId", "input", "type", "min", "max", "step"].includes(k),
           ) ||
           !(type === "number"
             ? Number.isFinite(raw.min)
@@ -345,7 +323,6 @@ export class ComfyWorkflowPolicy {
                 type,
                 min: raw.min as number,
                 max: raw.max as number,
-                values: [],
               }
             : {
                 nodeId,
@@ -499,7 +476,10 @@ export class ComfyWorkflowPolicy {
         const path = uploadedFiles[slot];
         if (
           typeof path !== "string" ||
-          !/^hitch\/[a-f0-9]{64}\.(png|jpg|webp|mp4|wav|mp3|ogg)$/.test(path)
+          !/^hitch\/[a-f0-9]{64}\.(png|jpg|webp|mp4|wav|mp3|ogg)$/.test(path) ||
+          (binding.media === "image" && !/\.(png|jpg|webp)$/.test(path)) ||
+          (binding.media === "video" && !/\.mp4$/.test(path)) ||
+          (binding.media === "audio" && !/\.(wav|mp3|ogg)$/.test(path))
         )
           fail();
         setPath(graph[binding.nodeId]!.inputs, binding.input, path);

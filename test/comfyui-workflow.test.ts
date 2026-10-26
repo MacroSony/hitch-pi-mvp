@@ -239,7 +239,6 @@ test("number bindings accept bounded finite floats while legacy output shape sta
     min: 0.25,
     max: 5.5,
     step: 0.25,
-    values: [],
   };
   source.graph["6"]!.inputs.value = 1.25;
   const policy = new ComfyWorkflowPolicy(source);
@@ -249,6 +248,36 @@ test("number bindings accept bounded finite floats while legacy output shape sta
   );
   for (const n of [0, 5.6, 2.7, Infinity, NaN])
     assert.throws(() => policy.render({ duration: n }));
+  assert.throws(
+    () =>
+      new ComfyWorkflowPolicy({
+        ...source,
+        variables: {
+          ...source.variables,
+          bad: {
+            nodeId: "6",
+            input: "value",
+            type: "number",
+            min: 0,
+            max: 1,
+            values: [],
+          },
+        },
+      } as never),
+  );
+  const floatStep = {
+    ...source,
+    variables: {
+      ...source.variables,
+      duration: { ...source.variables.duration, min: 0.1, step: 0.1 },
+    },
+  };
+  floatStep.graph["6"]!.inputs.value = 0.3;
+  assert.equal(
+    new ComfyWorkflowPolicy(floatStep).render({ duration: 0.3 }).graph["6"]!
+      .inputs.value,
+    0.3,
+  );
   assert.deepEqual(
     Object.keys(new ComfyWorkflowPolicy(fixture()).render()).sort(),
     ["graph", "outputNodes"],
@@ -292,6 +321,7 @@ test("Qwen required image upload accepts only the digest-scoped host path", () =
     "hitch/../image.png",
     "hitch/xyz.png",
     "hitch/" + "c".repeat(64) + ".gif",
+    `hitch/${"c".repeat(64)}.mp4`,
     "C:\\tmp\\image.png",
     "file:///tmp/image.png",
   ])
@@ -351,74 +381,85 @@ test("FL2VA two optional endpoint uploads produce zero, one, or two connected re
   assert.equal("11" in two.graph, true);
 });
 
-test("Ref2VA image, video, and audio optional loader families prune independently without defaults", () => {
+test("Ref2VA literal dotted input keys disconnect and prune image, video, and audio loaders", () => {
   const ref = fixture();
   ref.graph["20"] = {
+    class_type: "MiniMaxH3ReferenceToVideo",
+    inputs: {
+      "ref_images.ref_image_0": ["40", 0],
+      "ref_videos.ref_video_0": ["49", 0],
+      "ref_video_audios.ref_video_audio_0": ["49", 1],
+      "ref_audios.ref_audio_0": ["45", 0],
+    },
+  };
+  ref.graph["40"] = {
     class_type: "LoadImage",
     inputs: { image: "secret-image-default.png" },
   };
-  ref.graph["21"] = {
-    class_type: "ImageCondition",
-    inputs: { image: ["20", 0] },
-  };
-  ref.graph["22"] = {
+  ref.graph["43"] = {
     class_type: "LoadVideo",
-    inputs: { video: "secret-video-default.mp4" },
+    inputs: { file: "secret-video-default.mp4" },
   };
-  ref.graph["23"] = {
+  ref.graph["49"] = {
     class_type: "GetVideoComponents",
-    inputs: { video: ["22", 0] },
+    inputs: { video: ["43", 0] },
   };
-  ref.graph["24"] = {
-    class_type: "VideoCondition",
-    inputs: { video: ["23", 0], audio: ["23", 1] },
-  };
-  ref.graph["25"] = {
+  ref.graph["45"] = {
     class_type: "LoadAudio",
     inputs: { audio: "secret-audio-default.wav" },
   };
-  ref.graph["26"] = {
-    class_type: "AudioCondition",
-    inputs: { audio: ["25", 0] },
-  };
-  ref.graph["5"]!.inputs = {
-    image: ["21", 0],
-    video: ["24", 0],
-    audio: ["26", 0],
-  };
+  ref.graph["5"]!.inputs = { h3: ["20", 0] };
   ref.files = {
     image: {
-      nodeId: "20",
+      nodeId: "40",
       input: "image",
       media: "image",
       optional: true,
-      disconnect: [{ nodeId: "21", input: "image" }],
+      disconnect: [{ nodeId: "20", input: "ref_images.ref_image_0" }],
     },
     video: {
-      nodeId: "22",
-      input: "video",
+      nodeId: "43",
+      input: "file",
       media: "video",
       optional: true,
-      disconnect: [{ nodeId: "23", input: "video" }],
+      disconnect: [
+        { nodeId: "20", input: "ref_videos.ref_video_0" },
+        { nodeId: "20", input: "ref_video_audios.ref_video_audio_0" },
+      ],
     },
     audio: {
-      nodeId: "25",
+      nodeId: "45",
       input: "audio",
       media: "audio",
       optional: true,
-      disconnect: [{ nodeId: "26", input: "audio" }],
+      disconnect: [{ nodeId: "20", input: "ref_audios.ref_audio_0" }],
     },
   };
   const policy = new ComfyWorkflowPolicy(ref);
   const none = policy.render();
-  for (const id of ["20", "22", "25"]) assert.equal(id in none.graph, false);
+  for (const id of ["40", "43", "49", "45"])
+    assert.equal(id in none.graph, false);
+  for (const key of [
+    "ref_images.ref_image_0",
+    "ref_videos.ref_video_0",
+    "ref_video_audios.ref_video_audio_0",
+    "ref_audios.ref_audio_0",
+  ])
+    assert.equal(key in none.graph["20"]!.inputs, false);
   assert.equal(JSON.stringify(none.graph).includes("secret-"), false);
   const video = policy.render({}, { video: `hitch/${"f".repeat(64)}.mp4` });
-  assert.equal("22" in video.graph, true);
-  assert.equal("23" in video.graph, true);
-  assert.equal("24" in video.graph, true);
-  assert.equal("20" in video.graph, false);
-  assert.equal("25" in video.graph, false);
+  assert.equal("43" in video.graph, true);
+  assert.equal("49" in video.graph, true);
+  assert.deepEqual(video.graph["20"]!.inputs["ref_videos.ref_video_0"], [
+    "49",
+    0,
+  ]);
+  assert.deepEqual(
+    video.graph["20"]!.inputs["ref_video_audios.ref_video_audio_0"],
+    ["49", 1],
+  );
+  assert.equal("40" in video.graph, false);
+  assert.equal("45" in video.graph, false);
   const all = policy.render(
     {},
     {
@@ -427,7 +468,7 @@ test("Ref2VA image, video, and audio optional loader families prune independentl
       audio: `hitch/${"c".repeat(64)}.wav`,
     },
   );
-  for (const id of ["20", "21", "22", "23", "24", "25", "26"])
+  for (const id of ["40", "43", "49", "45"])
     assert.equal(id in all.graph, true);
 });
 

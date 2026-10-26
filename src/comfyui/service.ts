@@ -298,7 +298,7 @@ export class ComfyService implements ComfyToolHost {
           const base = { name, type: binding.type };
           return binding.type === "string"
             ? { ...base, maxLength: binding.maxLength }
-            : binding.type === "integer"
+            : binding.type === "integer" || binding.type === "number"
               ? {
                   ...base,
                   min: binding.min,
