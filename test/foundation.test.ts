@@ -132,10 +132,27 @@ function seedDurableState(database: DatabaseSync): void {
     .run(endpoint.user_id, endpoint.id);
   database
     .prepare(
+      `INSERT INTO artifacts(id,user_id,storage_key,sha256,bytes,media_kind,mime_type,display_name,created_at)
+     VALUES ('artifact_migration', ?, 'alice/migration.blob', ?, 4, 'image', 'image/png', 'migration.png', 1)`,
+    )
+    .run(endpoint.user_id, "a".repeat(64));
+  database
+    .prepare(
+      "INSERT INTO turn_artifacts(turn_id,user_id,artifact_id,direction,ordinal) VALUES ('migration-turn',?,'artifact_migration','outbound',0)",
+    )
+    .run(endpoint.user_id);
+  database
+    .prepare(
       `INSERT INTO outbox(
          id, user_id, endpoint_id, turn_id, kind, payload_text, state,
          attempts, created_at, updated_at
        ) VALUES ('migration-outbox', ?, ?, 'migration-turn', 'text', 'world', 'pending', 0, 1, 1)`,
+    )
+    .run(endpoint.user_id, endpoint.id);
+  database
+    .prepare(
+      `INSERT INTO outbox(id,user_id,endpoint_id,turn_id,artifact_id,kind,payload_text,state,attempts,created_at,updated_at)
+     VALUES ('migration-artifact-outbox',?,?, 'migration-turn','artifact_migration','artifact',NULL,'pending',0,1,1)`,
     )
     .run(endpoint.user_id, endpoint.id);
 }
@@ -144,6 +161,7 @@ function downgradeToSchema8(database: DatabaseSync): void {
   database.exec(`
     PRAGMA foreign_keys = OFF;
     BEGIN;
+    DROP TABLE comfy_jobs;
     ALTER TABLE users DROP COLUMN scope_kind;
     ALTER TABLE turns DROP COLUMN discord_source;
     CREATE TABLE channel_endpoints_legacy (
@@ -602,7 +620,7 @@ test("schema 1 state migrates to current schema without losing Turns or outbox",
   const version = migrated.connection.prepare("PRAGMA user_version").get() as {
     user_version: bigint;
   };
-  assert.equal(version.user_version, 9n);
+  assert.equal(version.user_version, 10n);
   // The v7 turns CHECK must accept compact Turns after migration.
   const probeIds = migrated.connection
     .prepare(
@@ -683,7 +701,7 @@ test("schema 6 migrates context snapshot column without changing existing rows",
           user_version: bigint;
         }
       ).user_version,
-      9n,
+      10n,
     );
     assert.equal(rowCount(migrated.connection, "users"), userCount);
     assert.equal(
@@ -692,7 +710,7 @@ test("schema 6 migrates context snapshot column without changing existing rows",
           .prepare("SELECT value FROM app_meta WHERE key='schema_id'")
           .get() as { value: string }
       ).value,
-      "hitch-pi-mvp-schema-9",
+      "hitch-pi-mvp-schema-10",
     );
     assert.deepEqual(
       migrated.connection.prepare("PRAGMA foreign_key_check").all(),
@@ -722,7 +740,50 @@ test("schema 6 with unknown identity is rejected before migration", () => {
   );
 });
 
-test("schema 8 migrates non-empty state to schema 9", () => {
+test("schema 9 adds only Comfy jobs and preserves artifact, Turn and outbox rows", () => {
+  const setup = fixture();
+  const initial = bootstrapFoundation(setup.config());
+  seedDurableState(initial.database.connection);
+  initial.database.connection.exec(
+    "DROP TABLE comfy_jobs; UPDATE app_meta SET value='hitch-pi-mvp-schema-9' WHERE key='schema_id'; PRAGMA user_version=9;",
+  );
+  initial.close();
+  const migrated = openFoundationDatabase(setup.dataRoot);
+  try {
+    assert.equal(
+      (
+        migrated.connection.prepare("PRAGMA user_version").get() as {
+          user_version: bigint;
+        }
+      ).user_version,
+      10n,
+    );
+    assert.equal(rowCount(migrated.connection, "artifacts"), 1);
+    assert.equal(rowCount(migrated.connection, "turns"), 1);
+    assert.equal(rowCount(migrated.connection, "turn_artifacts"), 1);
+    assert.equal(rowCount(migrated.connection, "outbox"), 2);
+    assert.deepEqual(
+      migrated.connection.prepare("PRAGMA foreign_key_check").all(),
+      [],
+    );
+    assert.deepEqual(
+      (
+        migrated.connection
+          .prepare(
+            "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+          )
+          .all() as Array<{ name: string }>
+      )
+        .map(({ name }) => name)
+        .filter((name) => name === "comfy_jobs"),
+      ["comfy_jobs"],
+    );
+  } finally {
+    migrated.close();
+  }
+});
+
+test("schema 8 migrates non-empty state to schema 10", () => {
   const setup = fixture();
   const initial = bootstrapFoundation(setup.config());
   seedDurableState(initial.database.connection);
@@ -739,11 +800,11 @@ test("schema 8 migrates non-empty state to schema 9", () => {
           user_version: bigint;
         }
       ).user_version,
-      9n,
+      10n,
     );
     assert.equal(rowCount(migrated.connection, "sessions"), 1);
     assert.equal(rowCount(migrated.connection, "turns"), 1);
-    assert.equal(rowCount(migrated.connection, "outbox"), 1);
+    assert.equal(rowCount(migrated.connection, "outbox"), 2);
     assert.equal(
       (
         migrated.connection.prepare("PRAGMA foreign_keys").get() as {
@@ -820,7 +881,7 @@ test("actual-like schema 7 migrates non-empty state and repairs the FIFO index",
           user_version: bigint;
         }
       ).user_version,
-      9n,
+      10n,
     );
     assert.ok(
       migrated.connection
@@ -831,7 +892,7 @@ test("actual-like schema 7 migrates non-empty state and repairs the FIFO index",
     assert.equal(rowCount(migrated.connection, "local_requests"), 0);
     assert.equal(rowCount(migrated.connection, "sessions"), 1);
     assert.equal(rowCount(migrated.connection, "turns"), 1);
-    assert.equal(rowCount(migrated.connection, "outbox"), 1);
+    assert.equal(rowCount(migrated.connection, "outbox"), 2);
     assert.equal(
       (
         migrated.connection.prepare("PRAGMA foreign_keys").get() as {

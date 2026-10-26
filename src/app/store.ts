@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
 import { resolve, sep } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
@@ -16,6 +16,12 @@ import type {
 import { HELP_TEXT, type Command, type WakeCommand } from "./commands.js";
 import { AppError } from "./errors.js";
 import type { DiscordSource } from "../channels/discord-ingress.js";
+import type {
+  ComfyJob,
+  ComfyJobLedger,
+  ComfyJobState,
+} from "../comfyui/types.js";
+import type { RenderedComfyWorkflow } from "../comfyui/workflow.js";
 
 const MAX_SESSIONS_PER_USER = 32;
 const MAX_ACTIVE_AND_QUEUED = 4;
@@ -103,6 +109,40 @@ export interface SessionRow {
   readonly id: string;
   readonly name: string;
   readonly state: "active" | "stopped" | "quarantined";
+}
+
+interface ComfyJobRow {
+  id: string;
+  user_id: string;
+  source_turn_id: string;
+  endpoint_id: string;
+  session_id: string;
+  workflow_id: string;
+  snapshot_json: string;
+  state: ComfyJobState;
+  backend_prompt_id: string | null;
+  completion_turn_id: string | null;
+  created_at: number | bigint;
+  updated_at: number | bigint;
+  last_polled_at: number | bigint;
+}
+function comfyJob(row: ComfyJobRow): ComfyJob {
+  return {
+    id: row.id,
+    userId: row.user_id,
+    turnId: row.source_turn_id,
+    workflowId: row.workflow_id,
+    snapshot: JSON.parse(row.snapshot_json) as RenderedComfyWorkflow,
+    state: row.state,
+    ...(row.backend_prompt_id === null
+      ? {}
+      : { backendPromptId: row.backend_prompt_id }),
+    createdAt: Number(row.created_at),
+    updatedAt: Number(row.updated_at),
+    ...(row.completion_turn_id === null
+      ? {}
+      : { completionTurnId: row.completion_turn_id }),
+  };
 }
 
 interface ContextSnapshot extends ContextUsage {
@@ -235,7 +275,7 @@ function validArtifact(
   );
 }
 
-export class HitchStore {
+export class HitchStore implements ComfyJobLedger {
   readonly #database: DatabaseSync;
 
   public constructor(
@@ -249,6 +289,269 @@ export class HitchStore {
     > = new Map(),
   ) {
     this.#database = foundation.connection;
+  }
+
+  public createComfyJob(
+    userId: string,
+    turnId: string,
+    workflowId: string,
+    snapshot: RenderedComfyWorkflow,
+  ): ComfyJob {
+    return transaction(this.#database, () => {
+      const origin = this.#database
+        .prepare(
+          `SELECT t.session_id, t.endpoint_id FROM turns t
+         JOIN users u ON u.id = t.user_id AND u.enabled = 1
+         JOIN channel_endpoints e ON e.id = t.endpoint_id AND e.user_id = t.user_id AND e.enabled = 1 AND e.kind = 'discord'
+         WHERE t.id = ? AND t.user_id = ? AND t.state IN ('starting', 'running') AND t.discord_source IS NOT NULL`,
+        )
+        .get(turnId, userId) as
+        | { session_id: string; endpoint_id: string }
+        | undefined;
+      if (origin === undefined)
+        throw new AppError("rejected", "Comfy job origin is unavailable");
+      const active = this.#database
+        .prepare(
+          "SELECT count(*) AS count FROM comfy_jobs WHERE user_id = ? AND state IN ('prepared', 'submitting', 'submitted', 'submission_unknown')",
+        )
+        .get(userId) as { count: bigint };
+      if (Number(active.count) >= 3)
+        throw new AppError("busy", "Comfy job limit reached");
+      const snapshotJson = JSON.stringify(snapshot);
+      if (Buffer.byteLength(snapshotJson, "utf8") > 256 * 1024)
+        throw new AppError(
+          "rejected",
+          "Comfy workflow snapshot exceeds its limit",
+        );
+      const id = `paint_${randomBytes(12).toString("base64url")}`;
+      const now = this.clock.now();
+      this.#database
+        .prepare(
+          `INSERT INTO comfy_jobs(id, user_id, source_turn_id, endpoint_id, session_id, workflow_id,
+           snapshot_json, state, created_at, updated_at, last_polled_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'prepared', ?, ?, ?)`,
+        )
+        .run(
+          id,
+          userId,
+          turnId,
+          origin.endpoint_id,
+          origin.session_id,
+          workflowId,
+          snapshotJson,
+          now,
+          now,
+          0,
+        );
+      return {
+        id,
+        userId,
+        turnId,
+        workflowId,
+        snapshot: JSON.parse(snapshotJson) as RenderedComfyWorkflow,
+        state: "prepared",
+        createdAt: now,
+        updatedAt: now,
+      };
+    });
+  }
+
+  public getComfyJob(userId: string, jobId: string): ComfyJob | null {
+    const row = this.#database
+      .prepare("SELECT * FROM comfy_jobs WHERE id = ? AND user_id = ?")
+      .get(jobId, userId) as ComfyJobRow | undefined;
+    return row === undefined ? null : comfyJob(row);
+  }
+
+  public listComfyJobs(userId: string, limit = 20): readonly ComfyJob[] {
+    const bounded = Math.max(0, Math.min(20, Math.floor(limit)));
+    return (
+      this.#database
+        .prepare(
+          "SELECT * FROM comfy_jobs WHERE user_id = ? ORDER BY created_at, id LIMIT ?",
+        )
+        .all(userId, bounded) as unknown as ComfyJobRow[]
+    ).map(comfyJob);
+  }
+
+  public pendingComfyJobs(limit = 20): readonly ComfyJob[] {
+    const bounded = Math.max(0, Math.min(20, Math.floor(limit)));
+    return transaction(this.#database, () => {
+      const rows = this.#database
+        .prepare(
+          `SELECT j.* FROM comfy_jobs j
+         JOIN turns t ON t.id = j.source_turn_id AND t.user_id = j.user_id AND t.state = 'terminal'
+         JOIN users u ON u.id = j.user_id AND u.enabled = 1
+         JOIN channel_endpoints e ON e.id = j.endpoint_id AND e.user_id = j.user_id AND e.enabled = 1
+         WHERE j.state = 'submitted' ORDER BY j.last_polled_at, j.updated_at, j.id LIMIT ?`,
+        )
+        .all(bounded) as unknown as ComfyJobRow[];
+      const now = this.clock.now();
+      const update = this.#database.prepare(
+        "UPDATE comfy_jobs SET last_polled_at = ?, updated_at = ? WHERE id = ? AND state = 'submitted'",
+      );
+      for (const row of rows) {
+        update.run(now, now, row.id);
+        row.last_polled_at = now;
+        row.updated_at = now;
+      }
+      return rows.map(comfyJob);
+    });
+  }
+
+  public markComfyJobSubmitting(userId: string, jobId: string): boolean {
+    return this.#jobTransition(userId, jobId, "prepared", "submitting");
+  }
+  public markComfyJobSubmitted(
+    userId: string,
+    jobId: string,
+    backendPromptId: string,
+  ): boolean {
+    if (!/^[A-Za-z0-9_-]{1,128}$/u.test(backendPromptId)) return false;
+    return transaction(
+      this.#database,
+      () =>
+        this.#database
+          .prepare(
+            "UPDATE comfy_jobs SET state = 'submitted', backend_prompt_id = ?, updated_at = ? WHERE id = ? AND user_id = ? AND state = 'submitting'",
+          )
+          .run(backendPromptId, this.clock.now(), jobId, userId).changes === 1n,
+    );
+  }
+  public markComfyJobUnknown(userId: string, jobId: string): boolean {
+    return this.#jobTransition(
+      userId,
+      jobId,
+      "submitting",
+      "submission_unknown",
+    );
+  }
+  public markComfyJobRejected(userId: string, jobId: string): boolean {
+    return this.#jobTransition(userId, jobId, "submitting", "failed");
+  }
+  public markComfyJobCancelled(userId: string, jobId: string): boolean {
+    return this.#jobTransition(userId, jobId, "submitted", "cancelled");
+  }
+  public recoverComfyJobs(): void {
+    transaction(this.#database, () => {
+      const stale = this.clock.now() - 60_000;
+      this.#database
+        .prepare(
+          "UPDATE comfy_jobs SET state = 'submission_unknown', updated_at = ? WHERE state = 'submitting' AND updated_at <= ?",
+        )
+        .run(this.clock.now(), stale);
+      this.#database
+        .prepare(
+          "UPDATE comfy_jobs SET state = 'failed', updated_at = ? WHERE state = 'prepared' AND updated_at <= ?",
+        )
+        .run(this.clock.now(), stale);
+    });
+  }
+
+  public finishComfyJob(
+    userId: string,
+    jobId: string,
+    outcome: "completed" | "failed",
+    artifact?: RuntimeArtifact,
+  ): boolean {
+    return transaction(this.#database, () => {
+      const row = this.#database
+        .prepare(
+          `SELECT j.*, t.discord_source, t.prompt_text FROM comfy_jobs j
+         JOIN turns t ON t.id = j.source_turn_id AND t.user_id = j.user_id AND t.state = 'terminal'
+         JOIN users u ON u.id = j.user_id AND u.enabled = 1
+         JOIN channel_endpoints e ON e.id = j.endpoint_id AND e.user_id = j.user_id AND e.enabled = 1
+         WHERE j.id = ? AND j.user_id = ? AND j.state = 'submitted'`,
+        )
+        .get(jobId, userId) as
+        | (ComfyJobRow & { discord_source: string | null; prompt_text: string })
+        | undefined;
+      if (
+        row === undefined ||
+        (outcome === "completed" &&
+          (artifact === undefined ||
+            artifact.userId !== userId ||
+            artifact.mediaKind !== "image" ||
+            artifact.bytes < 1 ||
+            !validArtifact(artifact, 10 * 1024 * 1024))) ||
+        (outcome === "failed" && artifact !== undefined)
+      )
+        return false;
+      let source: DiscordSource;
+      try {
+        const parsed = JSON.parse(row.discord_source ?? "null") as unknown;
+        if (parsed === null || typeof parsed !== "object") return false;
+        source = parsed as DiscordSource;
+      } catch {
+        return false;
+      }
+      const now = this.clock.now();
+      const turnId = this.ids.next("turn");
+      const caption =
+        outcome === "completed"
+          ? "Your image is ready."
+          : "Image generation failed.";
+      this.#database
+        .prepare(
+          `INSERT INTO turns(id, user_id, session_id, endpoint_id, idempotency_key, content_digest,
+          prompt_text, discord_source, ordinal, state, outcome, result_text, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'terminal', ?, ?, ?, ?)`,
+        )
+        .run(
+          turnId,
+          userId,
+          row.session_id,
+          row.endpoint_id,
+          `paint-result:${jobId}`,
+          createHash("sha256").update(`paint-result:${jobId}`).digest("hex"),
+          `[host event: paint job ${jobId} ${outcome}]`,
+          JSON.stringify(source),
+          this.#nextOrdinal(userId),
+          outcome === "completed" ? "succeeded" : "failed",
+          caption,
+          now,
+          now,
+        );
+      if (artifact !== undefined) {
+        this.#insertArtifact(artifact, now);
+        this.#database
+          .prepare(
+            "INSERT INTO turn_artifacts(turn_id, user_id, artifact_id, direction, ordinal) VALUES (?, ?, ?, 'outbound', 0)",
+          )
+          .run(turnId, userId, artifact.id);
+      }
+      this.#insertOutbox(userId, row.endpoint_id, turnId, caption);
+      if (artifact !== undefined)
+        this.#insertArtifactOutbox(
+          userId,
+          row.endpoint_id,
+          turnId,
+          artifact.id,
+        );
+      const changed = this.#database
+        .prepare(
+          "UPDATE comfy_jobs SET state = ?, completion_turn_id = ?, updated_at = ? WHERE id = ? AND user_id = ? AND state = 'submitted'",
+        )
+        .run(outcome, turnId, now, jobId, userId).changes;
+      return changed === 1n;
+    });
+  }
+
+  #jobTransition(
+    userId: string,
+    jobId: string,
+    from: ComfyJobState,
+    to: ComfyJobState,
+  ): boolean {
+    return transaction(
+      this.#database,
+      () =>
+        this.#database
+          .prepare(
+            "UPDATE comfy_jobs SET state = ?, updated_at = ? WHERE id = ? AND user_id = ? AND state = ?",
+          )
+          .run(to, this.clock.now(), jobId, userId, from).changes === 1n,
+    );
   }
 
   public resolveTelegramEndpoint(

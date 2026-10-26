@@ -9,12 +9,13 @@ import {
   type ValidatedTopology,
 } from "./filesystem.js";
 
-const SCHEMA_VERSION = 9;
-const SCHEMA_ID = "hitch-pi-mvp-schema-9";
+const SCHEMA_VERSION = 10;
+const SCHEMA_ID = "hitch-pi-mvp-schema-10";
 const EXPECTED_TABLES = [
   "app_meta",
   "artifacts",
   "channel_endpoints",
+  "comfy_jobs",
   "local_requests",
   "outbox",
   "sessions",
@@ -198,6 +199,28 @@ CREATE TABLE local_requests (
   PRIMARY KEY (caller_id, request_id)
 ) STRICT;
 CREATE INDEX local_requests_caller_created ON local_requests(caller_id, created_at);
+
+CREATE TABLE comfy_jobs (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  source_turn_id TEXT NOT NULL,
+  endpoint_id TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  workflow_id TEXT NOT NULL,
+  snapshot_json TEXT NOT NULL CHECK (json_valid(snapshot_json) AND length(CAST(snapshot_json AS BLOB)) <= 262144),
+  state TEXT NOT NULL CHECK (state IN ('prepared', 'submitting', 'submitted', 'submission_unknown', 'completed', 'failed', 'cancelled')),
+  backend_prompt_id TEXT,
+  completion_turn_id TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  last_polled_at INTEGER NOT NULL,
+  FOREIGN KEY (source_turn_id, user_id) REFERENCES turns(id, user_id),
+  FOREIGN KEY (endpoint_id, user_id) REFERENCES channel_endpoints(id, user_id),
+  CHECK ((state = 'completed' AND completion_turn_id IS NOT NULL) OR (state != 'completed' AND completion_turn_id IS NULL)),
+  CHECK ((state IN ('submitted', 'completed', 'cancelled') AND backend_prompt_id IS NOT NULL) OR state NOT IN ('submitted', 'completed', 'cancelled'))
+) STRICT;
+CREATE INDEX comfy_jobs_owner_state ON comfy_jobs(user_id, state);
+CREATE INDEX comfy_jobs_pending ON comfy_jobs(state, last_polled_at, updated_at);
 `;
 
 const MIGRATE_2_TO_3 = `
@@ -351,6 +374,30 @@ SELECT id, tuple_key, user_id, kind, account_id, platform_user_id, private_chat_
 FROM channel_endpoints;
 DROP TABLE channel_endpoints;
 ALTER TABLE channel_endpoints_new RENAME TO channel_endpoints;
+`;
+
+const MIGRATE_9_TO_10 = `
+CREATE TABLE comfy_jobs (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  source_turn_id TEXT NOT NULL,
+  endpoint_id TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  workflow_id TEXT NOT NULL,
+  snapshot_json TEXT NOT NULL CHECK (json_valid(snapshot_json) AND length(CAST(snapshot_json AS BLOB)) <= 262144),
+  state TEXT NOT NULL CHECK (state IN ('prepared', 'submitting', 'submitted', 'submission_unknown', 'completed', 'failed', 'cancelled')),
+  backend_prompt_id TEXT,
+  completion_turn_id TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  last_polled_at INTEGER NOT NULL,
+  FOREIGN KEY (source_turn_id, user_id) REFERENCES turns(id, user_id),
+  FOREIGN KEY (endpoint_id, user_id) REFERENCES channel_endpoints(id, user_id),
+  CHECK ((state = 'completed' AND completion_turn_id IS NOT NULL) OR (state != 'completed' AND completion_turn_id IS NULL)),
+  CHECK ((state IN ('submitted', 'completed', 'cancelled') AND backend_prompt_id IS NOT NULL) OR state NOT IN ('submitted', 'completed', 'cancelled'))
+) STRICT;
+CREATE INDEX comfy_jobs_owner_state ON comfy_jobs(user_id, state);
+CREATE INDEX comfy_jobs_pending ON comfy_jobs(state, last_polled_at, updated_at);
 `;
 
 const MIGRATE_1_TO_2 = `
@@ -530,6 +577,7 @@ function verifySchema(connection: DatabaseSync): void {
       connection.exec(MIGRATE_6_TO_7);
       connection.exec(MIGRATE_7_TO_8);
       connection.exec(MIGRATE_8_TO_9);
+      connection.exec(MIGRATE_9_TO_10);
       connection
         .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
         .run(SCHEMA_ID, "schema_id");
@@ -558,6 +606,7 @@ function verifySchema(connection: DatabaseSync): void {
       connection.exec(MIGRATE_6_TO_7);
       connection.exec(MIGRATE_7_TO_8);
       connection.exec(MIGRATE_8_TO_9);
+      connection.exec(MIGRATE_9_TO_10);
       connection
         .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
         .run(SCHEMA_ID, "schema_id");
@@ -585,6 +634,7 @@ function verifySchema(connection: DatabaseSync): void {
       connection.exec(MIGRATE_6_TO_7);
       connection.exec(MIGRATE_7_TO_8);
       connection.exec(MIGRATE_8_TO_9);
+      connection.exec(MIGRATE_9_TO_10);
       connection
         .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
         .run(SCHEMA_ID, "schema_id");
@@ -610,6 +660,7 @@ function verifySchema(connection: DatabaseSync): void {
       connection.exec(MIGRATE_6_TO_7);
       connection.exec(MIGRATE_7_TO_8);
       connection.exec(MIGRATE_8_TO_9);
+      connection.exec(MIGRATE_9_TO_10);
       connection
         .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
         .run(SCHEMA_ID, "schema_id");
@@ -630,6 +681,7 @@ function verifySchema(connection: DatabaseSync): void {
       connection.exec(MIGRATE_6_TO_7);
       connection.exec(MIGRATE_7_TO_8);
       connection.exec(MIGRATE_8_TO_9);
+      connection.exec(MIGRATE_9_TO_10);
       connection
         .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
         .run(SCHEMA_ID, "schema_id");
@@ -654,6 +706,7 @@ function verifySchema(connection: DatabaseSync): void {
       connection.exec(MIGRATE_6_TO_7);
       connection.exec(MIGRATE_7_TO_8);
       connection.exec(MIGRATE_8_TO_9);
+      connection.exec(MIGRATE_9_TO_10);
       connection
         .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
         .run(SCHEMA_ID, "schema_id");
@@ -677,6 +730,7 @@ function verifySchema(connection: DatabaseSync): void {
     try {
       connection.exec(MIGRATE_7_TO_8);
       connection.exec(MIGRATE_8_TO_9);
+      connection.exec(MIGRATE_9_TO_10);
       connection
         .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
         .run(SCHEMA_ID, "schema_id");
@@ -699,6 +753,7 @@ function verifySchema(connection: DatabaseSync): void {
     connection.exec("BEGIN IMMEDIATE");
     try {
       connection.exec(MIGRATE_8_TO_9);
+      connection.exec(MIGRATE_9_TO_10);
       connection
         .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
         .run(SCHEMA_ID, "schema_id");
@@ -711,6 +766,25 @@ function verifySchema(connection: DatabaseSync): void {
       throw error;
     }
     connection.exec("PRAGMA foreign_keys = ON");
+  } else if (version === 9) {
+    const schemaId = connection
+      .prepare("SELECT value FROM app_meta WHERE key = 'schema_id'")
+      .get() as { value: string } | undefined;
+    if (schemaId?.value !== "hitch-pi-mvp-schema-9")
+      throw new FoundationError("database schema 9 identity is unknown");
+    connection.exec("BEGIN IMMEDIATE");
+    try {
+      connection.exec(MIGRATE_9_TO_10);
+      connection
+        .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
+        .run(SCHEMA_ID, "schema_id");
+      connection.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+      assertForeignKeyIntegrity(connection);
+      connection.exec("COMMIT");
+    } catch (error) {
+      connection.exec("ROLLBACK");
+      throw error;
+    }
   } else if (version !== SCHEMA_VERSION) {
     throw new FoundationError(
       `unsupported database schema version: ${version}`,
