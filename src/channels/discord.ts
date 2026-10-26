@@ -90,31 +90,78 @@ export type DiscordFailurePhase =
   | "destination-check"
   | "upload";
 
+export type DiscordFailureKind =
+  | "timeout"
+  | "aborted"
+  | "http"
+  | "network"
+  | "other";
+export type DiscordTransportCode =
+  | "UND_ERR_REQ_CONTENT_LENGTH_MISMATCH"
+  | "UND_ERR_CONNECT_TIMEOUT"
+  | "UND_ERR_ABORTED"
+  | "UND_ERR_SOCKET"
+  | "ECONNRESET"
+  | "ECONNREFUSED"
+  | "ETIMEDOUT"
+  | "EPIPE"
+  | "ENOTFOUND"
+  | "EAI_AGAIN"
+  | "ENETUNREACH";
+
 export interface DiscordFailureDiagnostic {
   readonly phase: DiscordFailurePhase;
+  readonly kind?: DiscordFailureKind;
   readonly status?: number;
   readonly code?: number;
+  readonly transportCode?: DiscordTransportCode;
 }
 
-function safeNumericProperty(
-  error: unknown,
-  name: "status" | "code",
-  minimum: number,
-  maximum: number,
-): number | undefined {
-  if (typeof error !== "object" || error === null) return undefined;
+const DISCORD_TRANSPORT_CODES = new Set<DiscordTransportCode>([
+  "UND_ERR_REQ_CONTENT_LENGTH_MISMATCH",
+  "UND_ERR_CONNECT_TIMEOUT",
+  "UND_ERR_ABORTED",
+  "UND_ERR_SOCKET",
+  "ECONNRESET",
+  "ECONNREFUSED",
+  "ETIMEDOUT",
+  "EPIPE",
+  "ENOTFOUND",
+  "EAI_AGAIN",
+  "ENETUNREACH",
+]);
+
+function ownDataProperty(value: unknown, name: string): unknown {
+  if (typeof value !== "object" || value === null) return undefined;
   try {
-    const descriptor = Object.getOwnPropertyDescriptor(error, name);
-    const value: unknown = descriptor?.value;
-    return typeof value === "number" &&
-      Number.isSafeInteger(value) &&
-      value >= minimum &&
-      value <= maximum
-      ? value
-      : undefined;
+    return Object.getOwnPropertyDescriptor(value, name)?.value;
   } catch {
     return undefined;
   }
+}
+
+function errorChain(error: unknown): unknown[] {
+  const chain: unknown[] = [];
+  let current = error;
+  for (let depth = 0; depth <= 2; depth += 1) {
+    if (typeof current !== "object" || current === null) break;
+    chain.push(current);
+    current = ownDataProperty(current, "cause");
+  }
+  return chain;
+}
+
+function safeNumber(
+  value: unknown,
+  minimum: number,
+  maximum: number,
+): number | undefined {
+  return typeof value === "number" &&
+    Number.isSafeInteger(value) &&
+    value >= minimum &&
+    value <= maximum
+    ? value
+    : undefined;
 }
 
 export function discordFailureDiagnostic(
@@ -124,23 +171,39 @@ export function discordFailureDiagnostic(
     return undefined;
   return {
     phase: error.phase,
+    ...(error.kind === undefined ? {} : { kind: error.kind }),
     ...(error.status === undefined ? {} : { status: error.status }),
     ...(error.code === undefined ? {} : { code: error.code }),
+    ...(error.transportCode === undefined
+      ? {}
+      : { transportCode: error.transportCode }),
   };
+}
+
+class DiscordOperationInterruption extends Error {
+  public constructor(readonly kind: "timeout" | "aborted") {
+    super("Discord operation interrupted");
+    this.name = "DiscordOperationInterruption";
+  }
 }
 
 export class DiscordTransportError extends Error {
   public readonly phase?: DiscordFailurePhase;
+  public readonly kind?: DiscordFailureKind;
   public readonly status?: number;
   public readonly code?: number;
+  public readonly transportCode?: DiscordTransportCode;
 
   public constructor(message: string, diagnostic?: DiscordFailureDiagnostic) {
     super(message);
     this.name = "DiscordTransportError";
     if (diagnostic !== undefined) {
       this.phase = diagnostic.phase;
+      if (diagnostic.kind !== undefined) this.kind = diagnostic.kind;
       if (diagnostic.status !== undefined) this.status = diagnostic.status;
       if (diagnostic.code !== undefined) this.code = diagnostic.code;
+      if (diagnostic.transportCode !== undefined)
+        this.transportCode = diagnostic.transportCode;
     }
   }
 
@@ -148,12 +211,49 @@ export class DiscordTransportError extends Error {
     phase: DiscordFailurePhase,
     error: unknown,
   ): DiscordTransportError {
-    const status = safeNumericProperty(error, "status", 100, 599);
-    const code = safeNumericProperty(error, "code", 0, Number.MAX_SAFE_INTEGER);
+    const chain = errorChain(error);
+    let kind: DiscordFailureKind = "other";
+    let status: number | undefined;
+    let code: number | undefined;
+    let transportCode: DiscordTransportCode | undefined;
+    for (const item of chain) {
+      if (item instanceof DiscordOperationInterruption) kind = item.kind;
+      const candidateStatus = safeNumber(
+        ownDataProperty(item, "status"),
+        100,
+        599,
+      );
+      const candidateCode = safeNumber(
+        ownDataProperty(item, "code"),
+        0,
+        Number.MAX_SAFE_INTEGER,
+      );
+      if (status === undefined && candidateStatus !== undefined)
+        status = candidateStatus;
+      if (code === undefined && candidateCode !== undefined)
+        code = candidateCode;
+      const rawTransportCode = ownDataProperty(item, "code");
+      if (
+        typeof rawTransportCode === "string" &&
+        DISCORD_TRANSPORT_CODES.has(rawTransportCode as DiscordTransportCode)
+      ) {
+        transportCode = rawTransportCode as DiscordTransportCode;
+        if (
+          transportCode === "ETIMEDOUT" ||
+          transportCode === "UND_ERR_CONNECT_TIMEOUT"
+        )
+          kind = "timeout";
+        else if (transportCode === "UND_ERR_ABORTED") kind = "aborted";
+        else kind = "network";
+      }
+    }
+    if (status !== undefined) kind = "http";
     return new DiscordTransportError("Discord artifact delivery failed", {
       phase,
+      kind,
       ...(status === undefined ? {} : { status }),
       ...(code === undefined ? {} : { code }),
+      ...(transportCode === undefined ? {} : { transportCode }),
     });
   }
 }
@@ -203,7 +303,7 @@ async function bounded<T>(
     // The SDK promise was created before entering this helper. Consume a late
     // rejection even when cancellation won the race before listener setup.
     void operation.catch(() => undefined);
-    abortCheck(signal);
+    throw new DiscordOperationInterruption("aborted");
   }
   let timer: NodeJS.Timeout | undefined;
   let onAbort: (() => void) | undefined;
@@ -211,12 +311,14 @@ async function bounded<T>(
     return await Promise.race([
       operation,
       new Promise<never>((_resolve, reject) => {
-        const fail = (): void =>
-          reject(new DiscordTransportError("Discord operation interrupted"));
-        timer = setTimeout(fail, 30_000);
-        onAbort = fail;
-        signal?.addEventListener("abort", fail, { once: true });
-        if (signal?.aborted) fail();
+        const timeout = (): void =>
+          reject(new DiscordOperationInterruption("timeout"));
+        const aborted = (): void =>
+          reject(new DiscordOperationInterruption("aborted"));
+        timer = setTimeout(timeout, 30_000);
+        onAbort = aborted;
+        signal?.addEventListener("abort", aborted, { once: true });
+        if (signal?.aborted) aborted();
       }),
     ]);
   } finally {
@@ -493,10 +595,10 @@ export class DiscordJsClient implements DiscordClient {
     options: DiscordSendOptions = {},
     signal?: AbortSignal,
   ): Promise<void> {
-    abortCheck(signal);
-    this.assertHealthy();
     let phase: DiscordFailurePhase = "artifact-size";
     try {
+      if (signal?.aborted) throw new DiscordOperationInterruption("aborted");
+      this.assertHealthy();
       if (artifact.bytes > DISCORD_UPLOAD_LIMIT_BYTES)
         throw new Error("oversize");
       phase = "artifact-verify";
@@ -506,7 +608,7 @@ export class DiscordJsClient implements DiscordClient {
         this.#client.channels.fetch(channelId),
         signal,
       );
-      abortCheck(signal);
+      if (signal?.aborted) throw new DiscordOperationInterruption("aborted");
       phase = "destination-check";
       if (
         channel === null ||
@@ -530,7 +632,7 @@ export class DiscordJsClient implements DiscordClient {
         }),
         signal,
       );
-      abortCheck(signal);
+      if (signal?.aborted) throw new DiscordOperationInterruption("aborted");
     } catch (error) {
       throw DiscordTransportError.artifactFailure(phase, error);
     }
@@ -843,7 +945,7 @@ export class DiscordWorker {
         this.#log(
           diagnostic === undefined
             ? "delivery failed; outbox retry retained"
-            : `delivery failed; outbox retry retained; phase=${diagnostic.phase}${diagnostic.status === undefined ? "" : ` status=${diagnostic.status}`}${diagnostic.code === undefined ? "" : ` code=${diagnostic.code}`}`,
+            : `delivery failed; outbox retry retained; phase=${diagnostic.phase}${diagnostic.kind === undefined ? "" : ` kind=${diagnostic.kind}`}${diagnostic.status === undefined ? "" : ` status=${diagnostic.status}`}${diagnostic.code === undefined ? "" : ` code=${diagnostic.code}`}${diagnostic.transportCode === undefined ? "" : ` transport=${diagnostic.transportCode}`}`,
         );
       }
     }

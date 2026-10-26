@@ -21,6 +21,7 @@ import {
 import {
   DiscordJsClient,
   DiscordTransportError,
+  discordFailureDiagnostic,
   DiscordWorker,
   DISCORD_UPLOAD_LIMIT_BYTES,
   type DiscordClient,
@@ -474,7 +475,10 @@ test("Discord worker logs only safe artifact diagnostics and retains retry", asy
     };
     await f.worker.deliverPending();
     assert.equal(f.store.pendingDiscordOutbox("bot").length, 1);
-    assert.match(f.logs.join("\n"), /phase=upload status=403 code=50013/u);
+    assert.match(
+      f.logs.join("\n"),
+      /phase=upload kind=http status=403 code=50013/u,
+    );
     assert.doesNotMatch(f.logs.join("\n"), /secret|private|authorization/u);
   } finally {
     f.foundation.close();
@@ -647,6 +651,24 @@ test("Pinned discord.js REST multipart upload works through an offline request f
     });
     assert.deepEqual(json.attachments, [{ id: "0" }]);
     assert.equal(json.tts, false);
+    const aborted = new AbortController();
+    aborted.abort();
+    await assert.rejects(
+      sdk.sendArtifact(
+        "123456789012345678",
+        artifact,
+        f.media,
+        {},
+        aborted.signal,
+      ),
+      (error: unknown) => {
+        assert.deepEqual(discordFailureDiagnostic(error), {
+          phase: "artifact-size",
+          kind: "aborted",
+        });
+        return true;
+      },
+    );
     await sdk.close();
   } finally {
     f.foundation.close();

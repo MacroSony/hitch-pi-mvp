@@ -68,6 +68,7 @@ test("artifact failure diagnostics retain only safe phase and numeric codes", ()
   const wrapped = DiscordTransportError.artifactFailure("upload", hostile);
   assert.deepEqual(discordFailureDiagnostic(wrapped), {
     phase: "upload",
+    kind: "http",
     status: 403,
     code: 50013,
   });
@@ -91,7 +92,49 @@ test("artifact failure diagnostics retain only safe phase and numeric codes", ()
     discordFailureDiagnostic(
       DiscordTransportError.artifactFailure("channel-fetch", malicious),
     ),
-    { phase: "channel-fetch" },
+    { phase: "channel-fetch", kind: "other" },
+  );
+
+  const transport = new Error("secret transport details");
+  Object.defineProperty(transport, "code", {
+    value: "UND_ERR_REQ_CONTENT_LENGTH_MISMATCH",
+  });
+  const outer = new Error("secret wrapper");
+  Object.defineProperty(outer, "cause", { value: transport });
+  assert.deepEqual(
+    discordFailureDiagnostic(
+      DiscordTransportError.artifactFailure("upload", outer),
+    ),
+    {
+      phase: "upload",
+      kind: "network",
+      transportCode: "UND_ERR_REQ_CONTENT_LENGTH_MISMATCH",
+    },
+  );
+
+  for (const [code, kind] of [
+    ["UND_ERR_CONNECT_TIMEOUT", "timeout"],
+    ["ETIMEDOUT", "timeout"],
+    ["UND_ERR_ABORTED", "aborted"],
+    ["ECONNRESET", "network"],
+  ] as const) {
+    const coded = new Error("secret");
+    Object.defineProperty(coded, "code", { value: code });
+    assert.deepEqual(
+      discordFailureDiagnostic(
+        DiscordTransportError.artifactFailure("upload", coded),
+      ),
+      { phase: "upload", kind, transportCode: code },
+    );
+  }
+
+  const forged = new Error("secret");
+  Object.defineProperty(forged, "code", { value: "secret-code" });
+  assert.deepEqual(
+    discordFailureDiagnostic(
+      DiscordTransportError.artifactFailure("upload", forged),
+    ),
+    { phase: "upload", kind: "other" },
   );
 });
 
