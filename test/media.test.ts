@@ -4,6 +4,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   readdirSync,
   statSync,
   writeFileSync,
@@ -438,12 +439,29 @@ test("inbox names keep generated ids and hint the file type", async () => {
   const opaque = await environment.media.ingest("alice", textBytes("blob"), {
     advertisedBytes: 4,
   });
+  const image = await environment.media.ingest("alice", bytes(png()), {
+    advertisedMime: "image/png",
+    displayName: "native.png",
+    expectImage: true,
+  });
   const textName = environment.media.materializeInbox(text, inbox, 0);
   const pdfName = environment.media.materializeInbox(pdf, inbox, 1);
   const opaqueName = environment.media.materializeInbox(opaque, inbox, 2);
+  const imagePath = environment.media.materializeInbox(image, inbox, 3);
   assert.match(textName, /1-[0-9a-f-]{12}\.txt$/);
   assert.match(pdfName, /2-[0-9a-f-]{12}\.pdf$/);
   assert.match(opaqueName, /3-[0-9a-f-]{12}\.bin$/);
-  assert.equal(readdirSync(inbox).length, 3);
+  assert.match(imagePath, /4-[0-9a-f-]{12}\.png$/);
+  assert.deepEqual(
+    readFileSync(join(inbox, imagePath.slice("/inbox/".length))),
+    png(),
+  );
+  assert.equal(environment.media.imageData(image), png().toString("base64"));
+  assert.throws(
+    () =>
+      environment.media.materializeInbox({ ...image, userId: "bob" }, inbox, 4),
+    /owner|artifact/iu,
+  );
+  assert.equal(readdirSync(inbox).length, 4);
   environment.foundation.close();
 });

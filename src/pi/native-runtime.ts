@@ -1932,33 +1932,47 @@ export class NativePiRuntime implements AgentRuntime {
       mimeType: string;
     }> = [];
     const inboxLines: string[] = [];
+    const imageInboxLines: string[] = [];
     try {
       for (const [ordinal, artifact] of inputArtifacts.entries()) {
-        if (nativeImages && artifact.mediaKind === "image") {
-          images.push({
-            type: "image",
-            data: this.#media.imageData(artifact),
-            mimeType: artifact.mimeType,
-          });
+        const path = this.#media.materializeInbox(
+          artifact,
+          context.inbox,
+          ordinal,
+        );
+        const line = `${path} (${artifact.displayName}; ${artifact.mimeType}; ${artifact.bytes} bytes)`;
+        if (artifact.mediaKind === "image") {
+          imageInboxLines.push(line);
+          if (nativeImages) {
+            images.push({
+              type: "image",
+              data: this.#media.imageData(artifact),
+              mimeType: artifact.mimeType,
+            });
+          }
         } else {
-          const path = this.#media.materializeInbox(
-            artifact,
-            context.inbox,
-            ordinal,
-          );
-          inboxLines.push(
-            `${path} (${artifact.displayName}; ${artifact.mimeType}; ${artifact.bytes} bytes)`,
-          );
+          inboxLines.push(line);
         }
       }
     } catch {
       rmSync(context.root, { recursive: true, force: true });
       return { outcome: "unknown", text: "", sessionReusable: false };
     }
+    const promptSections: string[] = [];
+    if (imageInboxLines.length > 0) {
+      promptSections.push(
+        `Hitch attached these image files at the exact /inbox paths below for this Turn:\n${imageInboxLines.join("\n")}\nThe /inbox files are read-only and turn-local; copy any file you need to keep into /workspace. ${nativeImages ? "The image visual input is also attached natively; use that visual input and the paths above refer to the original files." : "This model does not support native image input; inspect the read-only files using the paths above if possible."}`,
+      );
+    }
+    if (inboxLines.length > 0) {
+      promptSections.push(
+        `Hitch attached these opaque read-only files for this Turn:\n${inboxLines.join("\n")}`,
+      );
+    }
     const prompt =
-      inboxLines.length === 0
+      promptSections.length === 0
         ? turn.prompt
-        : `${turn.prompt}\n\nHitch attached these opaque read-only files for this Turn:\n${inboxLines.join("\n")}`;
+        : `${turn.prompt}\n\n${promptSections.join("\n\n")}`;
     const controller = this.#controller(
       context,
       session,
