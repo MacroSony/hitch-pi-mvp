@@ -1337,6 +1337,74 @@ export async function refreshPiCatalog(
   return result.aborted || result.errors.size > 0;
 }
 
+export function materializeTurnAttachments(
+  media: MediaStore,
+  inbox: string,
+  userId: string,
+  current: readonly RuntimeArtifact[],
+  historical: readonly { artifact: RuntimeArtifact; originalOrdinal: number }[],
+  nativeImages: boolean,
+): {
+  images: Array<{ type: "image"; data: string; mimeType: string }>;
+  imageLines: string[];
+  fileLines: string[];
+  historicalLines: string[];
+} {
+  const all = [...current, ...historical.map((item) => item.artifact)];
+  if (
+    all.length > 8 ||
+    new Set(all.map((item) => item.id)).size !== all.length ||
+    all.some(
+      (item) =>
+        item.userId !== userId ||
+        !Number.isFinite(item.bytes) ||
+        item.bytes < 1 ||
+        item.bytes > 20 * 1024 * 1024,
+    ) ||
+    all.reduce((sum, item) => sum + item.bytes, 0) > 40 * 1024 * 1024 ||
+    historical.some(
+      (item) =>
+        !Number.isSafeInteger(item.originalOrdinal) ||
+        item.originalOrdinal < 0 ||
+        item.originalOrdinal >= 8,
+    )
+  )
+    throw new Error("invalid turn attachments");
+  const images: Array<{ type: "image"; data: string; mimeType: string }> = [];
+  const imageLines: string[] = [];
+  const fileLines: string[] = [];
+  const historicalLines: string[] = [];
+  const paths = new Set<string>();
+  const describe = (artifact: RuntimeArtifact, path: string) =>
+    `${path} (${artifact.displayName}; ${artifact.mimeType}; ${artifact.bytes} bytes)`;
+  for (const [ordinal, artifact] of current.entries()) {
+    const path = media.materializeInbox(artifact, inbox, ordinal);
+    paths.add(path);
+    if (artifact.mediaKind === "image") {
+      imageLines.push(describe(artifact, path));
+      if (nativeImages)
+        images.push({
+          type: "image",
+          data: media.imageData(artifact),
+          mimeType: artifact.mimeType,
+        });
+    } else fileLines.push(describe(artifact, path));
+  }
+  for (const item of historical) {
+    const path = media.materializeInbox(
+      item.artifact,
+      inbox,
+      item.originalOrdinal,
+    );
+    if (paths.has(path)) throw new Error("historical inbox path collision");
+    paths.add(path);
+    historicalLines.push(
+      `${describe(item.artifact, path)}; earlier turn original`,
+    );
+  }
+  return { images, imageLines, fileLines, historicalLines };
+}
+
 export class NativePiRuntime implements AgentRuntime {
   readonly models: readonly RuntimeModel[];
   readonly catalogDigest: string;
@@ -1945,58 +2013,26 @@ export class NativePiRuntime implements AgentRuntime {
     );
     const nativeImages =
       selectedModel !== undefined && selectedModel.input.includes("image");
-    const images: Array<{
-      type: "image";
-      data: string;
-      mimeType: string;
-    }> = [];
-    const inboxLines: string[] = [];
-    const imageInboxLines: string[] = [];
-    const historicalLines: string[] = [];
-    const usedPaths = new Set<string>();
+    let preparedAttachments: ReturnType<typeof materializeTurnAttachments>;
     try {
-      for (const [ordinal, artifact] of inputArtifacts.entries()) {
-        const path = this.#media.materializeInbox(
-          artifact,
-          context.inbox,
-          ordinal,
-        );
-        usedPaths.add(path);
-        const line = `${path} (${artifact.displayName}; ${artifact.mimeType}; ${artifact.bytes} bytes)`;
-        if (artifact.mediaKind === "image") {
-          imageInboxLines.push(line);
-          if (nativeImages) {
-            images.push({
-              type: "image",
-              data: this.#media.imageData(artifact),
-              mimeType: artifact.mimeType,
-            });
-          }
-        } else {
-          inboxLines.push(line);
-        }
-      }
-      for (const item of historicalAttachments) {
-        const expectedName = `${item.originalOrdinal + 1}-${item.artifact.id.slice(-12)}`;
-        if ([...usedPaths].some((used) => used.includes(`/${expectedName}`))) {
-          throw new Error("historical inbox path collision");
-        }
-        const path = this.#media.materializeInbox(
-          item.artifact,
-          context.inbox,
-          item.originalOrdinal,
-        );
-        if (usedPaths.has(path))
-          throw new Error("historical inbox path collision");
-        usedPaths.add(path);
-        historicalLines.push(
-          `${path} (${item.artifact.displayName}; ${item.artifact.mimeType}; ${item.artifact.bytes} bytes; earlier turn original)`,
-        );
-      }
+      preparedAttachments = materializeTurnAttachments(
+        this.#media,
+        context.inbox,
+        turn.userId,
+        inputArtifacts,
+        historicalAttachments,
+        nativeImages,
+      );
     } catch {
       rmSync(context.root, { recursive: true, force: true });
       return { outcome: "unknown", text: "", sessionReusable: false };
     }
+    const {
+      images,
+      imageLines: imageInboxLines,
+      fileLines: inboxLines,
+      historicalLines,
+    } = preparedAttachments;
     const promptSections: string[] = [];
     if (imageInboxLines.length > 0) {
       promptSections.push(

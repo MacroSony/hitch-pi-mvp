@@ -20,6 +20,7 @@ import {
   MediaStore,
   MAX_INPUT_ARTIFACT_BYTES,
 } from "../src/media/media-store.js";
+import { materializeTurnAttachments } from "../src/pi/native-runtime.js";
 import {
   DiscordJsClient,
   discordRestMakeRequest,
@@ -359,15 +360,24 @@ test("Discord later turn claims prior originals at their original inbox ordinal"
   try {
     await receive(f, [dm("image-first")]);
     const original = f.turns[0]!.artifacts![0]!;
-    f.client.messages = [dm("later", "use the earlier file", false)];
+    await receive(f, [dm("image-second")]);
+    const second = f.turns[1]!.artifacts![0]!;
+    f.client.messages = [dm("later", "use the earlier files")];
     const abort = new AbortController();
     f.client.abort = abort;
     await f.worker.run(abort.signal);
     await f.app.drain();
-    const later = f.turns[1]!;
-    assert.equal(later.historicalAttachments?.length, 1);
-    assert.equal(later.historicalAttachments![0]!.originalOrdinal, 0);
-    assert.equal(later.historicalAttachments![0]!.artifact.id, original.id);
+    const later = f.turns[2]!;
+    assert.equal(later.artifacts?.length, 1);
+    assert.equal(later.historicalAttachments?.length, 2);
+    assert.deepEqual(
+      later.historicalAttachments!.map((item) => item.originalOrdinal),
+      [0, 0],
+    );
+    assert.deepEqual(
+      new Set(later.historicalAttachments!.map((item) => item.artifact.id)),
+      new Set([original.id, second.id]),
+    );
     const inbox = join(f.config.dataRoot, "inbox-later");
     mkdirSync(inbox);
     const path = f.media.materializeInbox(
@@ -379,6 +389,70 @@ test("Discord later turn claims prior originals at their original inbox ordinal"
     assert.equal(
       readFileSync(join(inbox, path.slice("/inbox/".length)), "utf8"),
       "hello",
+    );
+  } finally {
+    f.foundation.close();
+  }
+});
+test("native attachment preparation mounts history without resending its image", async () => {
+  const f = fixture("always-trigger");
+  try {
+    const png = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aG1sAAAAASUVORK5CYII=",
+      "base64",
+    );
+    const current = await f.media.ingest(
+      "dm-owner-a",
+      (async function* () {
+        yield png;
+      })(),
+      { displayName: "current.png" },
+    );
+    const historical = await f.media.ingest(
+      "dm-owner-a",
+      (async function* () {
+        yield png;
+      })(),
+      { displayName: "old.png" },
+    );
+    const inbox = join(f.config.dataRoot, "helper-inbox");
+    mkdirSync(inbox);
+    const prepared = materializeTurnAttachments(
+      f.media,
+      inbox,
+      "dm-owner-a",
+      [current],
+      [{ artifact: historical, originalOrdinal: 0 }],
+      true,
+    );
+    assert.equal(prepared.images.length, 1);
+    assert.equal(prepared.images[0]!.data, f.media.imageData(current));
+    assert.match(
+      prepared.historicalLines[0]!,
+      new RegExp(historical.id.slice(-12)),
+    );
+    assert.throws(() =>
+      materializeTurnAttachments(f.media, inbox, "other", [current], [], true),
+    );
+    assert.throws(() =>
+      materializeTurnAttachments(
+        f.media,
+        inbox,
+        "dm-owner-a",
+        [current],
+        [{ artifact: historical, originalOrdinal: 8 }],
+        true,
+      ),
+    );
+    assert.throws(() =>
+      materializeTurnAttachments(
+        f.media,
+        inbox,
+        "dm-owner-a",
+        [current],
+        [{ artifact: current, originalOrdinal: 1 }],
+        true,
+      ),
     );
   } finally {
     f.foundation.close();
