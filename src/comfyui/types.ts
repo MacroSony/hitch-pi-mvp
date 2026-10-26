@@ -76,6 +76,11 @@ export interface ComfyResultAttachment {
 export interface ComfyToolContext {
   readonly userId: string;
   readonly turnId: string;
+  /** Verified current/recent inbound originals; only short ref IDs are projected to the model. */
+  readonly inputs?: readonly {
+    readonly id: string;
+    readonly artifact: RuntimeArtifact;
+  }[];
   /** Trusted per-Turn callback, never accepted from bridge request JSON. */
   readonly attachResult?: (
     artifact: RuntimeArtifact,

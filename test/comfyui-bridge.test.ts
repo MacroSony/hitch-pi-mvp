@@ -212,3 +212,65 @@ test("host error is sanitized; deadline aborts; close aborts and destroys pendin
     await rm(fixture.parent, { recursive: true, force: true });
   }
 });
+
+test("paint_result carries captured attachment callback and bounded image payload without widening control results", async () => {
+  const parent = await mkdtemp(join(tmpdir(), "comfy-result-bridge-"));
+  let attached = false;
+  const bridge = await ComfyToolBridge.start(
+    join(parent, "bridge"),
+    {
+      ...owner,
+      async attachResult() {
+        attached = true;
+        return {
+          path: "/inbox/results/1-fixture.png",
+          bytes: 1,
+          mimeType: "image/png",
+          sha256: "0".repeat(64),
+        };
+      },
+    },
+    {
+      enabledUsers: [owner.userId],
+      async execute(context) {
+        const original = await context.attachResult!(
+          {
+            id: "fixture",
+            userId: owner.userId,
+            storageKey: "fixture",
+            bytes: 1,
+            sha256: "0".repeat(64),
+            mimeType: "image/png",
+            mediaKind: "image",
+            displayName: "fixture.png",
+          },
+          true,
+        );
+        return {
+          kind: "paint-result",
+          original,
+          preview: { data: "A".repeat(100_000), mimeType: "image/png" },
+        };
+      },
+    },
+  );
+  try {
+    const image = await call(bridge, {
+      tool: "paint_result",
+      input: { job_id: "own-job" },
+    });
+    assert.equal(image.status, 200);
+    assert.equal(attached, true);
+    assert.ok(image.body.length > 32 * 1024);
+    const control = await call(bridge, { tool: "paint_job_status", input: {} });
+    assert.equal(control.status, 502);
+    const forged = await call(bridge, {
+      tool: "paint_result",
+      input: { job_id: "own-job", attachResult: "forged" },
+    });
+    assert.equal(forged.status, 400);
+  } finally {
+    await bridge.close();
+    await rm(parent, { recursive: true, force: true });
+  }
+});

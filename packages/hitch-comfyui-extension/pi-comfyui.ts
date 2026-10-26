@@ -25,9 +25,17 @@ const names = [
   "paint_job_cancel",
   "paint_job_status",
   "paint_list_workflows",
+  "paint_result",
 ] as const;
 const schemas = {
   paint_list_workflows: Type.Object({}, { additionalProperties: false }),
+  paint_result: Type.Object(
+    {
+      job_id: Type.String({ minLength: 1, maxLength: 128 }),
+      preview: Type.Optional(Type.Boolean()),
+    },
+    { additionalProperties: false },
+  ),
   paint: Type.Object(
     {
       workflow: Type.Optional(
@@ -101,6 +109,8 @@ function call(
   signal?: AbortSignal,
 ): Promise<string> {
   return new Promise((resolve, reject) => {
+    const maximumResponse =
+      tool === "paint_result" ? 1024 * 1024 : MAX_RESPONSE;
     let settled = false;
     const finish = (error?: Error, result?: string) => {
       if (settled) return;
@@ -127,7 +137,7 @@ function call(
         response.on("data", (chunk) => {
           const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
           size += bytes.length;
-          if (size > MAX_RESPONSE) {
+          if (size > maximumResponse) {
             req.destroy();
             finish(new Error("paint response too large"));
             return;
@@ -142,7 +152,7 @@ function call(
             const result = JSON.stringify(parsed.result);
             if (
               result === undefined ||
-              Buffer.byteLength(result) > MAX_RESPONSE
+              Buffer.byteLength(result) > maximumResponse
             )
               throw new Error("failed");
             finish(undefined, result);
@@ -176,18 +186,64 @@ export default function (pi: ExtensionAPI): void {
       name,
       label: name,
       description:
-        name === "paint"
-          ? "Create an image; successful output is automatically delivered to this conversation."
-          : name === "paint_job_status"
-            ? "Check your own ComfyUI Paint job status."
-            : name === "paint_job_cancel"
-              ? "Cancel one of your own ComfyUI Paint jobs."
-              : "List the configured ComfyUI Paint workflows.",
+        name === "paint_result"
+          ? "Retrieve your completed image by job ID: a bounded visual preview when available and a read-only /inbox/results original path that sandbox tools can copy into /workspace. Job completion alone does not mean you have seen its pixels."
+          : name === "paint"
+            ? "Create an image; successful output is automatically delivered to this conversation."
+            : name === "paint_job_status"
+              ? "Check your own ComfyUI Paint job status."
+              : name === "paint_job_cancel"
+                ? "Cancel one of your own ComfyUI Paint jobs."
+                : "List the configured ComfyUI Paint workflows.",
       parameters: schemas[name],
       async execute(_id, input, signal) {
         try {
           attest(pi, name);
           const text = await call(socket!, token!, name, input, signal);
+          if (name === "paint_result") {
+            const value = JSON.parse(text);
+            if (
+              value &&
+              typeof value === "object" &&
+              !Array.isArray(value) &&
+              value.kind === "paint-result" &&
+              value.preview !== undefined
+            ) {
+              const preview = value.preview;
+              if (
+                !preview ||
+                typeof preview !== "object" ||
+                typeof preview.data !== "string" ||
+                !["image/png", "image/jpeg"].includes(preview.mimeType)
+              )
+                throw new Error("invalid paint preview");
+              const decoded = Buffer.from(preview.data, "base64");
+              if (
+                !decoded.length ||
+                decoded.length > 512 * 1024 ||
+                decoded.toString("base64") !== preview.data
+              )
+                throw new Error("invalid paint preview");
+              const { preview: _preview, ...metadata } = value;
+              return {
+                content: [
+                  {
+                    type: "text",
+                    text: JSON.stringify({
+                      ...metadata,
+                      preview_available: true,
+                    }),
+                  },
+                  {
+                    type: "image",
+                    data: preview.data,
+                    mimeType: preview.mimeType,
+                  },
+                ],
+                details: {},
+              };
+            }
+          }
           return { content: [{ type: "text", text }], details: {} };
         } catch {
           throw new Error("paint operation failed");

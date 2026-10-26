@@ -496,6 +496,7 @@ async function launchFixture(
           "paint_job_cancel",
           "paint_job_status",
           "paint_list_workflows",
+          "paint_result",
         ]
       : []),
   ].sort();
@@ -2313,6 +2314,7 @@ test(
           "paint_job_cancel",
           "paint_job_status",
           "paint_list_workflows",
+          "paint_result",
           "read",
           "write",
         ];

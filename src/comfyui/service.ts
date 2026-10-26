@@ -164,6 +164,11 @@ export class ComfyService implements ComfyToolHost {
         ? this.#workflows[0]
         : this.#workflows.find((w) => w.definition.id === args.workflow);
     if (!policy) throw new Error(SAFE);
+    if (
+      policy.definition.outputKind === "video" ||
+      Object.keys(policy.definition.files ?? {}).length > 0
+    )
+      throw new Error("Comfy media input/video execution is not yet enabled");
     const vars = policy.definition.variables;
     if (
       !Object.hasOwn(vars, "prompt") ||
@@ -291,24 +296,32 @@ export class ComfyService implements ComfyToolHost {
   }
 
   #workflowList(): unknown {
-    return this.#workflows.map((policy) => ({
-      id: policy.definition.id,
-      variables: Object.entries(policy.definition.variables).map(
-        ([name, binding]) => {
-          const base = { name, type: binding.type };
-          return binding.type === "string"
-            ? { ...base, maxLength: binding.maxLength }
-            : binding.type === "integer" || binding.type === "number"
-              ? {
-                  ...base,
-                  min: binding.min,
-                  max: binding.max,
-                  ...(binding.step === undefined ? {} : { step: binding.step }),
-                }
-              : { ...base, values: [...binding.values] };
-        },
-      ),
-    }));
+    return this.#workflows
+      .filter(
+        (policy) =>
+          policy.definition.outputKind !== "video" &&
+          Object.keys(policy.definition.files ?? {}).length === 0,
+      )
+      .map((policy) => ({
+        id: policy.definition.id,
+        variables: Object.entries(policy.definition.variables).map(
+          ([name, binding]) => {
+            const base = { name, type: binding.type };
+            return binding.type === "string"
+              ? { ...base, maxLength: binding.maxLength }
+              : binding.type === "integer" || binding.type === "number"
+                ? {
+                    ...base,
+                    min: binding.min,
+                    max: binding.max,
+                    ...(binding.step === undefined
+                      ? {}
+                      : { step: binding.step }),
+                  }
+                : { ...base, values: [...binding.values] };
+          },
+        ),
+      }));
   }
 
   #status(userId: string, input: unknown): unknown {

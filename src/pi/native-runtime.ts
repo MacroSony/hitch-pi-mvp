@@ -63,6 +63,7 @@ import type {
 import type { ForgeCatalog, ForgeResolved } from "../forge/types.js";
 import { COMFY_TOOL_NAMES, type ComfyToolHost } from "../comfyui/types.js";
 import { ComfyToolBridge } from "../comfyui/bridge.js";
+import { createComfyResultAttachmentHandler } from "../comfyui/attachments.js";
 
 const PI_VERSION = "0.85.1";
 const PI_TREE_SHA256 =
@@ -2092,10 +2093,18 @@ export class NativePiRuntime implements AgentRuntime {
       fileLines: inboxLines,
       historicalLines,
     } = preparedAttachments;
+    const paintInputs = allArtifacts.map((artifact, index) => ({
+      id: `input_${index + 1}`,
+      artifact,
+    }));
     const promptSections: string[] = [];
+    if (isPaintEnabled && paintInputs.length)
+      promptSections.push(
+        `Painting input references, valid only for this Turn (use input_id, not host paths):\n${paintInputs.map((entry) => JSON.stringify({ id: entry.id, name: entry.artifact.displayName, mimeType: entry.artifact.mimeType })).join("\n")}`,
+      );
     if (isPaintEnabled)
       promptSections.push(
-        "ComfyUI generation is a background job: submit paint once and promptly reply with its short job ID. Hitch automatically sends the completed image to this channel. Do not repeatedly poll or keep the chat waiting. Use paint_job_status when asked, and targeted paint_job_cancel for an explicit cancellation request. Never invent host paths or run a second generation merely to retrieve the first result.",
+        "ComfyUI generation is a background job: submit paint once and promptly reply with its short job ID. Hitch automatically sends the completed image to this channel. Do not repeatedly poll or keep the chat waiting. Use paint_job_status when asked, and targeted paint_job_cancel for an explicit cancellation request. Never invent host paths or run a second generation merely to retrieve the first result. To inspect or save a completed image, call paint_result with its job ID; it returns a bounded native preview when available and a read-only /inbox/results path to copy into /workspace. A completed status alone does not mean you have seen the image.",
       );
     if (imageInboxLines.length > 0) {
       promptSections.push(
@@ -2125,7 +2134,17 @@ export class NativePiRuntime implements AgentRuntime {
             "/tmp",
             `hitch-paint-${process.getuid?.() ?? "user"}-${randomBytes(8).toString("hex")}`,
           ),
-          { userId, turnId: turn.turnId },
+          {
+            userId,
+            turnId: turn.turnId,
+            inputs: paintInputs,
+            attachResult: createComfyResultAttachmentHandler({
+              userId,
+              inbox: context.inbox,
+              media: this.#media,
+              visualInput: nativeImages,
+            }),
+          },
           this.#paint,
         );
         context = {

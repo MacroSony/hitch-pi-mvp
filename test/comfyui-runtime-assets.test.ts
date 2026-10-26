@@ -26,6 +26,7 @@ test("ComfyUI runtime extension asset is readonly and manifest-attested", () => 
     "paint_job_cancel",
     "paint_job_status",
     "paint_list_workflows",
+    "paint_result",
   ])
     assert.match(text, new RegExp(`"${tool}"`, "u"));
 });

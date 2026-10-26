@@ -15,6 +15,7 @@ import type {
 
 export const COMFY_BRIDGE_MAX_BODY_BYTES = 128 * 1024;
 export const COMFY_BRIDGE_MAX_RESULT_BYTES = 32 * 1024;
+export const COMFY_BRIDGE_MAX_MEDIA_RESULT_BYTES = 1024 * 1024;
 export const COMFY_BRIDGE_TIMEOUT_MS = 15_000;
 const MAX_HEADER_BYTES = 4 * 1024;
 const TOOL_NAMES: readonly ComfyToolName[] = [
@@ -22,6 +23,7 @@ const TOOL_NAMES: readonly ComfyToolName[] = [
   "paint",
   "paint_job_status",
   "paint_job_cancel",
+  "paint_result",
 ];
 const short = (value: unknown): value is string =>
   typeof value === "string" && value.length > 0 && value.length <= 128;
@@ -69,22 +71,35 @@ export function validComfyRequest(
       );
     case "paint_job_cancel":
       return only("job_id") && short(fields.job_id);
+    case "paint_result":
+      return (
+        only("job_id", "preview") &&
+        short(fields.job_id) &&
+        (fields.preview === undefined || typeof fields.preview === "boolean")
+      );
   }
   return false;
 }
-function jsonBytes(value: unknown): Buffer {
+function jsonBytes(
+  value: unknown,
+  limit = COMFY_BRIDGE_MAX_RESULT_BYTES,
+): Buffer {
   const text = JSON.stringify(value);
   if (text === undefined) throw new Error("invalid result");
   const bytes = Buffer.from(text);
-  if (bytes.length > COMFY_BRIDGE_MAX_RESULT_BYTES)
-    throw new Error("result too large");
+  if (bytes.length > limit) throw new Error("result too large");
   return bytes;
 }
-function reply(response: ServerResponse, status: number, value: unknown): void {
+function reply(
+  response: ServerResponse,
+  status: number,
+  value: unknown,
+  limit = COMFY_BRIDGE_MAX_RESULT_BYTES,
+): void {
   if (response.destroyed || response.writableEnded) return;
   let body: Buffer;
   try {
-    body = jsonBytes(value);
+    body = jsonBytes(value, limit);
   } catch {
     status = 502;
     body = Buffer.from('{"error":"comfy operation failed"}');
@@ -138,6 +153,21 @@ export class ComfyToolBridge {
     const captured = Object.freeze({
       userId: context.userId,
       turnId: context.turnId,
+      ...(context.inputs === undefined
+        ? {}
+        : {
+            inputs: Object.freeze(
+              context.inputs.map((entry) =>
+                Object.freeze({
+                  id: entry.id,
+                  artifact: Object.freeze({ ...entry.artifact }),
+                }),
+              ),
+            ),
+          }),
+      ...(context.attachResult === undefined
+        ? {}
+        : { attachResult: context.attachResult }),
     });
     let bridge: ComfyToolBridge | undefined;
     const server = createServer(
@@ -192,6 +222,10 @@ export class ComfyToolBridge {
             reply(response, 400, { error: "invalid request" });
             return;
           }
+          const resultLimit =
+            parsed.tool === "paint_result"
+              ? COMFY_BRIDGE_MAX_MEDIA_RESULT_BYTES
+              : COMFY_BRIDGE_MAX_RESULT_BYTES;
           const live = bridge;
           if (!live) {
             reply(response, 503, { error: "bridge unavailable" });
@@ -205,7 +239,7 @@ export class ComfyToolBridge {
             finished = true;
             clearTimeout(timer);
             live.#controllers.delete(controller);
-            reply(response, status, value);
+            reply(response, status, value, resultLimit);
           };
           const timer = setTimeout(() => {
             controller.abort();
@@ -237,7 +271,7 @@ export class ComfyToolBridge {
               (value) => {
                 try {
                   const safe = JSON.parse(
-                    jsonBytes(value).toString("utf8"),
+                    jsonBytes(value, resultLimit).toString("utf8"),
                   ) as unknown;
                   complete(200, { result: safe });
                 } catch {

@@ -134,6 +134,7 @@ const manifest = {
         "paint_job_cancel",
         "paint_job_status",
         "paint_list_workflows",
+        "paint_result",
       ].map((name) => [name, { asset: "pi-comfyui.ts" }]),
     ),
   },
