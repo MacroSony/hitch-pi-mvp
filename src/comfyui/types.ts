@@ -32,6 +32,8 @@ export interface ComfyJobLedger {
     snapshot: RenderedComfyWorkflow,
   ): ComfyJob;
   getComfyJob(userId: string, jobId: string): ComfyJob | null;
+  /** Host-only immutable output; absent on legacy test doubles. */
+  getComfyResult?(userId: string, jobId: string): RuntimeArtifact | null;
   listComfyJobs(userId: string, limit?: number): readonly ComfyJob[];
   pendingComfyJobs(limit?: number): readonly ComfyJob[];
   markComfyJobSubmitting(userId: string, jobId: string): boolean;
@@ -57,11 +59,28 @@ export const COMFY_TOOL_NAMES = [
   "paint_job_cancel",
   "paint_job_status",
   "paint_list_workflows",
+  "paint_result",
 ] as const;
 export type ComfyToolName = (typeof COMFY_TOOL_NAMES)[number];
+export interface ComfyResultAttachment {
+  readonly path: string;
+  readonly bytes: number;
+  readonly mimeType: string;
+  readonly sha256: string;
+  readonly preview?: {
+    readonly data: string;
+    readonly mimeType: "image/png" | "image/jpeg";
+  };
+}
+
 export interface ComfyToolContext {
   readonly userId: string;
   readonly turnId: string;
+  /** Trusted per-Turn callback, never accepted from bridge request JSON. */
+  readonly attachResult?: (
+    artifact: RuntimeArtifact,
+    preview: boolean,
+  ) => Promise<ComfyResultAttachment>;
 }
 export interface ComfyToolHost {
   readonly enabledUsers: readonly string[];
