@@ -4,6 +4,8 @@ import type { Client } from "discord.js";
 
 import {
   DiscordJsClient,
+  DiscordTransportError,
+  discordFailureDiagnostic,
   splitDiscordText,
   type DiscordMessage,
 } from "../src/channels/discord.js";
@@ -49,6 +51,49 @@ function assertNoBrokenSurrogates(value: string): void {
     } else assert.ok(code < 0xdc00 || code > 0xdfff);
   }
 }
+
+test("artifact failure diagnostics retain only safe phase and numeric codes", () => {
+  const hostile = new Error(
+    "token=/secret/path response body with bearer secret",
+  );
+  Object.defineProperties(hostile, {
+    status: { value: 403, enumerable: true },
+    code: { value: 50013, enumerable: true },
+    headers: { value: { authorization: "bearer secret" }, enumerable: true },
+    request: {
+      value: { url: "/secret/path", token: "secret" },
+      enumerable: true,
+    },
+  });
+  const wrapped = DiscordTransportError.artifactFailure("upload", hostile);
+  assert.deepEqual(discordFailureDiagnostic(wrapped), {
+    phase: "upload",
+    status: 403,
+    code: 50013,
+  });
+  assert.equal(
+    JSON.stringify(discordFailureDiagnostic(wrapped)).includes("secret"),
+    false,
+  );
+  assert.equal(
+    discordFailureDiagnostic(new Error("private details")),
+    undefined,
+  );
+
+  const malicious = new Error("private");
+  Object.defineProperty(malicious, "status", {
+    get() {
+      throw new Error("getter-secret");
+    },
+  });
+  Object.defineProperty(malicious, "code", { value: "secret-code" });
+  assert.deepEqual(
+    discordFailureDiagnostic(
+      DiscordTransportError.artifactFailure("channel-fetch", malicious),
+    ),
+    { phase: "channel-fetch" },
+  );
+});
 
 test("SDK exposes the authenticated Ready identity, not a token-derived id", async () => {
   let tokenSeen = "";

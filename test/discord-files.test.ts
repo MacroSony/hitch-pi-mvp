@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import type { Client } from "discord.js";
+import { Client } from "discord.js";
+import { Response as UndiciResponse } from "undici";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -19,6 +20,7 @@ import {
 } from "../src/media/media-store.js";
 import {
   DiscordJsClient,
+  DiscordTransportError,
   DiscordWorker,
   DISCORD_UPLOAD_LIMIT_BYTES,
   type DiscordClient,
@@ -219,9 +221,11 @@ function fixture(mode: "text-trigger" | "always-trigger" = "text-trigger") {
   );
   app.start();
   const client = new FileClient();
+  const logs: string[] = [];
   const worker = new DiscordWorker({ id: "bot" }, app, environment.store, {
     client,
     media,
+    logger: (message) => logs.push(message),
   });
   return {
     ...environment,
@@ -229,6 +233,7 @@ function fixture(mode: "text-trigger" | "always-trigger" = "text-trigger") {
     app,
     client,
     worker,
+    logs,
     turns,
     output: (files: readonly RuntimeArtifact[]) => {
       output = files;
@@ -452,6 +457,30 @@ test("Discord oversize failure and explanatory text are durable across reopen", 
     reopened.close();
   }
 });
+test("Discord worker logs only safe artifact diagnostics and retains retry", async () => {
+  const f = fixture();
+  try {
+    f.output([await object(f, Buffer.from("diagnostic"))]);
+    f.app.receiveDiscord("bot", "bot-user", dm("diagnostic", "create", false));
+    await f.app.drain();
+    const hostile = new Error("token=secret path=/private response=secret");
+    Object.defineProperties(hostile, {
+      status: { value: 403 },
+      code: { value: 50013 },
+      headers: { value: { authorization: "secret" } },
+    });
+    f.client.sendArtifact = async () => {
+      throw DiscordTransportError.artifactFailure("upload", hostile);
+    };
+    await f.worker.deliverPending();
+    assert.equal(f.store.pendingDiscordOutbox("bot").length, 1);
+    assert.match(f.logs.join("\n"), /phase=upload status=403 code=50013/u);
+    assert.doesNotMatch(f.logs.join("\n"), /secret|private|authorization/u);
+  } finally {
+    f.foundation.close();
+  }
+});
+
 test("Discord artifact transport errors and cancelled uploads retain retry semantics", async () => {
   const f = fixture();
   try {
@@ -511,6 +540,114 @@ test("Discord staging survives failed admission and duplicate text does not cons
     );
     assert.equal(f.store.stagedArtifactCount("dm-owner-a"), 1);
     await f.app.drain();
+  } finally {
+    f.foundation.close();
+  }
+});
+
+test("Pinned discord.js REST multipart upload works through an offline request fixture", async () => {
+  const f = fixture();
+  try {
+    const artifact = await object(
+      f,
+      Buffer.from("multipart payload"),
+      "payload.txt",
+    );
+    const requests: Array<{ method: string; path: string; form?: FormData }> =
+      [];
+    const sdkClient = new Client({
+      intents: [],
+      rest: {
+        retries: 0,
+        makeRequest: async (url, init) => {
+          const parsed = new URL(url);
+          const method = init.method ?? "GET";
+          const form = init.body instanceof FormData ? init.body : undefined;
+          requests.push({
+            method,
+            path: parsed.pathname,
+            ...(form === undefined ? {} : { form }),
+          });
+          if (method === "GET")
+            return new UndiciResponse(
+              JSON.stringify({
+                id: "123456789012345678",
+                type: 1,
+                recipients: [
+                  {
+                    id: "223456789012345678",
+                    username: "fixture",
+                    discriminator: "0",
+                    avatar: null,
+                  },
+                ],
+              }),
+              {
+                status: 200,
+                headers: { "content-type": "application/json" },
+              },
+            );
+          return new UndiciResponse(
+            JSON.stringify({
+              id: "323456789012345678",
+              channel_id: "123456789012345678",
+              type: 0,
+              content: "",
+              author: {
+                id: "bot",
+                username: "fixture",
+                discriminator: "0",
+                avatar: null,
+                global_name: null,
+                bot: true,
+              },
+              attachments: [],
+              embeds: [],
+              timestamp: new Date().toISOString(),
+              edited_timestamp: null,
+              flags: 0,
+              components: [],
+              mention_everyone: false,
+              mentions: [],
+              pinned: false,
+              tts: false,
+            }),
+            {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            },
+          );
+        },
+      },
+    });
+    sdkClient.rest.setToken("offline-fixture-token");
+    const sdk = new DiscordJsClient("offline-fixture-token", false, sdkClient);
+    await sdk.sendArtifact("123456789012345678", artifact, f.media);
+    assert.deepEqual(
+      requests.map(({ method }) => method),
+      ["GET", "POST"],
+    );
+    const upload = requests[1]!;
+    assert.match(upload.path, /\/channels\/123456789012345678\/messages$/u);
+    assert.ok(upload.form, "discord.js REST must construct multipart FormData");
+    const fields = [...upload.form.entries()];
+    const uploaded = fields.find(([name]) => name === "files[0]")?.[1];
+    assert.ok(uploaded instanceof Blob);
+    assert.equal((uploaded as File).name, "payload.txt");
+    assert.deepEqual(
+      Buffer.from(await uploaded.arrayBuffer()),
+      Buffer.from("multipart payload"),
+    );
+    const payload = fields.find(([name]) => name === "payload_json")?.[1];
+    assert.ok(typeof payload === "string");
+    const json = JSON.parse(payload) as Record<string, unknown>;
+    assert.deepEqual(json.allowed_mentions, {
+      parse: [],
+      replied_user: false,
+    });
+    assert.deepEqual(json.attachments, [{ id: "0" }]);
+    assert.equal(json.tts, false);
+    await sdk.close();
   } finally {
     f.foundation.close();
   }

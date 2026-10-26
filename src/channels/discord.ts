@@ -83,10 +83,78 @@ export interface DiscordClient {
   sendTyping(channelId: string, signal?: AbortSignal): Promise<void>;
   close(): Promise<void>;
 }
+export type DiscordFailurePhase =
+  | "artifact-size"
+  | "artifact-verify"
+  | "channel-fetch"
+  | "destination-check"
+  | "upload";
+
+export interface DiscordFailureDiagnostic {
+  readonly phase: DiscordFailurePhase;
+  readonly status?: number;
+  readonly code?: number;
+}
+
+function safeNumericProperty(
+  error: unknown,
+  name: "status" | "code",
+  minimum: number,
+  maximum: number,
+): number | undefined {
+  if (typeof error !== "object" || error === null) return undefined;
+  try {
+    const descriptor = Object.getOwnPropertyDescriptor(error, name);
+    const value: unknown = descriptor?.value;
+    return typeof value === "number" &&
+      Number.isSafeInteger(value) &&
+      value >= minimum &&
+      value <= maximum
+      ? value
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function discordFailureDiagnostic(
+  error: unknown,
+): DiscordFailureDiagnostic | undefined {
+  if (!(error instanceof DiscordTransportError) || error.phase === undefined)
+    return undefined;
+  return {
+    phase: error.phase,
+    ...(error.status === undefined ? {} : { status: error.status }),
+    ...(error.code === undefined ? {} : { code: error.code }),
+  };
+}
+
 export class DiscordTransportError extends Error {
-  public constructor(message: string) {
+  public readonly phase?: DiscordFailurePhase;
+  public readonly status?: number;
+  public readonly code?: number;
+
+  public constructor(message: string, diagnostic?: DiscordFailureDiagnostic) {
     super(message);
     this.name = "DiscordTransportError";
+    if (diagnostic !== undefined) {
+      this.phase = diagnostic.phase;
+      if (diagnostic.status !== undefined) this.status = diagnostic.status;
+      if (diagnostic.code !== undefined) this.code = diagnostic.code;
+    }
+  }
+
+  public static artifactFailure(
+    phase: DiscordFailurePhase,
+    error: unknown,
+  ): DiscordTransportError {
+    const status = safeNumericProperty(error, "status", 100, 599);
+    const code = safeNumericProperty(error, "code", 0, Number.MAX_SAFE_INTEGER);
+    return new DiscordTransportError("Discord artifact delivery failed", {
+      phase,
+      ...(status === undefined ? {} : { status }),
+      ...(code === undefined ? {} : { code }),
+    });
   }
 }
 export const DISCORD_UPLOAD_LIMIT_BYTES = 10 * 1024 * 1024;
@@ -427,21 +495,26 @@ export class DiscordJsClient implements DiscordClient {
   ): Promise<void> {
     abortCheck(signal);
     this.assertHealthy();
+    let phase: DiscordFailurePhase = "artifact-size";
     try {
       if (artifact.bytes > DISCORD_UPLOAD_LIMIT_BYTES)
         throw new Error("oversize");
+      phase = "artifact-verify";
       const path = media.verifiedObjectPath(artifact);
+      phase = "channel-fetch";
       const channel = await bounded(
         this.#client.channels.fetch(channelId),
         signal,
       );
       abortCheck(signal);
+      phase = "destination-check";
       if (
         channel === null ||
         (channel.type !== ChannelType.GuildText &&
           channel.type !== ChannelType.DM)
       )
         throw new Error("unsupported destination");
+      phase = "upload";
       await bounded<unknown>(
         channel.send({
           files: [new AttachmentBuilder(path, { name: artifact.displayName })],
@@ -458,8 +531,8 @@ export class DiscordJsClient implements DiscordClient {
         signal,
       );
       abortCheck(signal);
-    } catch {
-      throw new DiscordTransportError("Discord artifact delivery failed");
+    } catch (error) {
+      throw DiscordTransportError.artifactFailure(phase, error);
     }
   }
   public async sendTyping(
@@ -764,9 +837,14 @@ export class DiscordWorker {
         abortCheck(signal);
         this.store.markOutboxSent(delivery);
         sent += 1;
-      } catch {
+      } catch (error) {
         this.store.markOutboxRetryable(delivery);
-        this.#log("delivery failed; outbox retry retained");
+        const diagnostic = discordFailureDiagnostic(error);
+        this.#log(
+          diagnostic === undefined
+            ? "delivery failed; outbox retry retained"
+            : `delivery failed; outbox retry retained; phase=${diagnostic.phase}${diagnostic.status === undefined ? "" : ` status=${diagnostic.status}`}${diagnostic.code === undefined ? "" : ` code=${diagnostic.code}`}`,
+        );
       }
     }
     return sent;
