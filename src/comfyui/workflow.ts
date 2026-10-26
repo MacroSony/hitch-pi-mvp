@@ -173,10 +173,14 @@ export class ComfyWorkflowPolicy {
         if (
           value.length === 2 &&
           typeof value[0] === "string" &&
-          Number.isInteger(value[1]) &&
-          (value[1] as number) >= 0
+          typeof value[1] === "number"
         ) {
-          if (!hasOwn(graph, value[0])) fail();
+          if (
+            !Number.isSafeInteger(value[1]) ||
+            value[1] < 0 ||
+            !hasOwn(graph, value[0])
+          )
+            fail();
         }
         for (const child of value) inspectLinks(child);
       } else if (value && typeof value === "object")
@@ -299,6 +303,7 @@ export class ComfyWorkflowPolicy {
           values[name],
         );
       }
+      if (Buffer.byteLength(JSON.stringify(graph), "utf8") > 256 * 1024) fail();
       return {
         graph: graph as ComfyWorkflowDefinition["graph"],
         outputNodes: [...this.definition.outputNodes],
