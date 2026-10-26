@@ -73,6 +73,9 @@ export interface OutboxDelivery {
   readonly text?: string;
   readonly artifact?: RuntimeArtifact;
   readonly discordSource?: DiscordSource;
+  readonly turnId?: string;
+  readonly endpointId?: string;
+  readonly attempts?: number;
 }
 
 export interface LocalTarget {
@@ -2585,7 +2588,8 @@ export class HitchStore {
         `SELECT o.id, o.user_id AS userId, e.account_id AS accountId,
                 CASE WHEN e.kind IN ('telegram', 'discord') THEN e.private_chat_id
                      ELSE e.platform_user_id END AS privateChatId,
-                o.kind, o.payload_text AS text,
+                o.kind, o.payload_text AS text, o.turn_id AS turnId,
+                o.endpoint_id AS endpointId, o.attempts,
                 t.discord_source AS discordSource,
                 a.id AS artifactId, a.storage_key AS storageKey, a.sha256,
                 a.bytes, a.media_kind AS mediaKind, a.mime_type AS mimeType,
@@ -2608,6 +2612,9 @@ export class HitchStore {
           privateChatId: string;
           kind: "text" | "artifact";
           text: string | null;
+          turnId: string | null;
+          endpointId: string;
+          attempts: number;
           discordSource: string | null;
           artifactId: string | null;
           storageKey: string | null;
@@ -2623,6 +2630,9 @@ export class HitchStore {
           accountId: row.accountId,
           privateChatId: row.privateChatId,
           kind: row.kind,
+          ...(row.turnId === null ? {} : { turnId: row.turnId }),
+          endpointId: row.endpointId,
+          attempts: row.attempts,
           ...(row.discordSource === null
             ? {}
             : {

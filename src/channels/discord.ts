@@ -92,6 +92,14 @@ export interface DiscordClient {
     options?: DiscordSendOptions,
     signal?: AbortSignal,
   ): Promise<void>;
+  sendRichReply?(
+    channelId: string,
+    text: string,
+    artifacts: readonly RuntimeArtifact[],
+    media: MediaStore,
+    options?: DiscordSendOptions,
+    signal?: AbortSignal,
+  ): Promise<void>;
   sendTyping(channelId: string, signal?: AbortSignal): Promise<void>;
   close(): Promise<void>;
 }
@@ -648,6 +656,68 @@ export class DiscordJsClient implements DiscordClient {
         signal,
       );
       if (signal?.aborted) throw new DiscordOperationInterruption("aborted");
+    } catch (error) {
+      throw DiscordTransportError.artifactFailure(phase, error);
+    }
+  }
+  public async sendRichReply(
+    channelId: string,
+    text: string,
+    artifacts: readonly RuntimeArtifact[],
+    media: MediaStore,
+    options: DiscordSendOptions = {},
+    signal?: AbortSignal,
+  ): Promise<void> {
+    let phase: DiscordFailurePhase = "artifact-verify";
+    try {
+      abortCheck(signal);
+      this.assertHealthy();
+      if (
+        !text ||
+        text.length > MAX_TEXT_UNITS ||
+        artifacts.length === 0 ||
+        artifacts.length > 8 ||
+        artifacts.some((item) => item.bytes > DISCORD_UPLOAD_LIMIT_BYTES) ||
+        artifacts.reduce((sum, item) => sum + item.bytes, 0) >
+          DISCORD_UPLOAD_LIMIT_BYTES
+      )
+        throw new Error("rich reply limits exceeded");
+      const files = artifacts.map((artifact) => {
+        if (artifact.bytes < 0) throw new Error("invalid artifact size");
+        return new AttachmentBuilder(media.verifiedObjectPath(artifact), {
+          name: artifact.displayName,
+        });
+      });
+      phase = "channel-fetch";
+      const channel = await bounded(
+        this.#client.channels.fetch(channelId),
+        signal,
+      );
+      abortCheck(signal);
+      if (
+        channel === null ||
+        (channel.type !== ChannelType.GuildText &&
+          channel.type !== ChannelType.DM)
+      )
+        throw new Error("unsupported destination");
+      phase = "upload";
+      await bounded<unknown>(
+        channel.send({
+          content: text,
+          files,
+          allowedMentions: { parse: [], repliedUser: false },
+          ...(options.replyToMessageId === undefined
+            ? {}
+            : {
+                reply: {
+                  messageReference: options.replyToMessageId,
+                  failIfNotExists: false,
+                },
+              }),
+        }),
+        signal,
+      );
+      abortCheck(signal);
     } catch (error) {
       throw DiscordTransportError.artifactFailure(phase, error);
     }
