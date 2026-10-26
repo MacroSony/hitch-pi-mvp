@@ -23,14 +23,35 @@ export interface ComfyWorkflowDefinition {
         max: number;
         step?: number;
       }
+    | {
+        nodeId: string;
+        input: string;
+        type: "number";
+        min: number;
+        max: number;
+        step?: number;
+        values: readonly string[];
+      }
     | { nodeId: string; input: string; type: "enum"; values: readonly string[] }
   >;
   outputNodes: readonly string[];
+  outputKind?: "image" | "video";
+  files?: Record<
+    string,
+    {
+      nodeId: string;
+      input: string;
+      media: "image" | "video" | "audio";
+      optional?: boolean;
+      disconnect?: readonly { nodeId: string; input: string }[];
+    }
+  >;
 }
 
 export interface RenderedComfyWorkflow {
   graph: ComfyWorkflowDefinition["graph"];
   outputNodes: string[];
+  outputKind?: "image" | "video";
 }
 
 const BAD = "Invalid ComfyUI workflow policy";
@@ -92,16 +113,56 @@ function freeze<T>(value: T): T {
   }
   return value;
 }
+
+function inputPathExists(
+  inputs: Record<string, JSONValue>,
+  path: string,
+): boolean {
+  if (!path || path.split(".").some((k) => !k || POISON.has(k))) return false;
+  let current: unknown = inputs;
+  for (const key of path.split(".")) {
+    if (
+      !current ||
+      typeof current !== "object" ||
+      Array.isArray(current) ||
+      !hasOwn(current, key)
+    )
+      return false;
+    current = (current as Record<string, unknown>)[key];
+  }
+  return true;
+}
+function literalPath(inputs: Record<string, JSONValue>, path: string): boolean {
+  if (!inputPathExists(inputs, path)) return false;
+  let current: unknown = inputs;
+  for (const key of path.split("."))
+    current = (current as Record<string, unknown>)[key];
+  return typeof current === "string";
+}
+function setPath(
+  inputs: Record<string, JSONValue>,
+  path: string,
+  value?: JSONValue,
+): void {
+  const parts = path.split(".");
+  let current = inputs;
+  for (const key of parts.slice(0, -1))
+    current = current[key] as Record<string, JSONValue>;
+  if (value === undefined) delete current[parts[parts.length - 1]!];
+  else current[parts[parts.length - 1]!] = value;
+}
+
 function validateValue(
   binding: ComfyWorkflowDefinition["variables"][string],
   value: unknown,
 ): JSONValue {
   if (binding.type === "string") {
     if (typeof value !== "string" || value.length > binding.maxLength) fail();
-  } else if (binding.type === "integer") {
+  } else if (binding.type === "integer" || binding.type === "number") {
     if (
       typeof value !== "number" ||
-      !Number.isSafeInteger(value) ||
+      (binding.type === "integer" && !Number.isSafeInteger(value)) ||
+      (binding.type === "number" && !Number.isFinite(value)) ||
       value < binding.min ||
       value > binding.max ||
       (binding.step !== undefined && (value - binding.min) % binding.step !== 0)
@@ -129,7 +190,15 @@ export class ComfyWorkflowPolicy {
     if (!plain(source)) fail();
     if (
       keys(source).some(
-        (k) => !["id", "graph", "variables", "outputNodes"].includes(k),
+        (k) =>
+          ![
+            "id",
+            "graph",
+            "variables",
+            "outputNodes",
+            "outputKind",
+            "files",
+          ].includes(k),
       )
     )
       fail();
@@ -219,7 +288,10 @@ export class ComfyWorkflowPolicy {
         typeof input !== "string" ||
         !SHORT_ID.test(input) ||
         !hasOwn(graph[nodeId]!.inputs, input) ||
-        (type !== "string" && type !== "integer" && type !== "enum")
+        (type !== "string" &&
+          type !== "integer" &&
+          type !== "number" &&
+          type !== "enum")
       )
         fail();
       const target = `${nodeId}\0${input}`;
@@ -237,27 +309,53 @@ export class ComfyWorkflowPolicy {
         )
           fail();
         binding = { nodeId, input, type, maxLength: raw.maxLength as number };
-      } else if (type === "integer") {
+      } else if (type === "integer" || type === "number") {
         if (
           keys(raw).some(
             (k) =>
-              !["nodeId", "input", "type", "min", "max", "step"].includes(k),
+              ![
+                "nodeId",
+                "input",
+                "type",
+                "min",
+                "max",
+                "step",
+                ...(type === "number" ? ["values"] : []),
+              ].includes(k),
           ) ||
-          !Number.isSafeInteger(raw.min) ||
-          !Number.isSafeInteger(raw.max) ||
+          !(type === "number"
+            ? Number.isFinite(raw.min)
+            : Number.isSafeInteger(raw.min)) ||
+          !(type === "number"
+            ? Number.isFinite(raw.max)
+            : Number.isSafeInteger(raw.max)) ||
           (raw.min as number) > (raw.max as number) ||
           (hasOwn(raw, "step") &&
-            (!Number.isSafeInteger(raw.step) || (raw.step as number) <= 0))
+            (!(type === "number"
+              ? Number.isFinite(raw.step)
+              : Number.isSafeInteger(raw.step)) ||
+              (raw.step as number) <= 0))
         )
           fail();
-        binding = {
-          nodeId,
-          input,
-          type,
-          min: raw.min as number,
-          max: raw.max as number,
-        };
-        if (hasOwn(raw, "step")) binding.step = raw.step as number;
+        binding =
+          type === "number"
+            ? {
+                nodeId,
+                input,
+                type,
+                min: raw.min as number,
+                max: raw.max as number,
+                values: [],
+              }
+            : {
+                nodeId,
+                input,
+                type,
+                min: raw.min as number,
+                max: raw.max as number,
+              };
+        if (hasOwn(raw, "step"))
+          (binding as { step?: number }).step = raw.step as number;
       } else {
         if (
           keys(raw).some(
@@ -281,6 +379,86 @@ export class ComfyWorkflowPolicy {
       variables,
       outputNodes,
     };
+    if (hasOwn(source, "outputKind")) {
+      if (source.outputKind !== "image" && source.outputKind !== "video")
+        fail();
+      definition.outputKind = source.outputKind;
+    }
+    if (hasOwn(source, "files")) {
+      const fs = source.files;
+      if (!plain(fs)) fail();
+      const slots = keys(fs);
+      if (slots.length > 15) fail();
+      const compiled: NonNullable<ComfyWorkflowDefinition["files"]> =
+        Object.create(null);
+      const occupied = new Set(targets);
+      for (const slot of slots) {
+        if (!SHORT_ID.test(slot)) fail();
+        const raw = fs[slot];
+        if (
+          !plain(raw) ||
+          typeof raw.nodeId !== "string" ||
+          !hasOwn(graph, raw.nodeId) ||
+          typeof raw.input !== "string" ||
+          !["image", "video", "audio"].includes(raw.media as string)
+        )
+          fail();
+        const key = `${raw.nodeId}\0${raw.input}`;
+        if (
+          occupied.has(key) ||
+          !literalPath(graph[raw.nodeId]!.inputs, raw.input)
+        )
+          fail();
+        occupied.add(key);
+        if (
+          keys(raw).some(
+            (k) =>
+              !["nodeId", "input", "media", "optional", "disconnect"].includes(
+                k,
+              ),
+          )
+        )
+          fail();
+        const binding: NonNullable<ComfyWorkflowDefinition["files"]>[string] = {
+          nodeId: raw.nodeId,
+          input: raw.input,
+          media: raw.media as "image" | "video" | "audio",
+        };
+        if (hasOwn(raw, "optional")) {
+          if (typeof raw.optional !== "boolean") fail();
+          binding.optional = raw.optional;
+        }
+        if (hasOwn(raw, "disconnect")) {
+          if (!Array.isArray(raw.disconnect)) fail();
+          const disconnect: { nodeId: string; input: string }[] = [];
+          for (const item of raw.disconnect) {
+            if (
+              !plain(item) ||
+              keys(item).some((k) => !["nodeId", "input"].includes(k)) ||
+              typeof item.nodeId !== "string" ||
+              !hasOwn(graph, item.nodeId) ||
+              typeof item.input !== "string" ||
+              !inputPathExists(graph[item.nodeId]!.inputs, item.input)
+            )
+              fail();
+            const disconnectKey = `${item.nodeId}\0${item.input}`;
+            if (
+              occupied.has(disconnectKey) ||
+              disconnect.some(
+                (d) => d.nodeId === item.nodeId && d.input === item.input,
+              )
+            )
+              fail();
+            occupied.add(disconnectKey);
+            disconnect.push({ nodeId: item.nodeId, input: item.input });
+          }
+          binding.disconnect = disconnect;
+        }
+        if (binding.optional && !binding.disconnect?.length) fail();
+        compiled[slot] = binding;
+      }
+      definition.files = compiled;
+    }
     if (Buffer.byteLength(JSON.stringify(definition), "utf8") > 256 * 1024)
       fail();
     return definition;
@@ -288,12 +466,16 @@ export class ComfyWorkflowPolicy {
 
   render(
     values: Readonly<Record<string, unknown>> = {},
+    uploadedFiles: Readonly<Record<string, string>> = {},
   ): RenderedComfyWorkflow {
     try {
-      if (!plain(values)) fail();
+      if (!plain(values) || !plain(uploadedFiles)) fail();
       const supplied = keys(values);
       for (const name of supplied)
         if (!hasOwn(this.definition.variables, name)) fail();
+      const fileNames = keys(uploadedFiles);
+      const slots = this.definition.files ?? Object.create(null);
+      for (const name of fileNames) if (!hasOwn(slots, name)) fail();
       const graph = cloneJSON(
         this.definition.graph,
       ) as ComfyWorkflowDefinition["graph"];
@@ -305,11 +487,59 @@ export class ComfyWorkflowPolicy {
           values[name],
         );
       }
+      const absent: NonNullable<ComfyWorkflowDefinition["files"]>[string][] =
+        [];
+      for (const slot of Object.keys(slots)) {
+        const binding = slots[slot]!;
+        if (!hasOwn(uploadedFiles, slot)) {
+          if (!binding.optional) fail();
+          absent.push(binding);
+          continue;
+        }
+        const path = uploadedFiles[slot];
+        if (
+          typeof path !== "string" ||
+          !/^hitch\/[a-f0-9]{64}\.(png|jpg|webp|mp4|wav|mp3|ogg)$/.test(path)
+        )
+          fail();
+        setPath(graph[binding.nodeId]!.inputs, binding.input, path);
+      }
+      for (const binding of absent)
+        for (const target of binding.disconnect ?? [])
+          setPath(graph[target.nodeId]!.inputs, target.input);
+      if (absent.length) {
+        const reachable = new Set<string>();
+        const visit = (id: string): void => {
+          if (reachable.has(id)) return;
+          reachable.add(id);
+          const walk = (v: JSONValue): void => {
+            if (Array.isArray(v)) {
+              if (
+                v.length === 2 &&
+                typeof v[0] === "string" &&
+                typeof v[1] === "number" &&
+                hasOwn(graph, v[0])
+              )
+                visit(v[0]);
+              else v.forEach(walk);
+            } else if (v && typeof v === "object")
+              Object.values(v).forEach(walk);
+          };
+          Object.values(graph[id]!.inputs).forEach(walk);
+        };
+        this.definition.outputNodes.forEach(visit);
+        for (const binding of absent) if (reachable.has(binding.nodeId)) fail();
+        for (const id of Object.keys(graph))
+          if (!reachable.has(id)) delete graph[id];
+      }
       if (Buffer.byteLength(JSON.stringify(graph), "utf8") > 256 * 1024) fail();
-      return {
-        graph: graph as ComfyWorkflowDefinition["graph"],
+      const result: RenderedComfyWorkflow = {
+        graph,
         outputNodes: [...this.definition.outputNodes],
       };
+      if (this.definition.outputKind !== undefined)
+        result.outputKind = this.definition.outputKind;
+      return result;
     } catch {
       throw new Error(BAD);
     }

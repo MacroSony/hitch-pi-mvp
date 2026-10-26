@@ -105,6 +105,17 @@ test("operator policies are bounded, canonical, private, immutable and outside m
   chmodSync(file, 0o600);
   writeFileSync(file, JSON.stringify([definition, definition]));
   assert.throws(() => loadComfyPolicies(file));
+  const eight = Array.from({ length: 8 }, (_, i) => ({
+    ...definition,
+    id: `fixture${i}`,
+  }));
+  writeFileSync(file, JSON.stringify(eight));
+  assert.equal(loadComfyPolicies(file).length, 8);
+  writeFileSync(
+    file,
+    JSON.stringify([...eight, { ...definition, id: "fixture8" }]),
+  );
+  assert.throws(() => loadComfyPolicies(file));
   writeFileSync(file, Buffer.alloc(1024 * 1024 + 1));
   assert.throws(() => loadComfyPolicies(file));
   writeFileSync(file, "PRIVATEDETAIL invalid JSON");

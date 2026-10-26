@@ -82,7 +82,7 @@ export function loadComfyPolicies(
         bytes.subarray(0, length),
       ),
     );
-    if (!Array.isArray(parsed) || parsed.length < 1 || parsed.length > 4)
+    if (!Array.isArray(parsed) || parsed.length < 1 || parsed.length > 8)
       throw new Error();
     const policies = parsed.map(
       (entry) => new ComfyWorkflowPolicy(entry as ComfyWorkflowDefinition),
