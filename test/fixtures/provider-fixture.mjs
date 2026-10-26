@@ -163,7 +163,22 @@ function streamFixture(selectedModel, context, options) {
     let content;
     let stopReason;
 
-    if (mode === "shared-auth") {
+    if (mode === "comfy-paint") {
+      if (toolResults.length === 0) {
+        content = [
+          {
+            type: "toolCall",
+            id: "hitch-comfy-paint",
+            name: "paint",
+            arguments: { prompt: "test prompt" },
+          },
+        ];
+        stopReason = "toolUse";
+      } else {
+        content = [{ type: "text", text: "HITCH_COMFY_PAINT_SETTLED" }];
+        stopReason = "stop";
+      }
+    } else if (mode === "shared-auth") {
       content = [
         {
           type: "text",

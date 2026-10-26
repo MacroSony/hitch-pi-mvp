@@ -32,6 +32,8 @@ import {
   waitForAttestation,
   type ControllerContext,
 } from "../src/pi/native-runtime.js";
+import { ComfyToolBridge } from "../src/comfyui/bridge.js";
+import type { ComfyToolHost } from "../src/comfyui/types.js";
 
 const repository = join(dirname(fileURLToPath(import.meta.url)), "../..");
 const assets = join(repository, "dist", "sandbox");
@@ -352,6 +354,7 @@ interface FixtureRun {
   readonly turnHandle: string;
   readonly userId: string;
   readonly webSearchEnabled: boolean;
+  readonly paintBridge: ComfyToolBridge | undefined;
   readonly antigravity: boolean;
   readonly activeTools: readonly string[];
   readonly forgePrompt:
@@ -382,12 +385,14 @@ async function launchFixture(
   server: FixtureServer,
   options: {
     readonly web: boolean;
+    readonly paint?: { readonly host: ComfyToolHost };
     readonly antigravity?: boolean;
     readonly antigravityMode?: "stream" | "404";
     readonly missingProvider?: boolean;
     readonly registerWeb?: boolean;
     readonly webExtension?: string;
     readonly providerMode?: string;
+    readonly disableNetworkPreload?: boolean;
     readonly activeTools?: readonly string[];
     readonly forgePrompt?: {
       readonly mode: "replace" | "append" | "prepend";
@@ -463,6 +468,17 @@ async function launchFixture(
   const controllerNonce = randomBytes(16).toString("hex");
   const userId = "b2-fixture-user";
   const webSearchEnabled = options.web;
+  const paintEnabled = options.paint !== undefined;
+  const assetsRoot = join(repository, "dist", "sandbox");
+  const paintExtension = join(assetsRoot, "pi-comfyui.ts");
+  const paintBridge =
+    options.paint === undefined
+      ? undefined
+      : await ComfyToolBridge.start(
+          join(root, "comfy-bridge"),
+          { userId, turnId: turnHandle },
+          options.paint.host,
+        );
   const antigravity = options.antigravity === true;
   const baselineTools = [
     "bash",
@@ -474,9 +490,16 @@ async function launchFixture(
     "read",
     "write",
     ...(webSearchEnabled ? ["web_search"] : []),
+    ...(paintEnabled
+      ? [
+          "paint",
+          "paint_job_cancel",
+          "paint_job_status",
+          "paint_list_workflows",
+        ]
+      : []),
   ].sort();
   const activeTools = [...(options.activeTools ?? baselineTools)].sort();
-  const assetsRoot = join(repository, "dist", "sandbox");
   const mandatory = join(assetsRoot, "hitch-sandbox.ts");
   const web = join(assetsRoot, "pi-web-search.ts");
   const provider = join(repository, "test", "fixtures", "provider-fixture.mjs");
@@ -549,9 +572,18 @@ async function launchFixture(
     PI_TELEMETRY: "0",
     HITCH_PI_MODELS_PATH: join(profile, "models.json"),
     HITCH_PI_MODELS_STORE_PATH: join(profile, "models-store.json"),
-    NODE_OPTIONS: `--import ${preload}`,
+    NODE_OPTIONS: options.disableNetworkPreload ? "" : `--import ${preload}`,
     HITCH_B2_FIXTURE_PORT: String(server.port),
     HITCH_B2_PROVIDER_MODE: options.providerMode ?? "web-search",
+    ...(paintBridge === undefined
+      ? {}
+      : {
+          HITCH_COMFY_ENABLED: "1",
+          HITCH_COMFY_SOCKET: paintBridge.socketPath,
+          HITCH_COMFY_TOKEN: paintBridge.token,
+          HITCH_COMFY_EXTENSION_PATH: paintExtension,
+          HITCH_COMFY_EXTENSION_SHA256: assetDigest(paintExtension),
+        }),
     HITCH_B2_PROVIDER_LOG: providerLog,
     ...(antigravity
       ? { HITCH_ANTIGRAVITY_FIXTURE_MODE: options.antigravityMode ?? "stream" }
@@ -656,6 +688,7 @@ async function launchFixture(
       : options.webExtension === undefined
         ? []
         : ["--extension", options.webExtension]),
+    ...(paintEnabled ? ["--extension", paintExtension] : []),
     ...(antigravity
       ? options.missingProvider === true
         ? []
@@ -690,6 +723,7 @@ async function launchFixture(
     turnHandle,
     userId,
     webSearchEnabled,
+    ...(paintEnabled ? { paintEnabled: true } : {}),
     activeTools,
     ...(options.forgePrompt === undefined
       ? {}
@@ -707,6 +741,7 @@ async function launchFixture(
     turnHandle,
     userId,
     webSearchEnabled,
+    paintBridge,
     antigravity,
     activeTools,
     forgePrompt: options.forgePrompt,
@@ -722,6 +757,7 @@ async function launchFixture(
 
 async function stopFixture(run: FixtureRun): Promise<void> {
   await run.rpc.stop();
+  await run.paintBridge?.close();
   await cleanOwnSandboxUnits(run.prefix);
   rmSync(run.root, { recursive: true, force: true });
 }
@@ -2230,5 +2266,130 @@ test(
     // stopFixture throws if sandbox scope cleanup cannot be confirmed; this
     // asserts the private fixture tree itself is also gone.
     assert.equal(existsSync(run.root), false);
+  },
+);
+
+test(
+  "real Pi comfy paint bridge receives captured owner and turn without ComfyUI",
+  { skip: process.env.HITCH_RUN_SANDBOX_TESTS !== "1", timeout: 120_000 },
+  async (t) => {
+    const server = await startFixtureServer();
+    t.after(async () => {
+      await new Promise<void>((resolve) =>
+        server.server.close(() => resolve()),
+      );
+    });
+    for (const activeTools of [undefined, ["paint"]] as const) {
+      let observed: unknown;
+      const run = await launchFixture(server, {
+        web: false,
+        providerMode: "comfy-paint",
+        disableNetworkPreload: true,
+        ...(activeTools === undefined ? {} : { activeTools }),
+        paint: {
+          host: {
+            enabledUsers: ["b2-fixture-user"],
+            async execute(context, tool, input) {
+              observed = { context, tool, input };
+              return { job_id: "safe-job-id" };
+            },
+          },
+        },
+      });
+      try {
+        await waitForAttestation(run.rpc, run.context);
+        const attestation = logEntries(run.log).find(
+          (entry) => entry.type === "startup-attestation",
+        );
+        assert.ok(attestation);
+        const exactTools = [
+          "bash",
+          "edit",
+          "find",
+          "grep",
+          "hitch_publish",
+          "ls",
+          "paint",
+          "paint_job_cancel",
+          "paint_job_status",
+          "paint_list_workflows",
+          "read",
+          "write",
+        ];
+        assert.deepEqual(attestation.exactTools, exactTools);
+        assert.deepEqual(attestation.allTools, exactTools);
+        assert.deepEqual(attestation.activeTools, activeTools ?? exactTools);
+        assert.equal(attestation.paintEnabled, true);
+        const mandatory = join(assets, "hitch-sandbox.ts");
+        const expectedSources = exactTools.map((name) =>
+          name.startsWith("paint_") || name === "paint"
+            ? join(assets, "pi-comfyui.ts")
+            : mandatory,
+        );
+        assert.deepEqual(attestation.sourcePaths, expectedSources);
+        assert.ok(
+          (attestation.sourcePaths as string[]).every((source) =>
+            source.startsWith("/"),
+          ),
+        );
+        assert.equal(
+          (await run.rpc.send({ type: "prompt", message: "paint acceptance" }))
+            .success,
+          true,
+        );
+        await run.rpc.waitFor(
+          (event) => event.type === "agent_settled",
+          30_000,
+        );
+        assert.deepEqual(
+          observed,
+          {
+            context: { userId: run.userId, turnId: run.turnHandle },
+            tool: "paint",
+            input: { prompt: "test prompt" },
+          },
+          JSON.stringify({
+            events: run.rpc.events,
+            provider: logEntries(run.providerLog),
+            stderr: run.rpc.stderr,
+          }),
+        );
+        assert.equal(
+          logEntries(run.providerLog).filter(
+            (entry) => entry.mode === "comfy-paint",
+          ).length > 0,
+          true,
+        );
+      } finally {
+        await stopFixture(run);
+      }
+    }
+    const disabled = await launchFixture(server, { web: false });
+    try {
+      await waitForAttestation(disabled.rpc, disabled.context);
+      const standard = logEntries(disabled.log).find(
+        (entry) => entry.type === "startup-attestation",
+      );
+      assert.equal(standard?.paintEnabled, false);
+      assert.ok(Array.isArray(standard?.exactTools));
+      assert.ok(
+        (standard?.exactTools as string[]).every(
+          (name) => !name.startsWith("paint"),
+        ),
+      );
+      assert.ok(
+        (standard?.allTools as string[]).every(
+          (name) => !name.startsWith("paint"),
+        ),
+      );
+      assert.equal(
+        disabled.rpc.events.some((event) =>
+          JSON.stringify(event).includes("paint"),
+        ),
+        false,
+      );
+    } finally {
+      await stopFixture(disabled);
+    }
   },
 );
