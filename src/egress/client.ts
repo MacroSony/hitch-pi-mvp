@@ -50,6 +50,12 @@ export interface EgressResponse {
   readonly text: string;
 }
 
+/** Host-internal raw response bytes. Never send raw error bodies to models or logs; consumers must validate content. */
+export interface EgressBytesResponse {
+  readonly status: number;
+  readonly body: Buffer;
+}
+
 export type EgressErrorCode =
   | "invalid-config"
   | "invalid-request"
@@ -161,6 +167,28 @@ export class EgressClient {
   }
 
   async request(input: EgressRequest): Promise<EgressResponse> {
+    const response = await this.#request(input);
+    return {
+      status: response.status,
+      text: sanitizeText(
+        response.body,
+        response.service.secrets,
+        this.#limits.maxResponseBytes,
+      ),
+    };
+  }
+
+  /** Returns host-internal bytes; never pass raw error bodies to a model or log. Validate content before use. */
+  async requestBytes(input: EgressRequest): Promise<EgressBytesResponse> {
+    const response = await this.#request(input);
+    return { status: response.status, body: response.body };
+  }
+
+  async #request(input: EgressRequest): Promise<{
+    readonly status: number;
+    readonly body: Buffer;
+    readonly service: ParsedService;
+  }> {
     const service = this.#services.get(input.serviceKey);
     if (!service) throw new EgressError("unknown-service");
     const method = input.method;
@@ -253,14 +281,7 @@ export class EgressClient {
           continue;
         }
 
-        return {
-          status: response.status,
-          text: sanitizeText(
-            response.body,
-            service.secrets,
-            this.#limits.maxResponseBytes,
-          ),
-        };
+        return { status: response.status, body: response.body, service };
       }
     } catch (error) {
       if (error instanceof EgressError) throw error;

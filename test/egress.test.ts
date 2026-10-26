@@ -544,3 +544,45 @@ test("blocks test subnet 192.0.2 and IPv4-compatible IPv6 addresses", async () =
     "address-blocked",
   );
 });
+
+test("returns exact host-internal response bytes and enforces the streaming limit", async (t) => {
+  const payload = Buffer.from([0x00, 0xff, 0xc3, 0x28, 0x89, 0x50, 0x4e, 0x47]);
+  let overflowClosed = false;
+  const fixture = await listen((_request, response) => {
+    if (_request.url === "/bytes") {
+      response.end(payload);
+      return;
+    }
+    response.on("close", () => {
+      overflowClosed = true;
+    });
+    response.write(Buffer.alloc(32 * 1024, 0xaa));
+    const timer = setInterval(
+      () => response.write(Buffer.alloc(32 * 1024, 0xbb)),
+      5,
+    );
+    response.on("close", () => clearInterval(timer));
+  });
+  t.after(() => close(fixture.server));
+  const client = localClient(fixture.origin, async () => ["127.0.0.1"], {
+    maxResponseBytes: 16,
+  });
+
+  const binary = await client.requestBytes({
+    serviceKey: "local",
+    method: "GET",
+    path: "/bytes",
+  });
+  assert.equal(binary.status, 200);
+  assert.deepEqual(binary.body, payload);
+  await expectCode(
+    client.requestBytes({
+      serviceKey: "local",
+      method: "GET",
+      path: "/overflow",
+    }),
+    "response-too-large",
+  );
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(overflowClosed, true);
+});

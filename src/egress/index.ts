@@ -3,6 +3,7 @@ export type {
   AddressResolver,
   EgressClientOptions,
   EgressErrorCode,
+  EgressBytesResponse,
   EgressMethod,
   EgressRequest,
   EgressResponse,
