@@ -15,6 +15,7 @@ async function fixture(
     method: string,
     body: string,
     rawBody: Buffer,
+    contentType: string,
   ) => { status?: number; body?: string | Buffer },
 ): Promise<{ server: Server; client: ComfyBackendClient; calls: string[] }> {
   const calls: string[] = [];
@@ -30,6 +31,7 @@ async function fixture(
         request.method ?? "",
         body,
         Buffer.concat(chunks),
+        request.headers["content-type"] ?? "",
       );
       response.statusCode = result.status ?? 200;
       response.end(result.body ?? "{}");
@@ -202,13 +204,20 @@ test("history requires bounded unique outputs and nonempty selected successful i
 });
 
 test("uploads exact binary in bounded multipart with owner-scoped deterministic path", async (t) => {
-  const bytes = Buffer.from([0x00, 0xff, 0x89, 0x50, 0x0d, 0x0a]);
+  const bytes = Buffer.concat([
+    Buffer.from([0x00, 0xff, 0x89, 0x50, 0x0d, 0x0a]),
+    Buffer.from(
+      '\r\n------hitch-comfy-upload-v1\r\nContent-Disposition: form-data; name="overwrite"\r\n\r\nfalse',
+    ),
+  ]);
   const hash = createHash("sha256").update(bytes).digest("hex");
   const expected = comfyUploadPath("owner-A", hash, "image/jpeg");
   let multipart: Uint8Array = new Uint8Array(0);
-  const f = await fixture((path, method, _body, rawBody) => {
+  let uploadContentType = "";
+  const f = await fixture((path, method, _body, rawBody, contentType) => {
     if (path !== "/upload/image" || method !== "POST") return { status: 404 };
     multipart = rawBody;
+    uploadContentType = contentType;
     const name = expected.slice("hitch/".length);
     return {
       body: JSON.stringify({ name, subfolder: "hitch", type: "input" }),
@@ -220,11 +229,62 @@ test("uploads exact binary in bounded multipart with owner-scoped deterministic 
   assert.match(expected, /^hitch\/[a-f0-9]{64}\.jpg$/u);
   const wire = Buffer.from(multipart).toString("latin1");
   assert.match(wire, /Content-Type: image\/jpeg\r\n\r\n/u);
+  const boundary = uploadContentType.match(
+    /boundary=(----hitch-[a-f0-9]{48})/u,
+  )?.[1];
+  assert.ok(boundary);
+  assert.notEqual(boundary, "----hitch-comfy-upload-v1");
   assert.match(wire, /name="type"\r\n\r\ninput/u);
   assert.match(wire, /name="subfolder"\r\n\r\nhitch/u);
   assert.match(wire, /name="overwrite"\r\n\r\ntrue/u);
   assert.notEqual(comfyUploadPath("owner-B", hash, "image/jpeg"), expected);
   assert.equal(comfyUploadPath("owner-A", hash, "image/jpeg"), expected);
+});
+
+test("upload retains immutable constructor origin and trusted headers snapshot", async (t) => {
+  let firstCalls = 0;
+  let secondCalls = 0;
+  let authorization = "";
+  const first = createServer((request, response) => {
+    firstCalls += 1;
+    authorization = request.headers.authorization ?? "";
+    const chunks: Buffer[] = [];
+    request.on("data", (chunk: Buffer) => chunks.push(chunk));
+    request.on("end", () => {
+      const wire = Buffer.concat(chunks).toString("latin1");
+      const name = wire.match(/filename="([^"]+)"/u)?.[1] ?? "";
+      response.end(JSON.stringify({ name, subfolder: "hitch", type: "input" }));
+    });
+  });
+  const second = createServer((_request, response) => {
+    secondCalls += 1;
+    response.end("{}");
+  });
+  await Promise.all([
+    new Promise<void>((resolve) => first.listen(0, "127.0.0.1", resolve)),
+    new Promise<void>((resolve) => second.listen(0, "127.0.0.1", resolve)),
+  ]);
+  t.after(async () => {
+    await close(first);
+    await close(second);
+  });
+  const firstAddress = first.address();
+  const secondAddress = second.address();
+  assert.ok(firstAddress && typeof firstAddress === "object");
+  assert.ok(secondAddress && typeof secondAddress === "object");
+  const config = {
+    key: "operator",
+    origin: `http://127.0.0.1:${firstAddress.port}`,
+    allowPrivate: true,
+    headers: { Authorization: "Bearer original" },
+  };
+  const client = new ComfyBackendClient(config);
+  config.origin = `http://127.0.0.1:${secondAddress.port}`;
+  config.headers.Authorization = "Bearer changed";
+  await client.upload(Buffer.from("safe"), "image/png", "owner");
+  assert.equal(firstCalls, 1);
+  assert.equal(secondCalls, 0);
+  assert.equal(authorization, "Bearer original");
 });
 
 test("historyMedia reads PreviewVideo animated/images metadata and ignores undeclared nodes", async (t) => {
@@ -255,6 +315,12 @@ test("historyMedia reads PreviewVideo animated/images metadata and ignores undec
   await rejectsCode(
     f.client.historyMedia("p1", ["chosen"], "image"),
     "history-invalid",
+  );
+  const unavailable = await fixture(() => ({ status: 503, body: "temporary" }));
+  t.after(() => close(unavailable.server));
+  await rejectsCode(
+    unavailable.client.historyMedia("p1", ["chosen"], "video"),
+    "history-unavailable",
   );
 });
 

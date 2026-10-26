@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { EgressClient } from "../egress/client.js";
 import type { EgressServiceConfig } from "../egress/client.js";
 
@@ -54,7 +54,7 @@ const SAFE_MEDIA_FILENAME =
   /^[A-Za-z0-9][A-Za-z0-9._-]{0,254}\.(?:png|jpe?g|webp|mp4)$/iu;
 const SAFE_SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const IMAGE_LIMIT = 8;
-const MEDIA_LIMIT = 10;
+const MEDIA_LIMIT = 8;
 const UPLOAD_MAX_BYTES = 20 * 1024 * 1024;
 const UPLOAD_REQUEST_MAX_BYTES = UPLOAD_MAX_BYTES + 64 * 1024;
 const MIME_EXTENSION: Readonly<Record<string, string>> = {
@@ -90,16 +90,25 @@ export class ComfyBackendClient {
   readonly #operatorHeaders: Readonly<Record<string, string>>;
 
   constructor(operator: EgressServiceConfig) {
-    this.#operator = operator;
-    this.#operatorHeaders = operator.headers ?? {};
-    this.#key = operator.key;
-    this.#control = new EgressClient([operator], {
+    const headers = Object.freeze({ ...(operator.headers ?? {}) });
+    const secrets =
+      operator.secrets === undefined
+        ? undefined
+        : Object.freeze([...operator.secrets]);
+    this.#operator = Object.freeze({
+      ...operator,
+      headers,
+      ...(secrets === undefined ? {} : { secrets }),
+    });
+    this.#operatorHeaders = headers;
+    this.#key = this.#operator.key;
+    this.#control = new EgressClient([this.#operator], {
       maxRequestBytes: 256 * 1024,
       maxResponseBytes: 256 * 1024,
       deadlineMs: 10_000,
       maxRedirects: 0,
     });
-    this.#binary = new EgressClient([operator], {
+    this.#binary = new EgressClient([this.#operator], {
       maxRequestBytes: 256 * 1024,
       maxResponseBytes: 10 * 1024 * 1024,
       deadlineMs: 10_000,
@@ -162,7 +171,12 @@ export class ComfyBackendClient {
       const contentHash = createHash("sha256").update(bytes).digest("hex");
       const expected = comfyUploadPath(scopeKey, contentHash, mimeType);
       const name = expected.slice("hitch/".length);
-      const boundary = "----hitch-comfy-upload-v1";
+      let boundary: string;
+      let delimiter: Buffer;
+      do {
+        boundary = `----hitch-${randomBytes(24).toString("hex")}`;
+        delimiter = Buffer.from(`--${boundary}`, "ascii");
+      } while (Buffer.from(bytes).indexOf(delimiter) !== -1);
       const prefix = Buffer.from(
         `--${boundary}\r\nContent-Disposition: form-data; name="image"; filename="${name}"\r\nContent-Type: ${mimeType}\r\n\r\n`,
         "ascii",
@@ -295,25 +309,31 @@ export class ComfyBackendClient {
     kind: "image" | "video",
     signal?: AbortSignal,
   ): Promise<ComfyMediaHistory> {
-    try {
-      if (
-        !PROMPT_ID.test(promptId) ||
-        !Array.isArray(outputNodes) ||
-        outputNodes.length < 1 ||
-        outputNodes.length > MEDIA_LIMIT ||
-        new Set(outputNodes).size !== outputNodes.length ||
-        outputNodes.some(
-          (node) => typeof node !== "string" || !SAFE_SEGMENT.test(node),
-        )
+    if (
+      !PROMPT_ID.test(promptId) ||
+      !Array.isArray(outputNodes) ||
+      outputNodes.length < 1 ||
+      outputNodes.length > MEDIA_LIMIT ||
+      new Set(outputNodes).size !== outputNodes.length ||
+      outputNodes.some(
+        (node) => typeof node !== "string" || !SAFE_SEGMENT.test(node),
       )
-        throw new Error();
-      const response = await this.#control.request({
+    )
+      throw new ComfyBackendError("history-invalid");
+    let response;
+    try {
+      response = await this.#control.request({
         serviceKey: this.#key,
         method: "GET",
         path: `/history/${encodeURIComponent(promptId)}`,
         ...(signal === undefined ? {} : { signal }),
       });
-      if (response.status !== 200) throw new Error();
+    } catch {
+      throw new ComfyBackendError("history-unavailable");
+    }
+    if (response.status !== 200)
+      throw new ComfyBackendError("history-unavailable");
+    try {
       const root: unknown = JSON.parse(response.text);
       if (!isRecord(root)) throw new Error();
       if (!Object.hasOwn(root, promptId)) return { state: "pending" };
