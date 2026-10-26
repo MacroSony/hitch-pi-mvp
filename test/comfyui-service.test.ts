@@ -200,6 +200,19 @@ test("Comfy service enforces owners, strict tool inputs, and reports cancel bool
       { job_id: result.id },
     )) as { cancel_result: boolean; state: string };
     assert.equal(stopped.state, "cancelled");
+    const race = (await service.execute(
+      { userId: "alice", turnId: "t" },
+      "paint",
+      { prompt: "race test" },
+    )) as { id: string };
+    f.ledger.markComfyJobCancelled = () => false;
+    const lostRace = (await service.execute(
+      { userId: "alice", turnId: "t" },
+      "paint_job_cancel",
+      { job_id: race.id },
+    )) as { state: string; cancel_result: boolean };
+    assert.equal(lostRace.state, "submitted");
+    assert.equal(lostRace.cancel_result, false);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -332,6 +345,178 @@ test("multiple backend images fail instead of truncating", async () => {
     });
     await service.tick();
     assert.equal([...f.jobs.values()][0]?.state, "failed");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("paint requires configured bindings and a failed submitting transition blocks backend submission", async () => {
+  const f = fixture();
+  const noWidth = new ComfyWorkflowPolicy({
+    id: "promptonly",
+    graph: {
+      "1": { class_type: "Text", inputs: { value: "base" } },
+      "2": { class_type: "SaveImage", inputs: { images: ["1", 0] } },
+    },
+    variables: {
+      prompt: { nodeId: "1", input: "value", type: "string", maxLength: 8192 },
+    },
+    outputNodes: ["2"],
+  });
+  const root = mkdtempSync(join(tmpdir(), "comfy-service-"));
+  let submits = 0;
+  try {
+    const backend = {
+      async submit() {
+        submits++;
+        return "backend";
+      },
+      async cancel() {
+        return false as const;
+      },
+      async history() {
+        return { state: "pending" as const };
+      },
+      async download() {
+        return png;
+      },
+    };
+    const service = new ComfyService({
+      ledger: f.ledger,
+      media: new MediaStore(root),
+      backend: backend as never,
+      workflows: [noWidth],
+      enabledUsers: ["alice"],
+    });
+    await assert.rejects(
+      service.execute({ userId: "alice", turnId: "t" }, "paint", {
+        prompt: "plain test",
+        width: 512,
+      }),
+    );
+    f.ledger.markComfyJobSubmitting = () => false;
+    const response = (await service.execute(
+      { userId: "alice", turnId: "t" },
+      "paint",
+      { prompt: "plain test" },
+    )) as { state: string };
+    assert.equal(response.state, "prepared");
+    assert.equal(submits, 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("incomplete image artifacts are discarded and false completion discards only its imported artifact", async () => {
+  const f = fixture();
+  const root = mkdtempSync(join(tmpdir(), "comfy-service-"));
+  try {
+    const media = new MediaStore(root);
+    const incomplete = Buffer.concat([
+      Buffer.from([0xff, 0xd8]),
+      Buffer.from("partial jpeg data without the closing marker"),
+    ]);
+    const backend = {
+      async submit() {
+        return "backend";
+      },
+      async cancel() {
+        return false as const;
+      },
+      async history() {
+        return {
+          state: "complete" as const,
+          images: [{ filename: "fixture.jpg", type: "output" as const }],
+        };
+      },
+      async download() {
+        return incomplete;
+      },
+    };
+    const service = new ComfyService({
+      ledger: f.ledger,
+      media,
+      backend: backend as never,
+      workflows: [f.policy],
+      enabledUsers: ["alice"],
+    });
+    await service.execute({ userId: "alice", turnId: "t" }, "paint", {
+      prompt: "plain test",
+    });
+    await service.tick();
+    assert.equal([...f.jobs.values()][0]?.state, "failed");
+    const artifact = await media.ingest(
+      "alice",
+      (async function* () {
+        yield png;
+      })(),
+      { expectImage: true },
+    );
+    let attempted: unknown;
+    f.ledger.finishComfyJob = (_user, _id, _outcome, value) => {
+      attempted = value;
+      return false;
+    };
+    const goodBackend = {
+      ...backend,
+      async download() {
+        return png;
+      },
+    };
+    const second = new ComfyService({
+      ledger: f.ledger,
+      media,
+      backend: goodBackend as never,
+      workflows: [f.policy],
+      enabledUsers: ["alice"],
+    });
+    await second.execute({ userId: "alice", turnId: "t" }, "paint", {
+      prompt: "another plain test",
+    });
+    await second.tick();
+    assert.ok(attempted);
+    assert.throws(() => media.verifiedObjectPath(attempted as typeof artifact));
+    assert.equal(f.jobs.get("job2")?.state, "submitted");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("tick does not poll pending jobs whose owners are no longer enabled", async () => {
+  const f = fixture();
+  const root = mkdtempSync(join(tmpdir(), "comfy-service-"));
+  let polls = 0;
+  try {
+    const backend = {
+      async submit() {
+        return "backend";
+      },
+      async cancel() {
+        return false as const;
+      },
+      async history() {
+        polls++;
+        return { state: "pending" as const };
+      },
+      async download() {
+        return png;
+      },
+    };
+    await f.ledger.createComfyJob(
+      "removed",
+      "t",
+      "fixture",
+      f.policy.render({ prompt: "test" }),
+    );
+    const service = new ComfyService({
+      ledger: f.ledger,
+      media: new MediaStore(root),
+      backend: backend as never,
+      workflows: [f.policy],
+      enabledUsers: ["alice"],
+    });
+    await service.tick();
+    assert.equal(polls, 0);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

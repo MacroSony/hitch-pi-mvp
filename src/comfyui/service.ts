@@ -16,6 +16,28 @@ const JOB_TIMEOUT_MS = 30 * 60 * 1000;
 const POLL_MS = 2_000;
 const SAFE = "Invalid Comfy tool request";
 
+function imageMime(bytes: Buffer): string {
+  if (
+    bytes.length >= 8 &&
+    bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+  )
+    return "image/png";
+  if (
+    bytes.length >= 3 &&
+    bytes[0] === 0xff &&
+    bytes[1] === 0xd8 &&
+    bytes[2] === 0xff
+  )
+    return "image/jpeg";
+  if (
+    bytes.length >= 12 &&
+    bytes.toString("ascii", 0, 4) === "RIFF" &&
+    bytes.toString("ascii", 8, 12) === "WEBP"
+  )
+    return "image/webp";
+  return "application/octet-stream";
+}
+
 export interface ComfyServiceOptions {
   readonly ledger: ComfyJobLedger;
   readonly media: MediaStore;
@@ -141,8 +163,15 @@ export class ComfyService implements ComfyToolHost {
         : this.#workflows.find((w) => w.definition.id === args.workflow);
     if (!policy) throw new Error(SAFE);
     const vars = policy.definition.variables;
-    const values: Record<string, unknown> = {};
-    if (Object.hasOwn(vars, "prompt")) values.prompt = args.prompt;
+    if (
+      !Object.hasOwn(vars, "prompt") ||
+      (args.negative_prompt !== undefined &&
+        !Object.hasOwn(vars, "negative")) ||
+      (args.width !== undefined && !Object.hasOwn(vars, "width")) ||
+      (args.height !== undefined && !Object.hasOwn(vars, "height"))
+    )
+      throw new Error(SAFE);
+    const values: Record<string, unknown> = { prompt: args.prompt };
     if (Object.hasOwn(vars, "negative") && args.negative_prompt !== undefined)
       values.negative = args.negative_prompt;
     if (Object.hasOwn(vars, "width") && args.width !== undefined)
@@ -159,7 +188,14 @@ export class ComfyService implements ComfyToolHost {
       policy.definition.id,
       snapshot,
     );
-    this.#ledger.markComfyJobSubmitting(context.userId, job.id);
+    if (!this.#ledger.markComfyJobSubmitting(context.userId, job.id)) {
+      return {
+        id: job.id,
+        workflow: policy.definition.id,
+        state:
+          this.#ledger.getComfyJob(context.userId, job.id)?.state ?? "prepared",
+      };
+    }
     try {
       const backendId = await this.#backend.submit(
         snapshot.graph,
@@ -233,25 +269,26 @@ export class ComfyService implements ComfyToolHost {
     if (!job) return { state: "unknown", cancel_result: "unknown" };
     if (job.state === "prepared") {
       const changed = this.#ledger.markComfyJobCancelled(userId, job.id);
+      const actual = this.#ledger.getComfyJob(userId, job.id);
       return {
-        ...safeJob({ ...job, state: changed ? "cancelled" : job.state }),
-        cancel_result: changed ? true : false,
+        ...safeJob(actual ?? job),
+        cancel_result: changed && actual?.state === "cancelled",
       };
     }
     if (job.state !== "submitted" || !job.backendPromptId)
       return { ...safeJob(job), cancel_result: false };
     try {
       const result = await this.#backend.cancel(job.backendPromptId, signal);
-      if (result === true) this.#ledger.markComfyJobCancelled(userId, job.id);
+      const changed =
+        result === true && this.#ledger.markComfyJobCancelled(userId, job.id);
+      const actual = this.#ledger.getComfyJob(userId, job.id);
       return {
-        ...safeJob({
-          ...job,
-          state: result === true ? "cancelled" : job.state,
-        }),
-        cancel_result: result,
+        ...safeJob(actual ?? job),
+        cancel_result: result === true && !changed ? false : result,
       };
     } catch {
-      return { ...safeJob(job), cancel_result: false };
+      const actual = this.#ledger.getComfyJob(userId, job.id);
+      return { ...safeJob(actual ?? job), cancel_result: "unknown" };
     }
   }
 
@@ -272,11 +309,14 @@ export class ComfyService implements ComfyToolHost {
     if (signal?.aborted) return;
     for (const job of this.#ledger.pendingComfyJobs(20)) {
       if (signal?.aborted) return;
+      if (!this.enabledUsers.includes(job.userId)) continue;
       if (job.state !== "submitted" || !job.backendPromptId) continue;
       if (Date.now() - job.createdAt >= JOB_TIMEOUT_MS) {
         this.#ledger.finishComfyJob(job.userId, job.id, "failed");
         continue;
       }
+      let artifact: RuntimeArtifact | undefined;
+      let finishing = false;
       try {
         const history = await this.#backend.history(
           job.backendPromptId,
@@ -284,11 +324,7 @@ export class ComfyService implements ComfyToolHost {
           signal,
         );
         if (history.state === "pending") continue;
-        if (history.state === "failed") {
-          this.#ledger.finishComfyJob(job.userId, job.id, "failed");
-          continue;
-        }
-        if (history.images.length !== 1) {
+        if (history.state === "failed" || history.images.length !== 1) {
           this.#ledger.finishComfyJob(job.userId, job.id, "failed");
           continue;
         }
@@ -297,7 +333,16 @@ export class ComfyService implements ComfyToolHost {
           this.#ledger.finishComfyJob(job.userId, job.id, "failed");
           continue;
         }
-        const artifact: RuntimeArtifact = await this.#media.ingest(
+        const mime = imageMime(bytes);
+        const extension =
+          mime === "image/png"
+            ? "png"
+            : mime === "image/jpeg"
+              ? "jpg"
+              : mime === "image/webp"
+                ? "webp"
+                : "bin";
+        artifact = await this.#media.ingest(
           job.userId,
           (async function* () {
             yield bytes;
@@ -305,16 +350,34 @@ export class ComfyService implements ComfyToolHost {
           {
             advertisedBytes: bytes.length,
             advertisedMime: "application/octet-stream",
-            displayName: "comfy-result",
+            displayName: `paint-${job.id}.${extension}`,
             expectImage: true,
           },
         );
-        if (!artifact.mimeType.startsWith("image/")) {
+        if (
+          artifact.mediaKind !== "image" ||
+          !["image/png", "image/jpeg", "image/webp"].includes(
+            artifact.mimeType,
+          ) ||
+          artifact.mimeType !== mime
+        ) {
+          this.#media.discard(artifact);
+          artifact = undefined;
           this.#ledger.finishComfyJob(job.userId, job.id, "failed");
           continue;
         }
-        this.#ledger.finishComfyJob(job.userId, job.id, "completed", artifact);
+        finishing = true;
+        const committed = this.#ledger.finishComfyJob(
+          job.userId,
+          job.id,
+          "completed",
+          artifact,
+        );
+        if (!committed) this.#media.discard(artifact);
+        artifact = undefined;
       } catch (error) {
+        if (artifact && !finishing) this.#media.discard(artifact);
+        if (finishing) continue;
         if (signal?.aborted) return;
         if (
           error instanceof ComfyBackendError &&
