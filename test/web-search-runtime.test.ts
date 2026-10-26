@@ -88,7 +88,10 @@ test("web extension is explicit, bounded, and keeps disabled/catalog turns at ei
     join(repository, "src", "pi", "native-runtime.ts"),
     "utf8",
   );
-  assert.match(runtime, /expectedToolNames\(context\.webSearchEnabled\)/u);
+  assert.match(
+    runtime,
+    /expectedToolNames\(\s*context\.webSearchEnabled,\s*context\.paintEnabled,?\s*\)/u,
+  );
   assert.match(
     runtime,
     /this\.#context\(label, workspace, "catalog", false\)/u,

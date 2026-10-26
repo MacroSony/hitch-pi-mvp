@@ -61,6 +61,8 @@ import type {
   ThinkingLevel,
 } from "../runtime/runtime.js";
 import type { ForgeCatalog, ForgeResolved } from "../forge/types.js";
+import { COMFY_TOOL_NAMES, type ComfyToolHost } from "../comfyui/types.js";
+import { ComfyToolBridge } from "../comfyui/bridge.js";
 
 const PI_VERSION = "0.85.1";
 const PI_TREE_SHA256 =
@@ -126,13 +128,18 @@ function toolsManifest(): ToolsManifest {
   return toolsManifestCache;
 }
 
-function expectedToolNames(webSearchEnabled: boolean): string[] {
+function expectedToolNames(
+  webSearchEnabled: boolean,
+  paintEnabled = false,
+): string[] {
   const manifest = toolsManifest();
-  const base = manifest.staticTools;
-  if (!webSearchEnabled) return [...base].sort();
-  if (manifest.optionalTools["web_search"] === undefined)
-    throw new Error("sandbox tools manifest is missing web_search");
-  return [...base, "web_search"].sort();
+  const optional = [
+    ...(webSearchEnabled ? ["web_search"] : []),
+    ...(paintEnabled ? COMFY_TOOL_NAMES : []),
+  ];
+  if (optional.some((name) => manifest.optionalTools[name] === undefined))
+    throw new Error("sandbox tools manifest is missing optional tools");
+  return [...manifest.staticTools, ...optional].sort();
 }
 
 const PI_PROFILE_ROOT = "pi-profiles";
@@ -167,6 +174,7 @@ export interface NativePiRuntimeOptions {
   readonly maxConcurrentTurns?: number;
   readonly turnTimeoutMs?: number;
   readonly mediaStore?: MediaStore;
+  readonly paint?: ComfyToolHost;
   readonly webSearch?: {
     readonly apiKey: string;
     readonly enabledUsers: readonly string[];
@@ -185,6 +193,11 @@ export interface ControllerContext {
   readonly turnHandle: string;
   readonly userId: string;
   readonly webSearchEnabled: boolean;
+  readonly paintEnabled?: boolean;
+  readonly paintBridge?: {
+    readonly socketPath: string;
+    readonly token: string;
+  };
   readonly sharedAuthRequired?: boolean;
   readonly antigravityRequired?: boolean;
   readonly activeTools?: readonly string[];
@@ -1163,7 +1176,10 @@ export async function waitForAttestation(
   controller: { readonly exited: boolean; readonly stderrTail?: string },
   context: ControllerContext,
 ): Promise<void> {
-  const expectedTools = expectedToolNames(context.webSearchEnabled);
+  const expectedTools = expectedToolNames(
+    context.webSearchEnabled,
+    context.paintEnabled,
+  );
   const expectedActiveTools = context.activeTools ?? expectedTools;
   const extensionPath = join(assetRoot(), "hitch-sandbox.ts");
   const webExtensionPath = join(assetRoot(), "pi-web-search.ts");
@@ -1207,7 +1223,11 @@ export async function waitForAttestation(
             throw new Error("sandbox startup attestation is invalid");
           const sourcePaths = item.sourcePaths;
           const expectedSources = expectedTools.map((name) =>
-            name === "web_search" ? webExtensionPath : extensionPath,
+            name === "web_search"
+              ? webExtensionPath
+              : (COMFY_TOOL_NAMES as readonly string[]).includes(name)
+                ? join(assetRoot(), "pi-comfyui.ts")
+                : extensionPath,
           );
           if (JSON.stringify(sourcePaths) !== JSON.stringify(expectedSources))
             throw new Error("sandbox tool source attestation is invalid");
@@ -1236,6 +1256,8 @@ export async function waitForAttestation(
           throw new Error("sandbox extension digest attestation is invalid");
         if (Boolean(standard.webSearchEnabled) !== context.webSearchEnabled)
           throw new Error("sandbox web-search flag attestation is invalid");
+        if (Boolean(standard.paintEnabled) !== Boolean(context.paintEnabled))
+          throw new Error("sandbox paint flag attestation is invalid");
         return;
       }
     }
@@ -1423,6 +1445,8 @@ export class NativePiRuntime implements AgentRuntime {
   readonly #owner: string;
   readonly #webSearchKey: string | undefined;
   readonly #webSearchUsers: ReadonlySet<string>;
+  readonly #paint: ComfyToolHost | undefined;
+  readonly #paintUsers: ReadonlySet<string>;
   readonly #antigravity: boolean;
   readonly #sharedProfileDir: string;
   #poisoned = false;
@@ -1455,6 +1479,8 @@ export class NativePiRuntime implements AgentRuntime {
     this.#owner = randomBytes(8).toString("hex");
     this.#webSearchKey = options.webSearch?.apiKey;
     this.#webSearchUsers = new Set(options.webSearch?.enabledUsers ?? []);
+    this.#paint = options.paint;
+    this.#paintUsers = new Set(options.paint?.enabledUsers ?? []);
     this.#antigravity = options.antigravity === true;
     this.#sharedProfileDir = options.piProfileDir;
   }
@@ -1512,6 +1538,17 @@ export class NativePiRuntime implements AgentRuntime {
       }
       for (const userId of options.webSearch.enabledUsers)
         safeSegment(userId, "web search user id");
+    }
+    if (options.paint !== undefined) {
+      if (
+        typeof options.paint.execute !== "function" ||
+        !Array.isArray(options.paint.enabledUsers) ||
+        options.paint.enabledUsers.length > 8 ||
+        new Set(options.paint.enabledUsers).size !==
+          options.paint.enabledUsers.length ||
+        options.paint.enabledUsers.some((id) => !configuredUsers.has(id))
+      )
+        throw new Error("paint users are not prepared for the runtime");
     }
     const { profiles, catalogProfile } = preparePiProfiles(
       options.piProfileDir,
@@ -1629,7 +1666,10 @@ export class NativePiRuntime implements AgentRuntime {
     const mcpEnabled = mcpConfigured;
     const worker = join(this.#assets, "sandbox-worker.mjs");
     const helper = join(this.#assets, "secure-bwrap-helper");
-    const baseline = expectedToolNames(context.webSearchEnabled);
+    const baseline = expectedToolNames(
+      context.webSearchEnabled,
+      context.paintEnabled,
+    );
     const activeTools = context.activeTools ?? baseline;
     const environment: NodeJS.ProcessEnv = {
       PATH: "/usr/bin:/bin",
@@ -1684,6 +1724,16 @@ export class NativePiRuntime implements AgentRuntime {
               toolsManifest().assets["pi-web-search.ts"],
           }
         : {}),
+      ...(context.paintEnabled && context.paintBridge !== undefined
+        ? {
+            HITCH_COMFY_ENABLED: "1",
+            HITCH_COMFY_SOCKET: context.paintBridge.socketPath,
+            HITCH_COMFY_TOKEN: context.paintBridge.token,
+            HITCH_COMFY_EXTENSION_PATH: join(this.#assets, "pi-comfyui.ts"),
+            HITCH_COMFY_EXTENSION_SHA256:
+              toolsManifest().assets["pi-comfyui.ts"],
+          }
+        : {}),
       ...(context.antigravityRequired
         ? {
             HITCH_ANTIGRAVITY_ENABLED: "1",
@@ -1714,13 +1764,18 @@ export class NativePiRuntime implements AgentRuntime {
     };
     return new PiRpcProcess(
       this.#cli,
-      controllerArguments(
-        extension,
-        context.webSearchEnabled ? webSearchExtension : undefined,
-        session,
-        context.antigravityRequired ? antigravityExtension : undefined,
-        mcpEnabled ? mcpExtension : undefined,
-      ),
+      [
+        ...controllerArguments(
+          extension,
+          context.webSearchEnabled ? webSearchExtension : undefined,
+          session,
+          context.antigravityRequired ? antigravityExtension : undefined,
+          mcpEnabled ? mcpExtension : undefined,
+        ),
+        ...(context.paintEnabled
+          ? ["--extension", join(this.#assets, "pi-comfyui.ts")]
+          : []),
+      ],
       context.workspace,
       environment,
       onTextDelta,
@@ -1908,7 +1963,8 @@ export class NativePiRuntime implements AgentRuntime {
     }
     const userId = safeSegment(turn.userId, "runtime user id");
     const isWebEnabled = this.#webSearchUsers.has(userId);
-    const baselineTools = expectedToolNames(isWebEnabled);
+    const isPaintEnabled = this.#paintUsers.has(userId);
+    const baselineTools = expectedToolNames(isWebEnabled, isPaintEnabled);
     const sessionDirectory = join(this.#sessionsRoot, userId);
     privateDirectory(sessionDirectory);
     const session =
@@ -2002,15 +2058,18 @@ export class NativePiRuntime implements AgentRuntime {
             mode: resolvedForge.mode,
             systemPrompt: resolvedForge.systemPrompt,
           };
-    const context = this.#context(
-      safeSegment(turn.turnId, "runtime Turn id"),
-      turn.workspace,
-      userId,
-      isWebEnabled,
-      activeTools,
-      forgePrompt,
-      resolvedForge?.tools,
-    );
+    let context: ControllerContext = {
+      ...this.#context(
+        safeSegment(turn.turnId, "runtime Turn id"),
+        turn.workspace,
+        userId,
+        isWebEnabled,
+        activeTools,
+        forgePrompt,
+        resolvedForge?.tools,
+      ),
+      ...(isPaintEnabled ? { paintEnabled: true } : {}),
+    };
     const nativeImages =
       selectedModel !== undefined && selectedModel.input.includes("image");
     let preparedAttachments: ReturnType<typeof materializeTurnAttachments>;
@@ -2034,6 +2093,10 @@ export class NativePiRuntime implements AgentRuntime {
       historicalLines,
     } = preparedAttachments;
     const promptSections: string[] = [];
+    if (isPaintEnabled)
+      promptSections.push(
+        "ComfyUI generation is a background job: submit paint once and promptly reply with its short job ID. Hitch automatically sends the completed image to this channel. Do not repeatedly poll or keep the chat waiting. Use paint_job_status when asked, and targeted paint_job_cancel for an explicit cancellation request. Never invent host paths or run a second generation merely to retrieve the first result.",
+      );
     if (imageInboxLines.length > 0) {
       promptSections.push(
         `Hitch attached these image files at the exact /inbox paths below for this Turn:\n${imageInboxLines.join("\n")}\nThe /inbox files are read-only and turn-local; copy any file you need to keep into /workspace. ${nativeImages ? "The image visual input is also attached natively; use that visual input and the paths above refer to the original files." : "This model does not support native image input; inspect the read-only files using the paths above if possible."}`,
@@ -2053,12 +2116,32 @@ export class NativePiRuntime implements AgentRuntime {
       promptSections.length === 0
         ? turn.prompt
         : `${turn.prompt}\n\n${promptSections.join("\n\n")}`;
-    const controller = this.#controller(
-      context,
-      session,
-      onProgress,
-      profileDir,
-    );
+    let paintBridge: ComfyToolBridge | undefined;
+    let controller: PiRpcProcess;
+    try {
+      if (isPaintEnabled && this.#paint !== undefined) {
+        paintBridge = await ComfyToolBridge.start(
+          join(
+            "/tmp",
+            `hitch-paint-${process.getuid?.() ?? "user"}-${randomBytes(8).toString("hex")}`,
+          ),
+          { userId, turnId: turn.turnId },
+          this.#paint,
+        );
+        context = {
+          ...context,
+          paintBridge: {
+            socketPath: paintBridge.socketPath,
+            token: paintBridge.token,
+          },
+        };
+      }
+      controller = this.#controller(context, session, onProgress, profileDir);
+    } catch {
+      await paintBridge?.close();
+      rmSync(context.root, { recursive: true, force: true });
+      return { outcome: "unknown", text: "", sessionReusable: false };
+    }
     let phase: RuntimeFailurePhase = "attest";
     let timedOut = false;
     let promptSubmitted = false;
@@ -2346,14 +2429,6 @@ export class NativePiRuntime implements AgentRuntime {
         }
       }
       logPiRuntimeFailure({ phase, turnId: turn.turnId, error });
-      if (phase === "attest")
-        console.error(
-          JSON.stringify({
-            event: "pi-attest-debug",
-            turnId: turn.turnId,
-            detail: String(error).slice(0, 7000),
-          }),
-        );
       if (timer !== undefined) clearTimeout(timer);
       if (forcedKill !== undefined) clearTimeout(forcedKill);
       controller.kill();
@@ -2362,6 +2437,13 @@ export class NativePiRuntime implements AgentRuntime {
       return { outcome: "unknown", text: "", sessionReusable: false };
     } finally {
       signal.removeEventListener("abort", onExternalAbort);
+      let paintBridgeCleanupFailed = false;
+      try {
+        await paintBridge?.close();
+      } catch {
+        paintBridgeCleanupFailed = true;
+        this.#poisoned = true;
+      }
       const cleaned = await cleanupOwnedSandboxScopes(this.#owner);
       if (!cleaned) {
         this.#poisoned = true;
@@ -2370,6 +2452,8 @@ export class NativePiRuntime implements AgentRuntime {
       }
       normalizeProfilePermissions(profileDir);
       rmSync(context.root, { recursive: true, force: true });
+      if (paintBridgeCleanupFailed)
+        throw new Error("paint bridge cleanup could not be confirmed");
     }
   }
 }

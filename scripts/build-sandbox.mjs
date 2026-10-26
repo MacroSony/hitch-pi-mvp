@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const source = join(repository, "packages", "hitch-sandbox-extension");
 const webSource = join(repository, "packages", "hitch-web-search-extension");
+const comfySource = join(repository, "packages", "hitch-comfyui-extension");
 const antigravitySource = join(
   repository,
   "packages",
@@ -40,6 +41,7 @@ for (const [from, name] of [
   [join(source, "hitch-mcp.ts"), "hitch-mcp.ts"],
   [join(source, "manifest-attest.mjs"), "manifest-attest.mjs"],
   [join(webSource, "pi-web-search.ts"), "pi-web-search.ts"],
+  [join(comfySource, "pi-comfyui.ts"), "pi-comfyui.ts"],
   [join(antigravitySource, "pi-antigravity.ts"), "pi-antigravity.ts"],
   [join(source, "sandbox-backend.mjs"), "sandbox-backend.mjs"],
   [join(source, "sandbox-worker.mjs"), "sandbox-worker.mjs"],
@@ -109,6 +111,7 @@ for (const name of [
   "hitch-mcp.ts",
   "manifest-attest.mjs",
   "pi-web-search.ts",
+  "pi-comfyui.ts",
   "pi-antigravity.ts",
   "sandbox-backend.mjs",
   "sandbox-worker.mjs",
@@ -123,7 +126,17 @@ for (const name of [
 const manifest = {
   schemaVersion: 1,
   staticTools,
-  optionalTools: { web_search: { asset: "pi-web-search.ts" } },
+  optionalTools: {
+    web_search: { asset: "pi-web-search.ts" },
+    ...Object.fromEntries(
+      [
+        "paint",
+        "paint_job_cancel",
+        "paint_job_status",
+        "paint_list_workflows",
+      ].map((name) => [name, { asset: "pi-comfyui.ts" }]),
+    ),
+  },
   assets,
 };
 const manifestPath = join(destination, "tools-manifest.json");

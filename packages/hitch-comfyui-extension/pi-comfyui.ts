@@ -68,7 +68,7 @@ const schemas = {
   ),
 } as const;
 const MAX_RESPONSE = 32 * 1024;
-function attest(pi: ExtensionAPI): void {
+function attest(pi: ExtensionAPI, tool: (typeof names)[number]): void {
   if (!socket || !token) throw new Error("paint bridge is unavailable");
   const activeRaw = process.env.HITCH_ACTIVE_TOOLS;
   if (activeRaw === undefined) throw new Error("active tool policy missing");
@@ -78,7 +78,7 @@ function attest(pi: ExtensionAPI): void {
   } catch {
     throw new Error("active tool policy invalid");
   }
-  if (!Array.isArray(active) || names.some((name) => !active.includes(name)))
+  if (!Array.isArray(active) || !active.includes(tool))
     throw new Error("paint tool is not active");
   const sourcePath = process.env.HITCH_P0_EXTENSION_PATH;
   if (!sourcePath) throw new Error("mandatory extension path missing");
@@ -161,12 +161,12 @@ function call(
       req.destroy();
       finish(new Error("paint request aborted"));
     };
+    req.on("error", () => finish(new Error("paint operation failed")));
     if (signal?.aborted) {
       onAbort();
       return;
     }
     signal?.addEventListener("abort", onAbort, { once: true });
-    req.on("error", () => finish(new Error("paint operation failed")));
     req.end(JSON.stringify({ tool, input }));
   });
 }
@@ -186,7 +186,7 @@ export default function (pi: ExtensionAPI): void {
       parameters: schemas[name],
       async execute(_id, input, signal) {
         try {
-          attest(pi);
+          attest(pi, name);
           const text = await call(socket!, token!, name, input, signal);
           return { content: [{ type: "text", text }], details: {} };
         } catch {

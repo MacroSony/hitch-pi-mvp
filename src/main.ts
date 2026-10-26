@@ -23,6 +23,9 @@ import { controlSocketPath, LocalControlServer } from "./local/socket.js";
 import { NativePiRuntime } from "./pi/native-runtime.js";
 import { MediaStore } from "./media/media-store.js";
 import { FakeAgentRuntime, type AgentRuntime } from "./runtime/runtime.js";
+import { ComfyBackendClient } from "./comfyui/client.js";
+import { loadComfyPolicies } from "./comfyui/config.js";
+import { ComfyService } from "./comfyui/service.js";
 
 interface CliOptions {
   readonly configPath: string;
@@ -86,6 +89,23 @@ async function main(): Promise<void> {
               ...config.wechatAccounts.map((account) => account.stateDir),
               ...config.wecomAccounts.map((account) => account.credentialsFile),
             ],
+          })
+        : undefined;
+    const paintPolicies =
+      config.paint !== undefined && config.paint.enabledUsers.length > 0
+        ? loadComfyPolicies(config.paint.workflowFile, [
+            config.dataRoot,
+            config.piProfileDir,
+            ...config.users.map((user) => user.workspace),
+            ...config.wechatAccounts.map((account) => account.stateDir),
+          ])
+        : undefined;
+    const paintBackend =
+      paintPolicies !== undefined && config.paint !== undefined
+        ? new ComfyBackendClient({
+            key: "comfyui",
+            origin: config.paint.origin,
+            allowPrivate: config.paint.allowPrivate,
           })
         : undefined;
     const endpointCount = foundation.topology.users.reduce(
@@ -152,21 +172,6 @@ async function main(): Promise<void> {
             enabledUsers: config.webSearch.enabledUsers,
           }
         : undefined;
-    const runtime: AgentRuntime =
-      cli.mode === "fake-channels"
-        ? new FakeAgentRuntime(undefined, [], forge)
-        : await NativePiRuntime.create({
-            dataRoot: foundation.topology.dataRoot.path,
-            piProfileDir: foundation.topology.piProfileDir.path,
-            userIds: foundation.topology.users.map((user) => user.id),
-            maxConcurrentTurns: config.maxConcurrentTurns,
-            mediaStore: media,
-            antigravity: config.antigravity ?? false,
-            ...(forge === undefined ? {} : { forge }),
-            ...(nativeWebSearch === undefined
-              ? {}
-              : { webSearch: nativeWebSearch }),
-          });
     const store = new HitchStore(
       foundation.database,
       undefined,
@@ -181,6 +186,35 @@ async function main(): Promise<void> {
           ]),
       ),
     );
+    const paint =
+      cli.mode === "channels" &&
+      paintBackend !== undefined &&
+      paintPolicies !== undefined &&
+      config.paint !== undefined
+        ? new ComfyService({
+            ledger: store,
+            media,
+            backend: paintBackend,
+            workflows: paintPolicies,
+            enabledUsers: config.paint.enabledUsers,
+          })
+        : undefined;
+    const runtime: AgentRuntime =
+      cli.mode === "fake-channels"
+        ? new FakeAgentRuntime(undefined, [], forge)
+        : await NativePiRuntime.create({
+            dataRoot: foundation.topology.dataRoot.path,
+            piProfileDir: foundation.topology.piProfileDir.path,
+            userIds: foundation.topology.users.map((user) => user.id),
+            maxConcurrentTurns: config.maxConcurrentTurns,
+            mediaStore: media,
+            antigravity: config.antigravity ?? false,
+            ...(paint === undefined ? {} : { paint }),
+            ...(forge === undefined ? {} : { forge }),
+            ...(nativeWebSearch === undefined
+              ? {}
+              : { webSearch: nativeWebSearch }),
+          });
     media.cleanupUnreferenced(store.artifactStorageKeys());
     const application = new HitchApplication(
       store,
@@ -242,6 +276,7 @@ async function main(): Promise<void> {
     ];
     const shutdown = new AbortController();
     let stoppedBySignal = false;
+    let paintTask: Promise<void> | undefined;
     let localClosePromise: Promise<void> | null = null;
     const closeLocalServer = (): Promise<void> => {
       if (localServer === undefined) return Promise.resolve();
@@ -267,7 +302,9 @@ async function main(): Promise<void> {
         await server.listen();
       }
       if (shutdown.signal.aborted) return;
+      paint?.recover();
       application.start();
+      paintTask = paint?.run(shutdown.signal);
       process.stdout.write(
         `${JSON.stringify({
           status: "running",
@@ -280,9 +317,13 @@ async function main(): Promise<void> {
           wechatAccounts: config.wechatAccounts.length,
           wecomAccounts: config.wecomAccounts.length,
           discordAccounts: (config.discordAccounts ?? []).length,
+          paintOwners: paint?.enabledUsers.length ?? 0,
         })}\n`,
       );
-      await Promise.all(workers.map((worker) => worker.run(shutdown.signal)));
+      await Promise.all([
+        ...workers.map((worker) => worker.run(shutdown.signal)),
+        ...(paintTask === undefined ? [] : [paintTask]),
+      ]);
       application.stop();
       await application.drain();
     } catch (error) {
@@ -294,6 +335,8 @@ async function main(): Promise<void> {
     } finally {
       process.removeListener("SIGINT", stop);
       process.removeListener("SIGTERM", stop);
+      shutdown.abort();
+      await paintTask?.catch(() => undefined);
       await closeLocalServer();
     }
   } finally {

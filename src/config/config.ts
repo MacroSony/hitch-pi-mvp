@@ -96,6 +96,13 @@ export interface WebSearchConfig {
   readonly enabledUsers: readonly string[];
 }
 
+export interface PaintConfig {
+  readonly origin: string;
+  readonly allowPrivate: boolean;
+  readonly workflowFile: string;
+  readonly enabledUsers: readonly string[];
+}
+
 export interface ForgeConfig {
   readonly root: string;
   readonly enabledUsers: readonly string[];
@@ -115,6 +122,7 @@ export interface AppConfig {
   readonly discordAccounts?: readonly DiscordAccountConfig[];
   readonly users: readonly UserConfig[];
   readonly webSearch?: WebSearchConfig;
+  readonly paint?: PaintConfig;
   readonly forge?: ForgeConfig;
   readonly antigravity?: boolean;
   readonly localControl?: LocalControlConfig;
@@ -481,6 +489,7 @@ export function parseConfig(value: unknown): AppConfig {
       "mediaMode",
       "maxConcurrentTurns",
       "webSearch",
+      "paint",
       "forge",
       "antigravity",
       "localControl",
@@ -702,6 +711,67 @@ export function parseConfig(value: unknown): AppConfig {
     };
   }
 
+  let paint: PaintConfig | undefined;
+  if (input.paint !== undefined) {
+    const resource = record(input.paint, "config.paint");
+    exactKeys(
+      resource,
+      ["origin", "allowPrivate", "workflowFile", "enabledUsers"],
+      [],
+      "config.paint",
+    );
+    const origin = stringValue(resource.origin, "config.paint.origin", 2048);
+    let parsed: URL;
+    try {
+      parsed = new URL(origin);
+    } catch {
+      fail("config.paint.origin", "expected an HTTP(S) origin");
+    }
+    if (
+      !["http:", "https:"].includes(parsed.protocol) ||
+      parsed.username ||
+      parsed.password ||
+      parsed.pathname !== "/" ||
+      parsed.search ||
+      parsed.hash ||
+      CONTROL_PATTERN.test(origin)
+    )
+      fail(
+        "config.paint.origin",
+        "expected an HTTP(S) origin without path or credentials",
+      );
+    if (typeof resource.allowPrivate !== "boolean")
+      fail("config.paint.allowPrivate", "expected a boolean");
+    const enabledUsers = arrayValue(
+      resource.enabledUsers,
+      "config.paint.enabledUsers",
+    ).map((item, index) =>
+      identifier(item, `config.paint.enabledUsers[${index}]`),
+    );
+    unique(enabledUsers, "config.paint.enabledUsers");
+    if (enabledUsers.length > 8)
+      fail("config.paint.enabledUsers", "at most 8 owners may be enabled");
+    if (
+      enabledUsers.some(
+        (id) =>
+          !users.some((user) => user.id === id && user.discord !== undefined),
+      )
+    )
+      fail(
+        "config.paint.enabledUsers",
+        "must reference configured Discord owners",
+      );
+    paint = {
+      origin: parsed.origin,
+      allowPrivate: resource.allowPrivate,
+      workflowFile: absolutePath(
+        resource.workflowFile,
+        "config.paint.workflowFile",
+      ),
+      enabledUsers,
+    };
+  }
+
   let forge: ForgeConfig | undefined;
   if (input.forge !== undefined) {
     const resource = record(input.forge, "config.forge");
@@ -770,6 +840,7 @@ export function parseConfig(value: unknown): AppConfig {
     discordAccounts,
     users,
     ...(webSearch === undefined ? {} : { webSearch }),
+    ...(paint === undefined ? {} : { paint }),
     ...(forge === undefined ? {} : { forge }),
     antigravity: antigravity ?? false,
     ...(localControl === undefined ? {} : { localControl }),

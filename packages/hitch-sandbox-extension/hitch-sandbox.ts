@@ -25,6 +25,11 @@ if (webSearchPath !== undefined && !webSearchPath.startsWith("/")) {
 if (webSearchDigest !== undefined && !/^[a-f0-9]{64}$/.test(webSearchDigest)) {
 	throw new Error("Hitch web-search extension digest is invalid");
 }
+const paintEnabled = process.env.HITCH_COMFY_ENABLED === "1";
+const paintPath = process.env.HITCH_COMFY_EXTENSION_PATH;
+const paintDigest = process.env.HITCH_COMFY_EXTENSION_SHA256;
+const paintTools = ["paint", "paint_job_cancel", "paint_job_status", "paint_list_workflows"];
+if (paintEnabled !== (paintPath !== undefined && paintDigest !== undefined) || (paintPath !== undefined && !paintPath.startsWith("/")) || (paintDigest !== undefined && !/^[a-f0-9]{64}$/.test(paintDigest))) throw new Error("Hitch paint configuration is invalid");
 const expectedTools = attestationBaseline();
 const selfPath = fileURLToPath(import.meta.url);
 const requiredEnvironment = [
@@ -262,10 +267,10 @@ export default function (pi: ExtensionAPI): void {
 		const attestation = attestToolSet(pi, {
 			label: "sandbox",
 			defaultPath: selfPath,
-			pathOverrides:
-				webSearchEnabled && webSearchPath !== undefined
-					? { web_search: webSearchPath }
-					: {},
+			pathOverrides: {
+				...(webSearchEnabled && webSearchPath !== undefined ? { web_search: webSearchPath } : {}),
+				...(paintEnabled && paintPath !== undefined ? Object.fromEntries(paintTools.map((name) => [name, paintPath])) : {}),
+			},
 			});
 		const { all, active } = attestation;
 		return {
@@ -374,6 +379,7 @@ export default function (pi: ExtensionAPI): void {
 			sourcePath: selfPath,
 			extensionDigest: process.env.HITCH_P0_EXTENSION_SHA256,
 			webSearchEnabled,
+			paintEnabled,
 			schemaDigest: attestation.schemaDigest,
 		});
 	});
