@@ -2,7 +2,7 @@
 
 ## Current outcome
 
-The first **Anima text-to-image** path is implemented in isolated `feat/comfyui-m3`, based on accepted M2 `0d90e56`. It has real native-model/GPU verification, but is **not enabled in the running LunaTest** and has not sent a live Discord M3 reply. No production/dad rollout, push, installed desktop Paint modification, or unrelated backend interruption.
+The first **Anima text-to-image** path is implemented in isolated `feat/comfyui-m3`, based on accepted M2 `0d90e56`. After separate user approval, **LunaTest was upgraded and enabled for both owners; live background recovery and combined Discord/CDN delivery are verified**. See live enablement (private operator record, not published) for current runner/config/backup identity. Natural user acceptance remains pending. No production/dad rollout, push, installed desktop Paint modification, or unrelated backend interruption.
 
 Final code verification:
 
@@ -57,9 +57,9 @@ Evidence (private test artifacts, no credentials or signed URLs):
 
 ## Migration rehearsal, not live migration
 
-Copied a consistent read-only snapshot of the actual M2 test database into a new private rehearsal directory. Ran the real schema9→10 migration **on that copy only**. All original counts of Turns, outbox, artifacts, sessions, turn/staged artifacts, users and endpoints were preserved; foreign-key check returned zero violations. Live schema remains9.
+Copied a consistent read-only snapshot of the actual M2 test database into a new private rehearsal directory. Ran the real schema9→10 migration **on that copy only**. All original counts of Turns, outbox, artifacts, sessions, turn/staged artifacts, users and endpoints were preserved; foreign-key check returned zero violations. At that pre-approval stage the live database was still schema9.
 
-Rehearsal receipt: `<test-data-root>/m3-schema-rehearsal-result.json`.
+Rehearsal receipt: `<test-data-root>/m3-schema-rehearsal-result.json`. This was the pre-approval rehearsal; the later separately authorized live migration is recorded in live enablement (private operator record, not published).
 
 ## Operator configuration contract
 
@@ -80,7 +80,9 @@ The policy file is a JSON array of 1–4 `ComfyWorkflowDefinition` objects (`src
 
 The first service supports binding names `prompt`, `negative`, `width`, `height` and optional host-randomized `seed`. Model tool input uses `prompt`, `negative_prompt`, optional `width`/`height` and configured short `workflow`. Unsupported supplied fields/bindings are rejected, not ignored. For the observed Anima graph, primitive targets are `73.value`, `74.value`, `69.value`, `71.value`, optional `66.seed`, with output node `46`. Reinspect the installed graph before provisioning; do not assume those node IDs for another workflow.
 
-## Next attended action / limits
+## Attended enablement procedure / limits
+
+The steps below were subsequently authorized and completed for LunaTest; current identity and remaining natural-user acceptance are in live enablement (private operator record, not published).
 
 1. Confirm a short LunaTest maintenance window and schema10 migration; recheck real PID/cwd/source/idle state.
 2. Stop only LunaTest, back up its dedicated DB, retain old runner/config, create a separate operator policy and opt-in M3 config/runner, and start the accepted new code. Do not copy/revert provider credentials.

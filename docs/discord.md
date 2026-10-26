@@ -1,6 +1,6 @@
 # Discord Luna — text and file connections
 
-Status: M1/M2, including cross-Turn originals and combined replies, have isolated LunaTest user acceptance. Implementation scope is [discord-plan.md](discord-plan.md). Optional M3 Anima generation code and an isolated real-model/GPU probe are accepted; live test-instance enablement/receipt remain an attended gate. See [M3 results](discord-m3-result.md).
+Status: M1/M2, including cross-Turn originals and combined replies, have isolated LunaTest user acceptance. Implementation scope is [discord-plan.md](discord-plan.md). Optional M3 Anima generation is now enabled in LunaTest after separate approval; native-model/background generation and actual Discord delivery passed. Natural user acceptance remains pending. See live M3 result (private operator record, not published).
 
 ## Connection selection
 

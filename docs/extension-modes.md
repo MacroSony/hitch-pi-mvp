@@ -5,8 +5,8 @@ B1 provides controlled HTTP and B2 adds explicit per-user Tavily search with
 attended WeChat acceptance. There is no general manifest/extension loader.
 The bounded Forge Mode A subset is code-accepted but not yet deployed; see
 `mode-a-plan.md`. A narrow Mode C ComfyUI text-to-image service is now implemented
-in the isolated Discord M3 branch; see `discord-m3-result.md` for accepted scope
-and the remaining live-enable gate. Generic Mode C/D extension loading remains
+in the isolated Discord M3 branch and enabled in LunaTest; see
+the private live-enablement record (not published) for accepted scope and remaining natural-user acceptance. Generic Mode C/D extension loading remains
 proposed. See `mode-b-plan.md` for Mode B implementation and acceptance evidence. This document
 supersedes the old per-extension design direction; historical
 `operator-extension-compatibility.md` is retained as reference, not a second

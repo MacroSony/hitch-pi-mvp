@@ -1,6 +1,6 @@
 # Discord M3: ComfyUI — implementation plan
 
-Status: A/B/C code is integrated and accepted by deterministic tests, real-Pi fake-provider acceptance, and one explicitly authorized real 6 Luna → Anima GPU probe. **Not enabled in the running LunaTest or production.** Live test-instance migration/switch is the remaining attended gate. See [M3 results](discord-m3-result.md).
+Status: A/B/C code is integrated and accepted by deterministic tests, real-Pi fake-provider acceptance and a real 6 Luna → Anima GPU probe. **After separate approval LunaTest is enabled; live restart/background recovery and combined Discord delivery passed.** Natural user acceptance remains pending; production is unchanged. See live result (private operator record, not published).
 
 ## First playable slice
 
@@ -29,7 +29,7 @@ Do not build a generic extension loader or general-purpose GPU platform. `extens
 - Completion is an explicit idempotent host event with its own terminal outbox group and copied authenticated source reference. Do not replay the original model Turn, append files to an already-partially-delivered group, change selected sessions, or fabricate user input. Atomically record completion and text/artifact outbox rows once.
 - Modern targeted cancel is preferred. If unsupported, report that running work cannot safely be stopped; never call `/interrupt`. Turn cancellation does not prove an accepted external job stopped. Preserve honest recoverable state.
 
-### C. Attested Luna tools and attended acceptance (code accepted; live enable pending)
+### C. Attested Luna tools and attended acceptance (LunaTest enabled; natural user acceptance pending)
 
 - Explicit opt-in configuration and enabled owners; default off. Use a narrow attested host bridge analogous to the current web-search bridge, not the desktop Pi extension entry point.
 - Initial user surface: workflow description, `paint`, owner-only job status and targeted cancel. Tool schemas never accept paths, graph/node mutation, raw backend prompt IDs, arbitrary origins, headers or caller identity. Backend status projections must not enumerate other owners' jobs.
