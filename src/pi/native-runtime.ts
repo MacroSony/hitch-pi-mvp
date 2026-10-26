@@ -141,6 +141,8 @@ const MIN_MAX_CONCURRENT_TURNS = 1;
 const MAX_MAX_CONCURRENT_TURNS = 8;
 const MAX_RPC_BYTES = 8 * 1024 * 1024;
 const MAX_RPC_COMMAND_BYTES = 32 * 1024 * 1024;
+const MAX_RPC_IMAGE_ECHOES_PER_IMAGE = 3;
+const MAX_RPC_EVENT_OVERHEAD = 64 * 1024;
 const MAX_STDERR_BYTES = 64 * 1024;
 const MODEL_CATALOG_REFRESH_TIMEOUT_MS = 7_000;
 const THINKING_LEVELS: readonly ThinkingLevel[] = [
@@ -277,6 +279,99 @@ export function toolArgPreview(args: unknown): string {
   const chars = Array.from(flat);
   const clipped = chars.length <= 60 ? flat : `${chars.slice(0, 60).join("")}…`;
   return ` · ${clipped}`;
+}
+
+export function rpcImageEchoDiscount(
+  event: JsonRecord,
+  imageEchoCredits: Map<string, number>,
+): number {
+  const messages: JsonRecord[] = [];
+  const message =
+    event.type === "message_start" || event.type === "message_end"
+      ? record(event.message)
+      : null;
+  if (message?.role === "user") messages.push(message);
+  if (event.type === "agent_end" && Array.isArray(event.messages)) {
+    for (const item of event.messages) {
+      const historyMessage = record(item);
+      if (historyMessage?.role === "user") messages.push(historyMessage);
+    }
+  }
+  let charged = 0;
+  for (const userMessage of messages) {
+    if (!Array.isArray(userMessage.content)) continue;
+    for (const item of userMessage.content) {
+      const content = record(item);
+      if (content?.type !== "image" || typeof content.data !== "string")
+        continue;
+      const credits = imageEchoCredits.get(content.data) ?? 0;
+      if (credits === 0) continue;
+      const bytes = Buffer.byteLength(content.data, "utf8");
+      charged += bytes;
+      if (credits === 1) imageEchoCredits.delete(content.data);
+      else imageEchoCredits.set(content.data, credits - 1);
+    }
+  }
+  return charged;
+}
+
+export class RpcOutputParser {
+  #buffer = "";
+  #outputBytes = 0;
+  #promptImagesRegistered = false;
+  readonly #imageEchoCredits = new Map<string, number>();
+
+  public get remainingBuffer(): string {
+    return this.#buffer;
+  }
+
+  public addPromptImages(images: readonly unknown[]): void {
+    if (this.#promptImagesRegistered) return;
+    this.#promptImagesRegistered = true;
+    for (const image of images) {
+      const data = record(image)?.data;
+      if (typeof data === "string")
+        this.#imageEchoCredits.set(data, MAX_RPC_IMAGE_ECHOES_PER_IMAGE);
+    }
+  }
+
+  public push(chunk: string): JsonRecord[] {
+    this.#buffer += chunk;
+    let imageEchoAllowance = 0;
+    for (const [data, credits] of this.#imageEchoCredits)
+      imageEchoAllowance += Buffer.byteLength(data, "utf8") * credits;
+    const maxBufferedBytes =
+      MAX_RPC_BYTES + imageEchoAllowance + MAX_RPC_EVENT_OVERHEAD;
+    if (Buffer.byteLength(this.#buffer, "utf8") > maxBufferedBytes)
+      throw new Error("Pi RPC output exceeded its Turn bound");
+
+    const events: JsonRecord[] = [];
+    while (this.#buffer.includes("\n")) {
+      const newline = this.#buffer.indexOf("\n");
+      const line = this.#buffer.slice(0, newline);
+      this.#buffer = this.#buffer.slice(newline + 1);
+      const lineBytes = Buffer.byteLength(line, "utf8") + 1;
+      if (line.trim().length === 0) {
+        this.#outputBytes += lineBytes;
+      } else {
+        let event: JsonRecord;
+        try {
+          const parsed = JSON.parse(line) as unknown;
+          const candidate = record(parsed);
+          if (candidate === null) throw new Error("not an object");
+          event = candidate;
+        } catch {
+          throw new Error("Pi emitted invalid RPC data");
+        }
+        this.#outputBytes +=
+          lineBytes - rpcImageEchoDiscount(event, this.#imageEchoCredits);
+        events.push(event);
+      }
+      if (this.#outputBytes > MAX_RPC_BYTES)
+        throw new Error("Pi RPC output exceeded its Turn bound");
+    }
+    return events;
+  }
 }
 
 function record(value: unknown): JsonRecord | null {
@@ -633,8 +728,7 @@ class PiRpcProcess {
     readonly timer: NodeJS.Timeout;
   }>();
   readonly #closed: Promise<ClosedProcess>;
-  #buffer = "";
-  #stdoutBytes = 0;
+  readonly #outputParser = new RpcOutputParser();
   #stderrBytes = 0;
   #stderrText = "";
   #nextId = 0;
@@ -734,30 +828,19 @@ class PiRpcProcess {
   }
 
   #read(chunk: string): void {
-    this.#stdoutBytes += Buffer.byteLength(chunk, "utf8");
-    if (this.#stdoutBytes > MAX_RPC_BYTES) {
-      this.#fail(new Error("Pi RPC output exceeded its Turn bound"));
+    let events: JsonRecord[];
+    try {
+      events = this.#outputParser.push(chunk);
+    } catch (error) {
+      this.#fail(
+        error instanceof Error ? error : new Error("Pi RPC output failed"),
+      );
       return;
     }
-    this.#buffer += chunk;
-    while (this.#buffer.includes("\n")) {
-      const newline = this.#buffer.indexOf("\n");
-      const line = this.#buffer.slice(0, newline);
-      this.#buffer = this.#buffer.slice(newline + 1);
-      if (line.trim().length === 0) continue;
-      let event: JsonRecord;
-      try {
-        const parsed = JSON.parse(line) as unknown;
-        const candidate = record(parsed);
-        if (candidate === null) throw new Error("not an object");
-        event = candidate;
-      } catch {
-        this.#fail(new Error("Pi emitted invalid RPC data"));
-        return;
-      }
+    for (const event of events) {
       if (event.type === "extension_ui_request") {
         this.#answerExtensionUi(event);
-        return;
+        continue;
       }
       if (event.type === "message_end") {
         const message = record(event.message);
@@ -828,6 +911,8 @@ class PiRpcProcess {
     const encoded = `${JSON.stringify({ ...command, id })}\n`;
     if (Buffer.byteLength(encoded, "utf8") > MAX_RPC_COMMAND_BYTES)
       return Promise.reject(new Error("Pi RPC command is too large"));
+    if (command.type === "prompt" && Array.isArray(command.images))
+      this.#outputParser.addPromptImages(command.images);
     return new Promise((resolveResponse, rejectResponse) => {
       const timer = setTimeout(() => {
         this.#pending.delete(id);
@@ -897,7 +982,7 @@ class PiRpcProcess {
       this.#fatal !== null ||
       result.code !== 0 ||
       result.signal !== null ||
-      this.#buffer.trim().length !== 0
+      this.#outputParser.remainingBuffer.trim().length !== 0
     ) {
       throw new Error("Pi controller did not close cleanly");
     }

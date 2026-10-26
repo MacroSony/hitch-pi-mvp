@@ -27,6 +27,8 @@ import {
   validatePiPackage,
   toolArgPreview,
   publishDisplayName,
+  rpcImageEchoDiscount,
+  RpcOutputParser,
 } from "../src/pi/native-runtime.js";
 import { SharedCredentialStore } from "../src/pi/shared-credentials.js";
 import type { RuntimeModel, RuntimeTurn } from "../src/runtime/runtime.js";
@@ -65,6 +67,145 @@ function preflightTurn(changes: Partial<RuntimeTurn> = {}): RuntimeTurn {
     ...changes,
   };
 }
+
+test("RPC image echo discount is exact, user-history-only, and credit-bounded", () => {
+  const imageData = "A".repeat(3 * 1024 * 1024);
+  const credits = new Map([[imageData, 3]]);
+  const message = {
+    role: "user",
+    content: [{ type: "image", data: imageData }],
+  };
+
+  assert.equal(
+    rpcImageEchoDiscount({ type: "message_start", message }, credits),
+    Buffer.byteLength(imageData),
+  );
+  assert.equal(
+    rpcImageEchoDiscount({ type: "message_end", message }, credits),
+    Buffer.byteLength(imageData),
+  );
+  assert.equal(
+    rpcImageEchoDiscount({ type: "agent_end", messages: [message] }, credits),
+    Buffer.byteLength(imageData),
+  );
+  assert.equal(
+    rpcImageEchoDiscount({ type: "agent_end", messages: [message] }, credits),
+    0,
+  );
+
+  const floodCredits = new Map([[imageData, 3]]);
+  const fabricated = {
+    ...message,
+    content: [{ type: "image", data: `${imageData}x` }],
+  };
+  assert.equal(
+    rpcImageEchoDiscount(
+      { type: "message_end", message: fabricated },
+      floodCredits,
+    ),
+    0,
+  );
+  assert.equal(
+    rpcImageEchoDiscount(
+      { type: "message_end", message: { ...message, role: "assistant" } },
+      floodCredits,
+    ),
+    0,
+  );
+  assert.equal(
+    rpcImageEchoDiscount({ type: "unrelated", message }, floodCredits),
+    0,
+  );
+  assert.equal(
+    rpcImageEchoDiscount({ type: "message_end", message }, floodCredits),
+    Buffer.byteLength(imageData),
+  );
+  assert.equal(
+    rpcImageEchoDiscount({ type: "message_end", message }, floodCredits),
+    Buffer.byteLength(imageData),
+  );
+  assert.equal(
+    rpcImageEchoDiscount({ type: "message_end", message }, floodCredits),
+    Buffer.byteLength(imageData),
+  );
+  assert.equal(
+    rpcImageEchoDiscount({ type: "message_end", message }, floodCredits),
+    0,
+  );
+});
+
+test("RPC output parser bounds whitespace, partial lines, and image echo floods", () => {
+  const maxRpcBytes = 8 * 1024 * 1024;
+  const whitespaceParser = new RpcOutputParser();
+  assert.throws(
+    () => whitespaceParser.push("\n".repeat(maxRpcBytes + 1)),
+    /exceeded its Turn bound/u,
+  );
+
+  const partialParser = new RpcOutputParser();
+  assert.throws(
+    () => partialParser.push("x".repeat(maxRpcBytes + 64 * 1024 + 1)),
+    /exceeded its Turn bound/u,
+  );
+
+  const imageData = "A".repeat(3 * 1024 * 1024);
+  const imageMessage = {
+    role: "user",
+    content: [{ type: "image", data: imageData }],
+  };
+  const imageParser = new RpcOutputParser();
+  imageParser.addPromptImages([{ type: "image", data: imageData }]);
+  const echoedEvents = [
+    { type: "message_start", message: imageMessage },
+    { type: "message_end", message: imageMessage },
+    { type: "agent_end", messages: [imageMessage] },
+  ];
+  for (const event of echoedEvents)
+    assert.equal(imageParser.push(`${JSON.stringify(event)}\n`).length, 1);
+  assert.equal(imageParser.remainingBuffer, "");
+
+  const unmatchedParser = new RpcOutputParser();
+  unmatchedParser.addPromptImages([{ type: "image", data: imageData }]);
+  unmatchedParser.push(
+    `${JSON.stringify({ padding: "x".repeat(6 * 1024 * 1024) })}\n`,
+  );
+  assert.throws(
+    () =>
+      unmatchedParser.push(
+        `${JSON.stringify({
+          type: "message_end",
+          message: {
+            ...imageMessage,
+            content: [{ type: "image", data: `${imageData}x` }],
+          },
+        })}\n`,
+      ),
+    /exceeded its Turn bound/u,
+  );
+
+  const fourthEchoParser = new RpcOutputParser();
+  fourthEchoParser.addPromptImages([{ type: "image", data: imageData }]);
+  fourthEchoParser.push(
+    `${JSON.stringify({ padding: "x".repeat(6 * 1024 * 1024) })}\n`,
+  );
+  for (const event of echoedEvents)
+    fourthEchoParser.push(`${JSON.stringify(event)}\n`);
+  fourthEchoParser.addPromptImages([{ type: "image", data: imageData }]);
+  assert.throws(
+    () => fourthEchoParser.push(`${JSON.stringify(echoedEvents[0])}\n`),
+    /exceeded its Turn bound/u,
+  );
+
+  const uiParser = new RpcOutputParser();
+  assert.deepEqual(
+    uiParser
+      .push(
+        `${JSON.stringify({ type: "extension_ui_request", id: "ui" })}\n${JSON.stringify({ type: "response", id: "next" })}\n`,
+      )
+      .map((event) => event.type),
+    ["extension_ui_request", "response"],
+  );
+});
 
 test("model preflight returns stable reusable failures without a controller", () => {
   const incomplete = preflightNativeModel(
