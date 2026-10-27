@@ -15,13 +15,13 @@ function minimalMp4(): Uint8Array {
     return result;
   };
   return Buffer.concat([
-    box("ftyp", Buffer.alloc(8)),
+    box("ftyp", Buffer.from("isom\0\0\x02\0isom", "binary")),
     box("moov"),
     box("mdat"),
   ]);
 }
 
-test("generated-video inspector rejects oversize and structurally invalid data before invoking a probe", async () => {
+test("generated-video inspector rejects oversize, invalid brands, and malformed atoms before invoking a probe", async () => {
   await assert.rejects(
     inspectGeneratedVideo(new Uint8Array(10 * 1024 * 1024 + 1)),
     invalid,
@@ -35,6 +35,10 @@ test("generated-video inspector rejects oversize and structurally invalid data b
   const badBox = minimalMp4();
   new DataView(badBox.buffer, badBox.byteOffset).setUint32(0, 0xffffffff);
   await assert.rejects(inspectGeneratedVideo(badBox), invalid);
+  const badBrand = minimalMp4();
+  badBrand.set(Buffer.from("qt  "), 16);
+  await assert.rejects(inspectGeneratedVideo(badBrand), invalid);
+  await assert.rejects(inspectGeneratedVideo(minimalMp4()), invalid);
 });
 
 function run(
@@ -69,7 +73,7 @@ function run(
 
 const sandboxTests = process.env.HITCH_RUN_SANDBOX_TESTS === "1";
 test(
-  "opt-in isolated ffprobe accepts generated H.264/AAC and rejects unsupported tracks",
+  "opt-in isolated ffprobe and full decode accept generated H.264/AAC and reject invalid input",
   { skip: !sandboxTests, timeout: 90_000 },
   async (t) => {
     const root = mkdtempSync(join("/tmp", "hitch-video-fixtures-"));
@@ -132,6 +136,46 @@ test(
       fps: 24,
       hasAudio: true,
     });
+    const zeroDuration = Buffer.from(valid);
+    for (const tag of ["mvhd", "mdhd", "tkhd"]) {
+      let cursor = 0;
+      while ((cursor = zeroDuration.indexOf(tag, cursor)) !== -1) {
+        const durationOffset = cursor + (tag === "tkhd" ? 24 : 20);
+        zeroDuration.writeUInt32BE(0, durationOffset);
+        cursor += 4;
+      }
+    }
+    await assert.rejects(inspectGeneratedVideo(zeroDuration), invalid);
+    const beforeAbort = new Set(
+      readdirSync("/tmp").filter((name) =>
+        name.startsWith("hitch-generated-video-"),
+      ),
+    );
+    const controller = new AbortController();
+    const aborted = inspectGeneratedVideo(valid, controller.signal);
+    controller.abort();
+    await assert.rejects(aborted, invalid);
+    assert.deepEqual(
+      readdirSync("/tmp").filter(
+        (name) =>
+          name.startsWith("hitch-generated-video-") && !beforeAbort.has(name),
+      ),
+      [],
+    );
+    const corrupted = Buffer.from(valid);
+    let boxOffset = 0;
+    while (boxOffset + 8 <= corrupted.length) {
+      const boxSize = corrupted.readUInt32BE(boxOffset);
+      if (
+        corrupted.toString("ascii", boxOffset + 4, boxOffset + 8) === "mdat"
+      ) {
+        corrupted.fill(0, boxOffset + 8, boxOffset + boxSize);
+        break;
+      }
+      if (boxSize < 8) break;
+      boxOffset += boxSize;
+    }
+    await assert.rejects(inspectGeneratedVideo(corrupted), invalid);
     const silent = await make("silent.mp4", [
       "-f",
       "lavfi",

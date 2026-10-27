@@ -35,7 +35,8 @@ function fourcc(bytes: Uint8Array, offset: number): string {
   );
 }
 
-function boxEnd(bytes: Uint8Array, start: number, end: number): number {
+type Box = { type: string; end: number; payload: number };
+function parseBox(bytes: Uint8Array, start: number, end: number): Box {
   if (end - start < 8) reject();
   const size32 = new DataView(
     bytes.buffer,
@@ -52,12 +53,10 @@ function boxEnd(bytes: Uint8Array, start: number, end: number): number {
     if (wide > BigInt(Number.MAX_SAFE_INTEGER)) reject();
     size = Number(wide);
     header = 16;
-  } else if (size32 === 0) {
-    size = end - start;
-  }
+  } else if (size32 === 0) size = end - start;
   if (type === "uuid") header += 16;
   if (size < header || size > end - start) reject();
-  return start + size;
+  return { type, end: start + size, payload: start + header };
 }
 
 const CONTAINERS = new Set([
@@ -73,60 +72,54 @@ const CONTAINERS = new Set([
   "traf",
   "mfra",
 ]);
+type BoxBudget = { count: number };
 function validateBoxes(
   bytes: Uint8Array,
   start: number,
   end: number,
+  budget: BoxBudget,
   depth = 0,
-): Set<string> {
+): void {
   if (depth > 12) reject();
-  const types = new Set<string>();
   let offset = start;
   while (offset < end) {
-    const type = fourcc(bytes, offset + 4);
-    const next = boxEnd(bytes, offset, end);
-    types.add(type);
-    if (CONTAINERS.has(type))
-      validateBoxes(
-        bytes,
-        offset +
-          (bytes[offset] === 0 &&
-          bytes[offset + 1] === 0 &&
-          bytes[offset + 2] === 0 &&
-          bytes[offset + 3] === 1
-            ? 16
-            : 8),
-        next,
-        depth + 1,
-      );
-    offset = next;
+    if (++budget.count > 4096) reject();
+    const box = parseBox(bytes, offset, end);
+    if (CONTAINERS.has(box.type))
+      validateBoxes(bytes, box.payload, box.end, budget, depth + 1);
+    offset = box.end;
   }
   if (offset !== end) reject();
-  return types;
 }
 
+const MP4_BRANDS = new Set(["isom", "iso2", "iso6", "mp41", "mp42", "avc1"]);
 function sanityCheck(bytes: Uint8Array): void {
+  if (bytes.byteLength < 16 || bytes.byteLength > MAX_BYTES) reject();
+  const first = parseBox(bytes, 0, bytes.length);
   if (
-    bytes.byteLength < 16 ||
-    bytes.byteLength > MAX_BYTES ||
-    fourcc(bytes, 4) !== "ftyp"
+    first.type !== "ftyp" ||
+    first.payload + 12 > first.end ||
+    (first.end - first.payload - 8) % 4 !== 0
   )
     reject();
-  const first = boxEnd(bytes, 0, bytes.length);
-  if (first < 16) reject();
-  let offset = first;
+  let compatible = false;
+  for (let offset = first.payload + 8; offset + 4 <= first.end; offset += 4)
+    if (MP4_BRANDS.has(fourcc(bytes, offset))) compatible = true;
+  if (!compatible) reject();
+  let offset = first.end;
   let moov = false;
-  let mdat = false;
+  let mdatPayload = false;
+  const budget: BoxBudget = { count: 1 };
   while (offset < bytes.length) {
-    const type = fourcc(bytes, offset + 4);
-    const next = boxEnd(bytes, offset, bytes.length);
-    if (type === "moov") {
+    if (++budget.count > 4096) reject();
+    const box = parseBox(bytes, offset, bytes.length);
+    if (box.type === "moov") {
       moov = true;
-      validateBoxes(bytes, offset + 8, next);
-    } else if (type === "mdat") mdat = true;
-    offset = next;
+      validateBoxes(bytes, box.payload, box.end, budget);
+    } else if (box.type === "mdat" && box.end > box.payload) mdatPayload = true;
+    offset = box.end;
   }
-  if (offset !== bytes.length || !moov || !mdat) reject();
+  if (offset !== bytes.length || !moov || !mdatPayload) reject();
 }
 
 function parseRate(value: unknown): number {
@@ -181,19 +174,55 @@ function parseProbe(text: string): VideoInfo {
     height > 1536 ||
     width * height > 4_000_000 ||
     !Number.isFinite(duration) ||
-    duration < 0 ||
+    duration <= 0 ||
     duration > 16
   )
     reject();
   return { width, height, duration, fps, hasAudio: true };
 }
 
-async function probe(fd: number): Promise<string> {
+const BWRAP_ARGS = [
+  "--unshare-all",
+  "--die-with-parent",
+  "--new-session",
+  "--clearenv",
+  "--setenv",
+  "LD_LIBRARY_PATH",
+  "/usr/lib/x86_64-linux-gnu/blas:/usr/lib/x86_64-linux-gnu/lapack",
+  "--ro-bind",
+  "/usr",
+  "/usr",
+  "--ro-bind",
+  "/lib",
+  "/lib",
+  "--ro-bind",
+  "/lib64",
+  "/lib64",
+  "--proc",
+  "/proc",
+  "--dev",
+  "/dev",
+  "--tmpfs",
+  "/tmp",
+  "--ro-bind-data",
+  "3",
+  "/input.mp4",
+];
+async function runIsolated(
+  fd: number,
+  tool: "ffprobe" | "ffmpeg",
+  args: string[],
+  deadline: number,
+  signal?: AbortSignal,
+): Promise<string> {
+  if (signal?.aborted || Date.now() >= deadline) reject();
   return await new Promise((resolve, rejectPromise) => {
     let stdout = Buffer.alloc(0);
     let stderrBytes = 0;
     let settled = false;
     let closed = false;
+    const executable =
+      tool === "ffprobe" ? "/usr/bin/ffprobe" : "/usr/bin/ffmpeg";
     const child = spawn(
       "/usr/bin/prlimit",
       [
@@ -201,80 +230,48 @@ async function probe(fd: number): Promise<string> {
         "--cpu=10",
         "--",
         "/usr/bin/bwrap",
-        "--unshare-all",
-        "--die-with-parent",
-        "--new-session",
-        "--clearenv",
-        "--setenv",
-        "LD_LIBRARY_PATH",
-        "/usr/lib/x86_64-linux-gnu/blas:/usr/lib/x86_64-linux-gnu/lapack",
-        "--ro-bind",
-        "/usr",
-        "/usr",
-        "--ro-bind",
-        "/lib",
-        "/lib",
-        "--ro-bind",
-        "/lib64",
-        "/lib64",
-        "--proc",
-        "/proc",
-        "--dev",
-        "/dev",
-        "--tmpfs",
-        "/tmp",
-        "--ro-bind-data",
-        "3",
-        "/input.mp4",
-        "/usr/bin/ffprobe",
-        "-v",
-        "error",
-        "-protocol_whitelist",
-        "file,pipe",
-        "-f",
-        "mov",
-        "-show_entries",
-        "stream=codec_type,codec_name,width,height,avg_frame_rate:format=duration",
-        "-of",
-        "json",
-        "/input.mp4",
+        ...BWRAP_ARGS,
+        executable,
+        ...args,
       ],
-      {
-        env: {},
-        stdio: ["ignore", "pipe", "pipe", fd],
-        windowsHide: true,
-      },
+      { env: {}, stdio: ["ignore", "pipe", "pipe", fd], windowsHide: true },
     );
-    const timer = setTimeout(() => abort(new Error(INVALID)), DEADLINE_MS);
+    const dispose = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+    };
+    const onAbort = () => abort(new Error(INVALID));
     const abort = (error: Error) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      dispose();
       child.kill("SIGKILL");
       if (closed) rejectPromise(error);
       else child.once("close", () => rejectPromise(error));
     };
-    const finish = (error?: Error, result?: string) => {
-      if (settled) return;
-      if (error) return abort(error);
-      settled = true;
-      clearTimeout(timer);
-      resolve(result!);
-    };
+    const timer = setTimeout(
+      () => abort(new Error(INVALID)),
+      Math.max(1, deadline - Date.now()),
+    );
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) onAbort();
     child.stdout!.on("data", (chunk: Buffer) => {
       if (stdout.length + chunk.length > MAX_OUTPUT)
-        return finish(new Error(INVALID));
+        return abort(new Error(INVALID));
       stdout = Buffer.concat([stdout, chunk]);
     });
     child.stderr!.on("data", (chunk: Buffer) => {
       stderrBytes += chunk.length;
-      if (stderrBytes > MAX_OUTPUT) finish(new Error(INVALID));
+      if (stderrBytes > MAX_OUTPUT) abort(new Error(INVALID));
     });
-    child.once("error", () => finish(new Error(INVALID)));
+    child.once("error", () => abort(new Error(INVALID)));
     child.once("close", (code) => {
       closed = true;
-      if (code !== 0) finish(new Error(INVALID));
-      else finish(undefined, stdout.toString("utf8"));
+      if (settled) return;
+      dispose();
+      settled = true;
+      if (code !== 0) rejectPromise(new Error(INVALID));
+      else resolve(stdout.toString("utf8"));
     });
   });
 }
@@ -286,10 +283,13 @@ async function probe(fd: number): Promise<string> {
  */
 export async function inspectGeneratedVideo(
   bytes: Uint8Array,
+  signal?: AbortSignal,
 ): Promise<VideoInfo> {
   let directory: string | undefined;
   let fd: number | undefined;
+  const deadline = Date.now() + DEADLINE_MS;
   try {
+    if (signal?.aborted) reject();
     sanityCheck(bytes);
     directory = mkdtempSync(join("/tmp", "hitch-generated-video-"));
     const dirFd = openSync(
@@ -314,11 +314,70 @@ export async function inspectGeneratedVideo(
     let offset = 0;
     while (offset < bytes.byteLength)
       offset += writeSync(fd, bytes, offset, bytes.byteLength - offset, offset);
-    const probeFd = fd;
-    const output = await probe(probeFd);
-    closeSync(probeFd);
+    const probeFd = openSync(input, constants.O_RDONLY | constants.O_NOFOLLOW);
+    let output: string;
+    try {
+      output = await runIsolated(
+        probeFd,
+        "ffprobe",
+        [
+          "-v",
+          "error",
+          "-protocol_whitelist",
+          "file,pipe",
+          "-f",
+          "mov",
+          "-show_entries",
+          "stream=codec_type,codec_name,width,height,avg_frame_rate:format=duration",
+          "-of",
+          "json",
+          "/input.mp4",
+        ],
+        deadline,
+        signal,
+      );
+    } finally {
+      closeSync(probeFd);
+    }
+    const info = parseProbe(output);
+    const decodeFd = openSync(input, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      await runIsolated(
+        decodeFd,
+        "ffmpeg",
+        [
+          "-v",
+          "error",
+          "-xerror",
+          "-threads",
+          "2",
+          "-threads:v",
+          "1",
+          "-threads:a",
+          "1",
+          "-protocol_whitelist",
+          "file,pipe",
+          "-f",
+          "mov",
+          "-i",
+          "/input.mp4",
+          "-map",
+          "0:v:0",
+          "-map",
+          "0:a:0",
+          "-f",
+          "null",
+          "/dev/null",
+        ],
+        deadline,
+        signal,
+      );
+    } finally {
+      closeSync(decodeFd);
+    }
+    closeSync(fd);
     fd = undefined;
-    return parseProbe(output);
+    return info;
   } catch {
     return reject();
   } finally {
