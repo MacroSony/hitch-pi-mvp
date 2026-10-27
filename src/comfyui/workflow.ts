@@ -49,6 +49,38 @@ export interface ComfyWorkflowDefinition {
   >;
 }
 
+/** Serialized JSON budgets, including escapes (below the bridge's 32 KiB). */
+export const COMFY_DETAILS_MAX_BYTES = 24 * 1024;
+export const COMFY_DETAILS_MAX_NOTES_BYTES = 8 * 1024;
+export const COMFY_DETAILS_MAX_DEFAULT_BYTES = 1024;
+
+type PublicBinding<T> = T extends unknown
+  ? Omit<T, "nodeId" | "input" | "values">
+  : never;
+export type ComfyWorkflowVariableDetails = PublicBinding<
+  ComfyWorkflowDefinition["variables"][string]
+> & {
+  name: string;
+  default?: string | number;
+  defaultOmitted?: true;
+  values?: readonly string[];
+  valuesOmitted?: true;
+};
+
+export interface ComfyWorkflowDetails {
+  id: string;
+  description?: string;
+  notes: string;
+  notesTruncated: boolean;
+  variables: ComfyWorkflowVariableDetails[];
+  files: {
+    slot: string;
+    media: "image" | "video" | "audio";
+    optional: boolean;
+  }[];
+  output_kind: "image" | "video";
+}
+
 export interface RenderedComfyWorkflow {
   graph: ComfyWorkflowDefinition["graph"];
   outputNodes: string[];
@@ -159,6 +191,23 @@ function validateValue(
   } else if (typeof value !== "string" || !binding.values.includes(value))
     fail();
   return cloneJSON(value);
+}
+
+function jsonSize(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value), "utf8");
+}
+
+/** Preserve code points and account for JSON escaping, not just raw UTF-8. */
+function boundedNote(text: string): string {
+  let result = "";
+  let size = 2; // JSON quotes
+  for (const character of text) {
+    const bytes = jsonSize(character) - 2;
+    if (size + bytes > COMFY_DETAILS_MAX_NOTES_BYTES) break;
+    result += character;
+    size += bytes;
+  }
+  return result;
 }
 
 export class ComfyWorkflowPolicy {
@@ -451,6 +500,82 @@ export class ComfyWorkflowPolicy {
     if (Buffer.byteLength(JSON.stringify(definition), "utf8") > 256 * 1024)
       fail();
     return definition;
+  }
+
+  /** Public projection only. Annotations never grant additional writable bindings. */
+  details(): ComfyWorkflowDetails {
+    const definition = this.definition;
+    const parts: string[] = [];
+    for (const node of Object.values(definition.graph)) {
+      if (
+        !plain(node._meta) ||
+        typeof node._meta.title !== "string" ||
+        !node._meta.title.startsWith("[NOTE]")
+      )
+        continue;
+      // Match desktop Paint's precedence; never serialize arbitrary input objects.
+      const text = node.inputs.value ?? node.inputs.text;
+      if (typeof text === "string" && text.trim()) parts.push(text.trim());
+    }
+    const allNotes = parts.join("\n\n");
+    const notes = boundedNote(allNotes);
+    const variables: ComfyWorkflowVariableDetails[] = Object.entries(
+      definition.variables,
+    ).map(([name, binding]) => ({
+      name,
+      ...(binding.type === "string"
+        ? { type: binding.type, maxLength: binding.maxLength }
+        : binding.type === "enum"
+          ? { type: binding.type, valuesOmitted: true as const }
+          : {
+              type: binding.type,
+              min: binding.min,
+              max: binding.max,
+              ...(binding.step === undefined ? {} : { step: binding.step }),
+            }),
+      defaultOmitted: true,
+    }));
+    const result: ComfyWorkflowDetails = {
+      id: definition.id,
+      ...(definition.description === undefined
+        ? {}
+        : { description: definition.description }),
+      notes,
+      notesTruncated: notes !== allNotes,
+      variables,
+      files: Object.entries(definition.files ?? {}).map(([slot, binding]) => ({
+        slot,
+        media: binding.media,
+        optional: binding.optional === true,
+      })),
+      output_kind: definition.outputKind ?? "image",
+    };
+    // Defaults are exact validated graph literals, never invented/truncated values.
+    for (let i = 0; i < variables.length; i++) {
+      const variable = variables[i]!;
+      const binding = definition.variables[variable.name]!;
+      const value = definition.graph[binding.nodeId]!.inputs[binding.input];
+      if (
+        (typeof value === "string" || typeof value === "number") &&
+        jsonSize(value) <= COMFY_DETAILS_MAX_DEFAULT_BYTES
+      ) {
+        const candidate = { ...variable, default: value };
+        delete candidate.defaultOmitted;
+        variables[i] = candidate;
+        if (jsonSize(result) > COMFY_DETAILS_MAX_BYTES) variables[i] = variable;
+      }
+    }
+    for (let i = 0; i < variables.length; i++) {
+      const variable = variables[i]!;
+      const binding = definition.variables[variable.name]!;
+      if (binding.type !== "enum") continue;
+      const candidate = { ...variable, values: [...binding.values] };
+      delete candidate.valuesOmitted;
+      variables[i] = candidate;
+      if (jsonSize(result) > COMFY_DETAILS_MAX_BYTES) variables[i] = variable;
+    }
+    if (jsonSize(result) > COMFY_DETAILS_MAX_BYTES) fail();
+    return result;
   }
 
   render(

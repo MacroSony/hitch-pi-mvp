@@ -708,3 +708,73 @@ test("tick does not poll pending jobs whose owners are no longer enabled", async
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("paint_get_details accepts only enabled owners and exact allowlisted short IDs without backend/jobs", async () => {
+  const f = fixture();
+  const root = mkdtempSync(join(tmpdir(), "comfy-details-service-"));
+  try {
+    const service = new ComfyService({
+      ledger: f.ledger,
+      media: new MediaStore(root),
+      backend: new Proxy(
+        {},
+        {
+          get() {
+            throw new Error("backend must not be touched");
+          },
+        },
+      ) as never,
+      workflows: [f.policy],
+      enabledUsers: ["alice"],
+    });
+    const context = { userId: "alice", turnId: "details-turn" };
+    assert.deepEqual(
+      await service.execute(context, "paint_get_details", {
+        workflow: "fixture",
+      }),
+      f.policy.details(),
+    );
+    for (const input of [
+      {},
+      null,
+      [],
+      { workflow: "unknown" },
+      { workflow: "../fixture" },
+      { workflow: "fixture\n" },
+      { workflow: "/private/fixture.json" },
+      { workflow: "fixture.json" },
+      { workflow: "fixture", backend: "other" },
+      { workflow: "fixture", userId: "alice" },
+      { workflow: "fixture", steps: 1 },
+      Object.defineProperty({}, "workflow", {
+        get() {
+          throw new Error("getter");
+        },
+        enumerable: true,
+      }),
+    ]) {
+      await assert.rejects(
+        service.execute(context, "paint_get_details", input),
+        {
+          message: "Invalid Comfy tool request",
+        },
+      );
+    }
+    await assert.rejects(
+      service.execute({ ...context, userId: "disabled" }, "paint_get_details", {
+        workflow: "fixture",
+      }),
+    );
+    await assert.rejects(
+      service.execute(
+        context,
+        "paint_get_details",
+        { workflow: "fixture" },
+        AbortSignal.abort(),
+      ),
+    );
+    assert.equal(f.jobs.size, 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

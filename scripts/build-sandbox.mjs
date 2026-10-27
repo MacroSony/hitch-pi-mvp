@@ -131,6 +131,7 @@ const manifest = {
     ...Object.fromEntries(
       [
         "paint",
+        "paint_get_details",
         "paint_job_cancel",
         "paint_job_status",
         "paint_list_workflows",

@@ -22,12 +22,25 @@ if (
   throw new Error("Comfy bridge configuration invalid");
 const names = [
   "paint",
+  "paint_get_details",
   "paint_job_cancel",
   "paint_job_status",
   "paint_list_workflows",
   "paint_result",
 ] as const;
 const schemas = {
+  paint_get_details: Type.Object(
+    {
+      workflow: Type.String({
+        minLength: 1,
+        maxLength: 64,
+        pattern: "^[A-Za-z][A-Za-z0-9_-]{0,63}(?![\\s\\S])",
+        description:
+          "Exact configured short workflow ID from paint_list_workflows; never a filename or path.",
+      }),
+    },
+    { additionalProperties: false },
+  ),
   paint_list_workflows: Type.Object({}, { additionalProperties: false }),
   paint_result: Type.Object(
     {
@@ -223,12 +236,14 @@ export default function (pi: ExtensionAPI): void {
         name === "paint_result"
           ? "Retrieve your own completed image/video original by job ID. Images can include a bounded native visual preview; video files do NOT provide video vision. The read-only /inbox/results original path can be copied into /workspace with sandbox tools. Completion alone does not mean you reviewed the output."
           : name === "paint"
-            ? "Generate an image or short video, or edit an image, with a configured workflow. First inspect paint_list_workflows for public usage guidance, variables and reference slots. Input files use current input_id handles or your completed image job_id, never paths. Video/audio reference input is not enabled. Successful output is automatically delivered to this conversation; maximum output is 10MiB."
+            ? "Generate an image or short video, or edit an image, with a configured workflow. First choose an ID with paint_list_workflows, then read paint_get_details for its graph NOTE instructions, allowed variables/defaults and reference slots. Input files use current input_id handles or your completed image job_id, never paths. Video/audio reference input is not enabled. Successful output is automatically delivered to this conversation; maximum output is 10MiB."
             : name === "paint_job_status"
               ? "Check your own ComfyUI Paint job status."
               : name === "paint_job_cancel"
                 ? "Cancel one of your own ComfyUI Paint jobs."
-                : "List the configured ComfyUI Paint workflows.",
+                : name === "paint_get_details"
+                  ? "Inspect an allowlisted workflow before paint: operator graph [NOTE] instructions, description, allowed variables with defaults/limits, file slots and output kind. No graph, backend or fixed-parameter controls. Oversized notes/defaults/enum values are explicitly truncated or omitted."
+                  : "List the configured ComfyUI Paint workflows; use paint_get_details for NOTE instructions and defaults.",
       parameters: schemas[name],
       async execute(_id, input, signal) {
         try {

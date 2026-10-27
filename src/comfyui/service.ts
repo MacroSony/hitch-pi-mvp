@@ -133,6 +133,19 @@ export class ComfyService implements ComfyToolHost {
         return this.#paint(context, input, signal);
       case "paint_result":
         return this.#paintResult(context, input, signal);
+      case "paint_get_details": {
+        const args = exact(input, ["workflow"]);
+        if (
+          typeof args.workflow !== "string" ||
+          !/^[A-Za-z][A-Za-z0-9_-]{0,63}(?![\s\S])/.test(args.workflow)
+        )
+          throw new Error(SAFE);
+        const policy = this.#workflows.find(
+          (p) => p.definition.id === args.workflow,
+        );
+        if (!policy) throw new Error(SAFE);
+        return policy.details();
+      }
       case "paint_list_workflows":
         exact(input, []);
         return this.#workflowList();

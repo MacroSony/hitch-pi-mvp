@@ -22,6 +22,7 @@ const TOOL_NAMES: readonly ComfyToolName[] = [
   "paint_list_workflows",
   "paint",
   "paint_job_status",
+  "paint_get_details",
   "paint_job_cancel",
   "paint_result",
 ];
@@ -47,6 +48,12 @@ export function validComfyRequest(
   const only = (...allowed: string[]) =>
     keys.every((key) => allowed.includes(key));
   switch (request.tool) {
+    case "paint_get_details":
+      return (
+        only("workflow") &&
+        typeof fields.workflow === "string" &&
+        /^[A-Za-z][A-Za-z0-9_-]{0,63}(?![\s\S])/.test(fields.workflow)
+      );
     case "paint_list_workflows":
       return only();
     case "paint":

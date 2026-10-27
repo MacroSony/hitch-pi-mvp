@@ -312,3 +312,43 @@ test("bridge accepts opaque image references but refuses path/identity and dual-
     await rm(fixture.parent, { recursive: true, force: true });
   }
 });
+
+test("details bridge requires exactly one short workflow ID and retains captured owner", async () => {
+  let calls = 0;
+  const fixture = await setup(async (context, tool, input) => {
+    assert.deepEqual(context, owner);
+    assert.equal(tool, "paint_get_details");
+    assert.deepEqual(input, { workflow: "anima" });
+    calls++;
+    return { id: "anima", notes: "Graph note." };
+  });
+  try {
+    const request = { tool: "paint_get_details", input: { workflow: "anima" } };
+    const result = await call(fixture.bridge, request, { fragment: true });
+    assert.equal(result.status, 200);
+    assert.deepEqual(JSON.parse(result.body), {
+      result: { id: "anima", notes: "Graph note." },
+    });
+    for (const input of [
+      {},
+      { workflow: "" },
+      { workflow: 1 },
+      { workflow: "../anima" },
+      { workflow: "anima\n" },
+      { workflow: "anima.json" },
+      { workflow: "a".repeat(65) },
+      { workflow: "anima", backend: "gpu" },
+      { workflow: "anima", userId: owner.userId },
+      { workflow: "anima", graph: {} },
+      { workflow: "anima", headers: {} },
+    ])
+      assert.equal(
+        (await call(fixture.bridge, { ...request, input })).status,
+        400,
+      );
+    assert.equal(calls, 1);
+  } finally {
+    await fixture.bridge.close();
+    await rm(fixture.parent, { recursive: true, force: true });
+  }
+});

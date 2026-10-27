@@ -28,7 +28,7 @@ if (webSearchDigest !== undefined && !/^[a-f0-9]{64}$/.test(webSearchDigest)) {
 const paintEnabled = process.env.HITCH_COMFY_ENABLED === "1";
 const paintPath = process.env.HITCH_COMFY_EXTENSION_PATH;
 const paintDigest = process.env.HITCH_COMFY_EXTENSION_SHA256;
-const paintTools = ["paint", "paint_job_cancel", "paint_job_status", "paint_list_workflows", "paint_result"];
+const paintTools = ["paint", "paint_get_details", "paint_job_cancel", "paint_job_status", "paint_list_workflows", "paint_result"];
 if (paintEnabled !== (paintPath !== undefined && paintDigest !== undefined) || (paintPath !== undefined && !paintPath.startsWith("/")) || (paintDigest !== undefined && !/^[a-f0-9]{64}$/.test(paintDigest))) throw new Error("Hitch paint configuration is invalid");
 const expectedTools = attestationBaseline();
 const selfPath = fileURLToPath(import.meta.url);
