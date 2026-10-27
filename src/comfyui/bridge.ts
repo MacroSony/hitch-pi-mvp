@@ -58,7 +58,13 @@ export function validComfyRequest(
           "width",
           "height",
           "input_files",
+          "duration",
         ) &&
+        (fields.duration === undefined ||
+          (typeof fields.duration === "number" &&
+            Number.isFinite(fields.duration) &&
+            fields.duration >= 0.5 &&
+            fields.duration <= 15)) &&
         (fields.input_files === undefined ||
           (Array.isArray(fields.input_files) &&
             fields.input_files.length <= 8 &&

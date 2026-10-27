@@ -49,6 +49,15 @@ const schemas = {
       negative_prompt: Type.Optional(Type.String({ maxLength: 8192 })),
       width: Type.Optional(Type.Integer({ minimum: 256, maximum: 1536 })),
       height: Type.Optional(Type.Integer({ minimum: 256, maximum: 1536 })),
+      duration: Type.Optional(
+        Type.Number({
+          minimum: 0.5,
+          maximum: 15,
+          description:
+            "Requested video seconds, only for workflows that declare duration; obey their narrower bounds and frame-grid guidance.",
+        }),
+      ),
+
       input_files: Type.Optional(
         Type.Array(
           Type.Union([
@@ -212,9 +221,9 @@ export default function (pi: ExtensionAPI): void {
       label: name,
       description:
         name === "paint_result"
-          ? "Retrieve your completed image by job ID: a bounded visual preview when available and a read-only /inbox/results original path that sandbox tools can copy into /workspace. Job completion alone does not mean you have seen its pixels."
+          ? "Retrieve your own completed image/video original by job ID. Images can include a bounded native visual preview; video files do NOT provide video vision. The read-only /inbox/results original path can be copied into /workspace with sandbox tools. Completion alone does not mean you reviewed the output."
           : name === "paint"
-            ? "Create or edit an image with a configured workflow. Editing requires input_files referring to configured slots using current input_id handles or your completed image job_id. Successful output is automatically delivered to this conversation."
+            ? "Generate an image or short video, or edit an image, with a configured workflow. First inspect paint_list_workflows for public usage guidance, variables and reference slots. Input files use current input_id handles or your completed image job_id, never paths. Video/audio reference input is not enabled. Successful output is automatically delivered to this conversation; maximum output is 10MiB."
             : name === "paint_job_status"
               ? "Check your own ComfyUI Paint job status."
               : name === "paint_job_cancel"

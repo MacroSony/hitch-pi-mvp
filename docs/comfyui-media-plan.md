@@ -12,7 +12,7 @@ Read-only audit found actual active API workflows under `<operator-workflow-dir>
 - H3 uses the 17k+5 frame grid at 24fps. Requesting 5 seconds yields 124 frames / ~5.17 seconds; timestamps/prompts must use the actual grid.
 - Native SaveVideo returns `images:[file refs]` plus `animated:[true]` in history, even for MP4. Do not look only for a `videos` field.
 
-No H3 video has been generated/regression-tested in this development turn. Node registration/model availability is not GPU acceptance.
+Actual isolated Qwen and all three bounded H3 routes have now been generated and checked; see `comfyui-media-result.md` for evidence and limitations. This remains separate from live/user acceptance. The Ref sample has an AAC stream but is effectively silent; its audible sound quality is not accepted.
 
 ## Implementation stages
 
@@ -32,9 +32,9 @@ Workflow policies explicitly declare file slots and media types. Required inputs
 
 ### 3. Video output and H3 policies
 
-Generalize backend output parsing to declared image/video kind and allow MP4 metadata from native SaveVideo only. This transport foundation is not yet a complete validated/published video path.
+Backend output parsing now supports declared image/video kind and native SaveVideo metadata, with isolated codec inspection and durable file/caption publication. Automated and actual short-GPU acceptance are documented in `comfyui-media-result.md`; full multimodal reference inputs and live video acceptance remain open.
 
-Before enabling video, add bounded format/stream/duration/dimension/codec checks and appropriate failure reporting, preserve original bytes, and ensure the job ledger and delivery accept the validated file type. Raw untrusted input video/audio needs a bounded isolated inspection/normalization path before forwarding to a privileged backend decoder; simply trusting an advertised `.mp4` MIME is insufficient.
+The implemented output path has bounded format/stream/duration/dimension/codec checks, original-byte preservation, kind-aware job artifacts/captions, and grouped delivery tests. Enable it in LunaTest only after an attended rollout decision. Raw untrusted input video/audio needs a bounded isolated inspection/normalization path before forwarding to a privileged backend decoder; simply trusting an advertised `.mp4` MIME is insufficient.
 
 Start with short bounded MP4 clips and explicit policies for text2va, fl2va (keyframe image input) and ref2va. Image/video/audio reference coverage must be stated separately; do not call a picture-only Ref2VA test full multimodal-reference acceptance. Preserve generated audio when the workflow is advertised as VA. Do not silently reinterpret N/A prompt sections as an instruction to avoid all audio computation.
 

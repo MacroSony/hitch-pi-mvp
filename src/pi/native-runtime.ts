@@ -2104,7 +2104,7 @@ export class NativePiRuntime implements AgentRuntime {
       );
     if (isPaintEnabled)
       promptSections.push(
-        "ComfyUI generation is a background job: submit paint once and promptly reply with its short job ID. Hitch automatically sends the completed image to this channel. Do not repeatedly poll or keep the chat waiting. Use paint_job_status when asked, and targeted paint_job_cancel for an explicit cancellation request. Never invent host paths or run a second generation merely to retrieve the first result. To inspect or save a completed image, call paint_result with its job ID; it returns a bounded native preview when available and a read-only /inbox/results path to copy into /workspace. A completed status alone does not mean you have seen the image.",
+        "ComfyUI generation is a background job: submit paint once and promptly reply with its short job ID. Hitch automatically sends the completed image or short video to this channel. Do not repeatedly poll or keep the chat waiting. Use paint_job_status when asked, and targeted paint_job_cancel for an explicit cancellation request. Never invent host paths or run a second generation merely to retrieve the first result. To inspect or save completed media, call paint_result with its job ID; images can return a bounded native preview, and originals have a read-only /inbox/results path to copy into /workspace. A video original path is NOT video vision. A completed status alone does not mean you have reviewed its content. For editing/video first call paint_list_workflows and follow the selected workflow's usage guidance and configured file slots; video/audio reference inputs are not enabled.",
       );
     if (imageInboxLines.length > 0) {
       promptSections.push(

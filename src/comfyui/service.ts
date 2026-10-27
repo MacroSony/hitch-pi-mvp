@@ -438,6 +438,9 @@ export class ComfyService implements ComfyToolHost {
       )
       .map((policy) => ({
         id: policy.definition.id,
+        ...(policy.definition.description === undefined
+          ? {}
+          : { description: policy.definition.description }),
         ...(policy.definition.outputKind === "video"
           ? { output_kind: "video" }
           : {}),
