@@ -348,3 +348,8 @@ test("cancellation parses exact backend result, sanitizes malformed/errors, and 
     "POST /api/jobs/error/cancel",
   ]);
 });
+
+test("upload MIME table never accepts inherited object property names", () => {
+  for (const mime of ["constructor", "toString", "__proto__"])
+    assert.throws(() => comfyUploadPath("owner", "0".repeat(64), mime));
+});

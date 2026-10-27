@@ -541,3 +541,19 @@ test("file policy rejects malformed slots, overlap, dangling disconnects, and un
     new ComfyWorkflowPolicy(oversized).render({ grow: "y".repeat(8192) }),
   );
 });
+
+test("operator public usage guidance is bounded and absent from execution snapshots", () => {
+  const source = fixture();
+  source.description = "Qwen editing uses the reference slot.";
+  const policy = new ComfyWorkflowPolicy(source);
+  assert.equal(policy.definition.description, source.description);
+  assert.equal(Object.hasOwn(policy.render(), "description"), false);
+  for (const description of [" ", "x".repeat(1025), 42])
+    assert.throws(
+      () =>
+        new ComfyWorkflowPolicy({
+          ...source,
+          description,
+        } as ComfyWorkflowDefinition),
+    );
+});

@@ -72,7 +72,9 @@ export function comfyUploadPath(
   sha256: string,
   mimeType: string,
 ): string {
-  const extension = MIME_EXTENSION[mimeType];
+  const extension = Object.hasOwn(MIME_EXTENSION, mimeType)
+    ? MIME_EXTENSION[mimeType]
+    : undefined;
   if (!scopeKey || !/^[a-f0-9]{64}$/u.test(sha256) || !extension)
     throw new ComfyBackendError("upload-failed");
   const digest = createHash("sha256")
@@ -159,7 +161,9 @@ export class ComfyBackendClient {
     signal?: AbortSignal,
   ): Promise<string> {
     try {
-      const extension = MIME_EXTENSION[mimeType];
+      const extension = Object.hasOwn(MIME_EXTENSION, mimeType)
+        ? MIME_EXTENSION[mimeType]
+        : undefined;
       if (
         !extension ||
         !(bytes instanceof Uint8Array) ||

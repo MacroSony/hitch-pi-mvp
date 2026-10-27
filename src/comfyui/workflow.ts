@@ -8,6 +8,8 @@ export type JSONValue =
 
 export interface ComfyWorkflowDefinition {
   id: string;
+  /** Operator-curated public usage guidance, not graph/host metadata. */
+  description?: string;
   graph: Record<
     string,
     { class_type: string; inputs: Record<string, JSONValue>; _meta?: JSONValue }
@@ -184,6 +186,7 @@ export class ComfyWorkflowPolicy {
             "outputNodes",
             "outputKind",
             "files",
+            "description",
           ].includes(k),
       )
     )
@@ -356,6 +359,15 @@ export class ComfyWorkflowPolicy {
       variables,
       outputNodes,
     };
+    if (hasOwn(source, "description")) {
+      if (
+        typeof source.description !== "string" ||
+        !source.description.trim() ||
+        source.description.length > 1024
+      )
+        fail();
+      definition.description = source.description;
+    }
     if (hasOwn(source, "outputKind")) {
       if (source.outputKind !== "image" && source.outputKind !== "video")
         fail();
