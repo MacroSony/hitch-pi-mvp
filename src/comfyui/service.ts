@@ -393,6 +393,10 @@ export class ComfyService implements ComfyToolHost {
       !/^\/inbox\/results\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(
         attachment.path,
       ) ||
+      (attachment.workspacePath !== undefined &&
+        !/^\/workspace\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(
+          attachment.workspacePath,
+        )) ||
       attachment.bytes !== artifact.bytes ||
       attachment.mimeType !== artifact.mimeType ||
       attachment.sha256 !== artifact.sha256
@@ -419,6 +423,14 @@ export class ComfyService implements ComfyToolHost {
       ...projection,
       original: {
         path: attachment.path,
+        ...(attachment.workspacePath === undefined
+          ? {}
+          : {
+              workspace_path: attachment.workspacePath,
+              publish_path: attachment.workspacePath.slice(
+                "/workspace/".length,
+              ),
+            }),
         bytes: attachment.bytes,
         mimeType: attachment.mimeType,
         sha256: attachment.sha256,

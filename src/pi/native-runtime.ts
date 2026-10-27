@@ -64,6 +64,8 @@ import type { ForgeCatalog, ForgeResolved } from "../forge/types.js";
 import { COMFY_TOOL_NAMES, type ComfyToolHost } from "../comfyui/types.js";
 import { ComfyToolBridge } from "../comfyui/bridge.js";
 import { createComfyResultAttachmentHandler } from "../comfyui/attachments.js";
+import { materializeComfyWorkspaceResult } from "../comfyui/workspace.js";
+import { comfyRuntimeGuidance } from "../comfyui/guidance.js";
 
 const PI_VERSION = "0.85.1";
 const PI_TREE_SHA256 =
@@ -2074,7 +2076,20 @@ export class NativePiRuntime implements AgentRuntime {
     const nativeImages =
       selectedModel !== undefined && selectedModel.input.includes("image");
     let preparedAttachments: ReturnType<typeof materializeTurnAttachments>;
+    const savedComfyResults: { path: string; relativePath: string }[] = [];
     try {
+      if (turn.comfyContinuation?.outcome === "completed") {
+        if (!isPaintEnabled || !turn.workspace || inputArtifacts.length !== 1)
+          throw new Error("Comfy completion attachment is unavailable");
+        savedComfyResults.push(
+          materializeComfyWorkspaceResult({
+            userId,
+            workspace: turn.workspace,
+            artifact: inputArtifacts[0]!,
+            media: this.#media,
+          }),
+        );
+      }
       preparedAttachments = materializeTurnAttachments(
         this.#media,
         context.inbox,
@@ -2100,11 +2115,17 @@ export class NativePiRuntime implements AgentRuntime {
     const promptSections: string[] = [];
     if (isPaintEnabled && paintInputs.length)
       promptSections.push(
-        `Painting input HANDLE IDs are valid only during this Turn (use input_id, not host paths). Source labels distinguish new uploads from bounded recent same-session originals:\n${paintInputs.map((entry, index) => JSON.stringify({ id: entry.id, source: index < inputArtifacts.length ? "current-upload" : "recent-same-session-upload", name: entry.artifact.displayName, mimeType: entry.artifact.mimeType })).join("\n")}`,
+        `Painting input HANDLE IDs are valid only during this Turn (use input_id, not host paths). Source labels distinguish new uploads from bounded recent same-session originals:\n${paintInputs.map((entry, index) => JSON.stringify({ id: entry.id, source: index < inputArtifacts.length ? (turn.comfyContinuation ? "generated-result" : "current-upload") : "recent-same-session-artifact", name: entry.artifact.displayName, mimeType: entry.artifact.mimeType })).join("\n")}`,
       );
     if (isPaintEnabled)
       promptSections.push(
-        "ComfyUI generation is a background job: submit paint once and promptly reply with its short job ID. Hitch automatically sends the completed image or short video to this channel. Do not repeatedly poll or keep the chat waiting. Use paint_job_status when asked, and targeted paint_job_cancel for an explicit cancellation request. Never invent host paths or run a second generation merely to retrieve the first result. To inspect or save completed media, call paint_result with its job ID; images can return a bounded native preview, and originals have a read-only /inbox/results path to copy into /workspace. A video original path is NOT video vision. A completed status alone does not mean you have reviewed its content. For editing/video first call paint_list_workflows and follow the selected workflow's usage guidance and configured file slots; video/audio reference inputs are not enabled.",
+        comfyRuntimeGuidance(
+          turn.comfyContinuation
+            ? "agent"
+            : (this.#paint?.deliveryMode ?? "direct"),
+          turn.comfyContinuation,
+          savedComfyResults,
+        ),
       );
     if (imageInboxLines.length > 0) {
       promptSections.push(
@@ -2129,6 +2150,12 @@ export class NativePiRuntime implements AgentRuntime {
     let controller: PiRpcProcess;
     try {
       if (isPaintEnabled && this.#paint !== undefined) {
+        const attachComfyResult = createComfyResultAttachmentHandler({
+          userId,
+          inbox: context.inbox,
+          media: this.#media,
+          visualInput: nativeImages,
+        });
         paintBridge = await ComfyToolBridge.start(
           join(
             "/tmp",
@@ -2138,12 +2165,23 @@ export class NativePiRuntime implements AgentRuntime {
             userId,
             turnId: turn.turnId,
             inputs: paintInputs,
-            attachResult: createComfyResultAttachmentHandler({
-              userId,
-              inbox: context.inbox,
-              media: this.#media,
-              visualInput: nativeImages,
-            }),
+            attachResult: async (artifact, preview) => {
+              const attachment = await attachComfyResult(artifact, preview);
+              if (
+                this.#paint?.deliveryMode !== "agent" &&
+                !turn.comfyContinuation
+              )
+                return attachment;
+              if (!turn.workspace)
+                throw new Error("Comfy workspace is unavailable");
+              const saved = materializeComfyWorkspaceResult({
+                userId,
+                workspace: turn.workspace,
+                artifact,
+                media: this.#media,
+              });
+              return { ...attachment, workspacePath: saved.path };
+            },
           },
           this.#paint,
         );

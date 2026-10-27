@@ -64,6 +64,8 @@ export const COMFY_TOOL_NAMES = [
 export type ComfyToolName = (typeof COMFY_TOOL_NAMES)[number];
 export interface ComfyResultAttachment {
   readonly path: string;
+  /** Host-materialized persistent copy; never a caller-selected destination. */
+  readonly workspacePath?: string;
   readonly bytes: number;
   readonly mimeType: string;
   readonly sha256: string;

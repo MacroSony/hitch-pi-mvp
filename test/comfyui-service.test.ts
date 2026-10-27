@@ -328,6 +328,49 @@ test("paint_result exposes only callback-mounted completed results and rejects u
         { job_id: created.id },
       ),
     );
+    const saved = (await service.execute(
+      {
+        ...context,
+        async attachResult() {
+          return {
+            path: "/inbox/results/generated.png",
+            workspacePath: "/workspace/generated.png",
+            bytes: 12,
+            mimeType: "image/png",
+            sha256: artifact.sha256,
+          };
+        },
+      },
+      "paint_result",
+      { job_id: created.id, preview: false },
+    )) as { original: { workspace_path: string; publish_path: string } };
+    assert.equal(saved.original.workspace_path, "/workspace/generated.png");
+    assert.equal(saved.original.publish_path, "generated.png");
+    for (const workspacePath of [
+      "/etc/passwd",
+      "/workspace/../secret",
+      "/workspace/a/b.png",
+      "/workspace/x\n.png",
+    ]) {
+      await assert.rejects(
+        service.execute(
+          {
+            ...context,
+            async attachResult() {
+              return {
+                path: "/inbox/results/generated.png",
+                workspacePath,
+                bytes: 12,
+                mimeType: "image/png",
+                sha256: artifact.sha256,
+              };
+            },
+          },
+          "paint_result",
+          { job_id: created.id, preview: false },
+        ),
+      );
+    }
     await assert.rejects(
       service.execute(
         {
