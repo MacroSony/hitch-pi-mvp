@@ -11,13 +11,16 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { HitchApplication } from "../src/app/application.js";
 import { HitchStore } from "../src/app/store.js";
+import { DiscordWorker, type DiscordClient } from "../src/channels/discord.js";
 import { parseConfig } from "../src/config/config.js";
 import { bootstrapFoundation } from "../src/foundation/bootstrap.js";
 import { openFoundationDatabase } from "../src/foundation/database.js";
 import { ComfyService } from "../src/comfyui/service.js";
 import { ComfyWorkflowPolicy } from "../src/comfyui/workflow.js";
 import { MediaStore } from "../src/media/media-store.js";
+import { FakeAgentRuntime } from "../src/runtime/runtime.js";
 import type { RenderedComfyWorkflow } from "../src/comfyui/workflow.js";
 import type { ComfyJob, ComfyJobLedger } from "../src/comfyui/types.js";
 import type { RuntimeArtifact } from "../src/runtime/runtime.js";
@@ -420,7 +423,86 @@ test("real Store persists an owner-only video result and atomically groups its c
   assert.equal(groupedArtifact.artifact_id, artifact.id);
   assert.equal(artifact.sha256, createHash("sha256").update(mp4).digest("hex"));
   assert.deepEqual(readFileSync(media.verifiedObjectPath(artifact)), mp4);
+
+  let richCalls = 0;
+  const standaloneTexts: string[] = [];
+  const client: DiscordClient = {
+    botUserId: "fixture-bot",
+    assertHealthy() {},
+    async connect() {},
+    async close() {},
+    async sendTyping() {},
+    async fetchReferencedAuthor() {
+      return null;
+    },
+    async downloadAttachment() {
+      throw new Error("unused");
+    },
+    async sendText(_channel, text) {
+      standaloneTexts.push(text);
+    },
+    async sendArtifact() {
+      assert.fail("video completion must use one rich reply");
+    },
+    async sendRichReply(_channel, text, artifacts, objects) {
+      richCalls++;
+      assert.equal(text, "你的视频已生成。");
+      assert.equal(artifacts.length, 1);
+      assert.equal(artifacts[0]?.mimeType, "video/mp4");
+      assert.equal(artifacts[0]?.mediaKind, "file");
+      assert.deepEqual(
+        readFileSync(objects.verifiedObjectPath(artifacts[0]!)),
+        mp4,
+      );
+    },
+  };
+  const worker = new DiscordWorker(
+    { id: "test" },
+    new HitchApplication(reopenedStore, new FakeAgentRuntime()),
+    reopenedStore,
+    { client, media },
+  );
+  await worker.deliverPending();
+  assert.equal(richCalls, 1);
+  assert.deepEqual(
+    standaloneTexts,
+    [],
+    "completed caption is never sent standalone",
+  );
+  assert.deepEqual(reopenedStore.pendingDiscordOutbox("test", 20), []);
+  const sentRows = reopened.connection
+    .prepare(
+      "SELECT kind,state,attempts FROM outbox WHERE turn_id=? ORDER BY kind",
+    )
+    .all(completionTurn) as Array<{
+    kind: string;
+    state: string;
+    attempts: number | bigint;
+  }>;
+  assert.deepEqual(
+    sentRows.map((row) => [row.kind, row.state, Number(row.attempts)]),
+    [
+      ["artifact", "sent", 1],
+      ["text", "sent", 1],
+    ],
+  );
   reopened.close();
+
+  const persisted = openFoundationDatabase(dataRoot);
+  const persistedStore = new HitchStore(persisted);
+  assert.deepEqual(persistedStore.getComfyResult("alice", job.id), artifact);
+  assert.deepEqual(persistedStore.getComfyResult("bob", job.id), null);
+  const persistedRows = persisted.connection
+    .prepare(
+      "SELECT kind,state,attempts FROM outbox WHERE turn_id=? ORDER BY kind",
+    )
+    .all(completionTurn) as Array<{
+    kind: string;
+    state: string;
+    attempts: number;
+  }>;
+  assert.deepEqual(persistedRows, sentRows);
+  persisted.close();
 });
 
 test("invalid outputs and failed validation finalize without publishing artifacts; inspection abort leaves submitted for recovery", async (t) => {
