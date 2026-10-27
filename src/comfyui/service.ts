@@ -114,6 +114,7 @@ export class ComfyService implements ComfyToolHost {
   readonly #workflows: readonly ComfyWorkflowPolicy[];
   readonly #inspectVideo: typeof inspectGeneratedVideo;
   #ticking: Promise<void> | null = null;
+  readonly #pendingContinuationNotifications = new Set<string>();
 
   constructor(options: ComfyServiceOptions) {
     this.deliveryMode = options.deliveryMode ?? "direct";
@@ -573,9 +574,24 @@ export class ComfyService implements ComfyToolHost {
     if (
       committed &&
       this.#ledger.getComfyJob(userId, jobId)?.deliveryMode === "agent"
-    )
-      this.#onContinuationReady?.(userId);
+    ) {
+      this.#pendingContinuationNotifications.add(userId);
+      this.#notifyContinuation(userId);
+    }
     return committed;
+  }
+
+  /** Notifications are post-commit hints: failure must never change artifact ownership. */
+  #notifyContinuation(userId: string): void {
+    try {
+      this.#onContinuationReady?.(userId);
+      this.#pendingContinuationNotifications.delete(userId);
+    } catch {
+      // Bounded to enabled owners; retry on each poll. Restart recovers the durable queued turn.
+      process.stderr.write(
+        "Comfy continuation scheduling notification failed; retrying.\n",
+      );
+    }
   }
 
   recover(): void {
@@ -593,6 +609,8 @@ export class ComfyService implements ComfyToolHost {
 
   async #tick(signal?: AbortSignal): Promise<void> {
     if (signal?.aborted) return;
+    for (const userId of this.#pendingContinuationNotifications)
+      this.#notifyContinuation(userId);
     for (const job of this.#ledger.pendingComfyJobs(20)) {
       if (signal?.aborted) return;
       if (!this.enabledUsers.includes(job.userId)) continue;

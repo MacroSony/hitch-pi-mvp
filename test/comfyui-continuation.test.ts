@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { HitchStore } from "../src/app/store.js";
+import { HitchStore, randomIds, type IdSource } from "../src/app/store.js";
 import { parseConfig } from "../src/config/config.js";
 import { bootstrapFoundation } from "../src/foundation/bootstrap.js";
 import { openFoundationDatabase } from "../src/foundation/database.js";
@@ -30,7 +30,7 @@ const source = {
   timestamp: "2026-01-01T00:00:00Z",
 };
 
-function setup(t: test.TestContext) {
+function setup(t: test.TestContext, ids: IdSource = randomIds) {
   const root = mkdtempSync(join(tmpdir(), "hitch-comfy-jobs-"));
   chmodSync(root, 0o700);
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -91,7 +91,7 @@ function setup(t: test.TestContext) {
   db.prepare(
     "UPDATE channel_endpoints SET selected_session_id = ? WHERE id = ?",
   ).run(sessionId, endpoint.id);
-  const store = new HitchStore(foundation.database);
+  const store = new HitchStore(foundation.database, ids);
   store.configureComfyContinuation(["alice"]);
   const endpointContext = store.resolveDiscordEndpoint(
     "test",
@@ -693,6 +693,7 @@ test("schema 10 forward migration retains populated direct job, source and outpu
   f.db
     .exec(`DROP INDEX comfy_jobs_root; ALTER TABLE comfy_jobs DROP COLUMN delivery_mode;
     ALTER TABLE comfy_jobs DROP COLUMN root_turn_id; ALTER TABLE comfy_jobs DROP COLUMN continuation_blocked;
+    ALTER TABLE comfy_jobs DROP COLUMN origin_pi_session_id;
     UPDATE app_meta SET value='hitch-pi-mvp-schema-10' WHERE key='schema_id'; PRAGMA user_version=10;`);
   f.foundation.close();
   const reopened = openFoundationDatabase(f.dataRoot);
@@ -700,6 +701,11 @@ test("schema 10 forward migration retains populated direct job, source and outpu
   const store = new HitchStore(reopened);
   assert.equal(store.getComfyJob("alice", job.id)?.deliveryMode, "direct");
   assert.equal(store.getComfyJob("alice", job.id)?.state, "completed");
+  assert.equal(
+    store.getComfyJob("alice", job.id)?.originPiSessionId,
+    undefined,
+    "legacy direct job has no fabricated origin epoch",
+  );
   assert.deepEqual(store.getComfyResult("alice", job.id), artifact);
   assert.deepEqual(
     reopened.connection.prepare("PRAGMA foreign_key_check").all(),
@@ -726,6 +732,8 @@ test("model-supplied lineage or delivery overrides are rejected before generatio
     { remainingJobs: 99 },
     { deliveryMode: "direct" },
     { parent_job_id: "forged" },
+    { originPiSessionId: "forged" },
+    { origin_pi_session_id: "forged" },
   ]) {
     await assert.rejects(
       fake.service.execute({ userId: "alice", turnId: turn.turnId }, "paint", {
@@ -903,4 +911,391 @@ test("completion commit failures are observable, rollback atomically, and retry 
   assert.equal(f.store.getComfyJob("alice", job.id)?.state, "completed");
   assert.equal(count(f, "turns"), 2);
   assert.equal(fake.submits(), 1);
+});
+
+for (const phase of ["submitted", "queued", "running"] as const) {
+  test(`${phase} agent result cannot continue or publish into a different Pi epoch of the same Hitch session`, (t) => {
+    const f = setup(t);
+    t.after(() => f.foundation.close());
+    const { turn, job } = startJob(f);
+    f.store.completeTurn(turn, ok);
+    assert.equal(f.store.getComfyJob("alice", job.id)?.originPiSessionId, "pi");
+    if (phase !== "submitted")
+      f.store.finishComfyJob("alice", job.id, "completed", artifact);
+    const running =
+      phase === "running" ? f.store.claimNextTurn("alice")! : null;
+    // Simulate an independently observed epoch change; trusted wake rotation is intentionally a busy no-op.
+    f.db
+      .prepare(
+        "UPDATE sessions SET pi_session_id='replacement-pi', transcript_path='/new-epoch.jsonl' WHERE id=?",
+      )
+      .run(f.sessionId);
+    if (phase === "submitted")
+      assert.equal(
+        f.store.finishComfyJob("alice", job.id, "completed", artifact),
+        true,
+      );
+    if (running) {
+      f.store.completeTurn(running, {
+        ...ok,
+        text: "Old epoch must not publish",
+        transcriptPath: "/old-epoch.jsonl",
+        artifacts: [
+          {
+            ...artifact,
+            id: "artifact_123e4567-e89b-42d3-a456-426614174001",
+            storageKey: "alice/123e4567-e89b-42d3-a456-426614174001.blob",
+          },
+        ],
+      });
+      assert.equal(
+        (
+          f.db
+            .prepare("SELECT transcript_path FROM sessions WHERE id=?")
+            .get(f.sessionId) as { transcript_path: string }
+        ).transcript_path,
+        "/new-epoch.jsonl",
+        "stale runtime cannot overwrite replacement Pi metadata",
+      );
+    }
+    assert.equal(f.store.claimNextTurn("alice"), null);
+    assert.equal(count(f, "outbox"), 0);
+    assert.ok(f.store.getComfyResult("alice", job.id));
+    assert.equal(
+      (
+        f.db
+          .prepare("SELECT continuation_blocked FROM comfy_jobs WHERE id=?")
+          .get(job.id) as { continuation_blocked: bigint }
+      ).continuation_blocked,
+      1n,
+    );
+  });
+
+  test(`${phase} agent revocation survives an observed Pi epoch change and change-back`, (t) => {
+    const epochs = ["replacement-pi", "pi"];
+    const f = setup(t, {
+      next: (kind) => (kind === "pi" ? epochs.shift()! : randomIds.next(kind)),
+    });
+    t.after(() => f.foundation.close());
+    const { turn, job } = startJob(f);
+    f.store.completeTurn(turn, ok);
+    if (phase !== "submitted")
+      f.store.finishComfyJob("alice", job.id, "completed", artifact);
+    const running =
+      phase === "running" ? f.store.claimNextTurn("alice")! : null;
+    if (!running) {
+      assert.equal(
+        f.store.resetSessionPiStateForWake(f.endpointId, "alice").id,
+        f.sessionId,
+      );
+      assert.equal(
+        (
+          f.db
+            .prepare("SELECT pi_session_id FROM sessions WHERE id=?")
+            .get(f.sessionId) as { pi_session_id: string }
+        ).pi_session_id,
+        "replacement-pi",
+      );
+      f.store.resetSessionPiStateForWake(f.endpointId, "alice");
+    } else {
+      // Do not weaken the existing active-Turn rotation guard. The trusted entry still observes
+      // and invalidates an externally changed epoch before returning its busy no-op.
+      f.store.resetSessionPiStateForWake(f.endpointId, "alice");
+      assert.equal(
+        epochs.length,
+        2,
+        "busy wake does not consume a new Pi ID or revoke a valid epoch",
+      );
+      assert.equal(
+        (
+          f.db
+            .prepare("SELECT continuation_blocked FROM comfy_jobs WHERE id=?")
+            .get(job.id) as { continuation_blocked: bigint }
+        ).continuation_blocked,
+        0n,
+      );
+      f.db
+        .prepare(
+          "UPDATE sessions SET pi_session_id='replacement-pi' WHERE id=?",
+        )
+        .run(f.sessionId);
+      f.store.resetSessionPiStateForWake(f.endpointId, "alice");
+      f.db
+        .prepare("UPDATE sessions SET pi_session_id='pi' WHERE id=?")
+        .run(f.sessionId);
+    }
+    assert.equal(
+      (
+        f.db
+          .prepare("SELECT pi_session_id FROM sessions WHERE id=?")
+          .get(f.sessionId) as { pi_session_id: string }
+      ).pi_session_id,
+      "pi",
+    );
+    if (phase === "submitted")
+      f.store.finishComfyJob("alice", job.id, "completed", artifact);
+    if (running) {
+      assert.throws(
+        () =>
+          f.store.createComfyJob(
+            "alice",
+            running.turnId,
+            "fixture",
+            snapshot,
+            "agent",
+          ),
+        /cancelled/u,
+      );
+      f.store.completeTurn(running, { ...ok, text: "Must remain revoked" });
+    }
+    assert.equal(f.store.claimNextTurn("alice"), null);
+    assert.equal(count(f, "outbox"), 0);
+    assert.ok(f.store.getComfyResult("alice", job.id));
+    assert.equal(
+      (
+        f.db
+          .prepare("SELECT continuation_blocked FROM comfy_jobs WHERE id=?")
+          .get(job.id) as { continuation_blocked: bigint }
+      ).continuation_blocked,
+      1n,
+    );
+  });
+}
+
+test("Pi rotation expires previously queued final publications, including failure-turn artifacts", (t) => {
+  const epochs = ["replacement-pi", "pi"];
+  const f = setup(t, {
+    next: (kind) => (kind === "pi" ? epochs.shift()! : randomIds.next(kind)),
+  });
+  t.after(() => f.foundation.close());
+  const { turn, job } = startJob(f);
+  f.store.completeTurn(turn, ok);
+  f.store.finishComfyJob("alice", job.id, "completed", artifact);
+  const running = f.store.claimNextTurn("alice")!;
+  f.store.completeTurn(running, {
+    ...ok,
+    outcome: "failed",
+    error: "Original epoch failure",
+    artifacts: [
+      {
+        ...artifact,
+        id: "artifact_123e4567-e89b-42d3-a456-426614174001",
+        storageKey: "alice/123e4567-e89b-42d3-a456-426614174001.blob",
+      },
+    ],
+  });
+  const deliveries = f.store.pendingDiscordOutbox("test");
+  assert.equal(deliveries.length, 2);
+  f.store.resetSessionPiStateForWake(f.endpointId, "alice");
+  f.store.resetSessionPiStateForWake(f.endpointId, "alice");
+  assert.equal(f.store.pendingDiscordOutbox("test").length, 0);
+  assert.equal(f.store.claimDiscordOutboxGroup(deliveries), false);
+  assert.ok(f.store.getComfyResult("alice", job.id));
+});
+
+test("stale automatic runtime failure cannot quarantine a replacement Pi epoch", (t) => {
+  const f = setup(t);
+  t.after(() => f.foundation.close());
+  const { turn, job } = startJob(f);
+  f.store.completeTurn(turn, ok);
+  f.store.finishComfyJob("alice", job.id, "completed", artifact);
+  const running = f.store.claimNextTurn("alice")!;
+  f.db
+    .prepare("UPDATE sessions SET pi_session_id='replacement-pi' WHERE id=?")
+    .run(f.sessionId);
+  f.store.completeTurn(running, {
+    outcome: "unknown",
+    text: "",
+    sessionReusable: false,
+  });
+  assert.equal(
+    (
+      f.db
+        .prepare("SELECT state FROM sessions WHERE id=?")
+        .get(f.sessionId) as { state: string }
+    ).state,
+    "active",
+  );
+  assert.equal(count(f, "outbox"), 0);
+  assert.ok(f.store.getComfyResult("alice", job.id));
+});
+
+test("three completions are retained above four queued turns, drain once in FIFO, and cannot grow by duplicate completion", async (t) => {
+  const f = setup(t);
+  t.after(() => f.foundation.close());
+  f.admit();
+  const origin = f.store.claimNextTurn("alice")!;
+  const jobs = Array.from({ length: 3 }, () => {
+    const job = f.store.createComfyJob(
+      "alice",
+      origin.turnId,
+      "fixture",
+      snapshot,
+      "agent",
+    );
+    f.store.markComfyJobSubmitting("alice", job.id);
+    f.store.markComfyJobSubmitted("alice", job.id, "backend");
+    return job;
+  });
+  f.store.completeTurn(origin, ok);
+  const ordinary = Array.from({ length: 4 }, (_, i) =>
+    f.admit(`Queued user ${i}`),
+  );
+  assert.throws(() => f.admit("Over ordinary queue limit"), /queue/u);
+  for (const job of jobs)
+    assert.equal(
+      f.store.finishComfyJob("alice", job.id, "completed", artifact),
+      true,
+    );
+  const queued = () =>
+    Number(
+      (
+        f.db
+          .prepare("SELECT count(*) AS count FROM turns WHERE state='queued'")
+          .get() as { count: bigint }
+      ).count,
+    );
+  assert.equal(
+    queued(),
+    7,
+    "durable completions are not rejected or dropped at the ordinary queue cap",
+  );
+  for (const job of jobs)
+    assert.equal(
+      f.store.finishComfyJob("alice", job.id, "completed", artifact),
+      false,
+    );
+  assert.equal(
+    queued(),
+    7,
+    "repeated completions cannot inflate the internal queue",
+  );
+  assert.throws(() => f.admit("Still over queue limit"), /queue/u);
+  const seen: RuntimeTurn[] = [];
+  const app = new HitchApplication(
+    f.store,
+    new FakeAgentRuntime((turn) => {
+      seen.push(turn);
+      return { ...ok, text: "Final" };
+    }),
+  );
+  app.start();
+  await app.drain();
+  assert.deepEqual(
+    seen.slice(0, 4).map((turn) => turn.turnId),
+    ordinary.map((turn) => turn.turnId),
+  );
+  assert.deepEqual(
+    new Set(seen.slice(4).map((turn) => turn.comfyContinuation?.jobId)),
+    new Set(jobs.map((job) => job.id)),
+  );
+  assert.equal(seen.length, 7);
+  assert.equal(queued(), 0);
+  assert.equal(new Set(seen.map((turn) => turn.turnId)).size, 7);
+  await app.drain();
+  assert.equal(seen.length, 7);
+  app.stop();
+});
+
+for (const outcome of ["completed", "failed"] as const) {
+  for (const throwAfterDispatch of [false, true]) {
+    test(`${outcome} scheduling callback throw ${throwAfterDispatch ? "after" : "before"} dispatch retries safely without restart or artifact discard`, async (t) => {
+      const f = setup(t);
+      t.after(() => f.foundation.close());
+      let app: HitchApplication;
+      let callbacks = 0;
+      const seen: RuntimeTurn[] = [];
+      const fake = fakeService(f, (userId) => {
+        callbacks++;
+        if (callbacks === 1 && !throwAfterDispatch)
+          throw new Error("fixture private callback error");
+        app.dispatchQueuedUser(userId);
+        if (callbacks === 1) throw new Error("fixture private callback error");
+      });
+      if (outcome === "failed") fake.state("failed");
+      app = new HitchApplication(
+        f.store,
+        new FakeAgentRuntime((turn) => {
+          seen.push(turn);
+          return { ...ok, text: "Final notification result" };
+        }),
+      );
+      app.start();
+      const { turn, job } = startJob(f);
+      f.store.completeTurn(turn, ok);
+      await assert.doesNotReject(fake.service.tick());
+      if (outcome === "completed") {
+        const original = f.store.getComfyResult("alice", job.id)!;
+        assert.ok(original);
+        assert.doesNotThrow(
+          () => fake.media.verifiedObjectPath(original),
+          "committed result was not discarded when notification threw",
+        );
+      }
+      await app.drain();
+      assert.equal(seen.length, throwAfterDispatch ? 1 : 0);
+      await fake.service.tick();
+      await app.drain();
+      await fake.service.tick();
+      await app.drain();
+      assert.equal(
+        callbacks,
+        2,
+        "only failed notifications retry; successful hint is removed",
+      );
+      assert.equal(seen.length, 1);
+      assert.equal(seen[0]?.comfyContinuation?.outcome, outcome);
+      assert.equal(
+        fake.polls(),
+        1,
+        "notification retry never re-downloads or re-generates the job",
+      );
+      assert.equal(count(f, "outbox"), 1);
+      app.stop();
+    });
+  }
+}
+
+test("origin epoch and revocation survive Store restart without reinterpreting a retained agent result", (t) => {
+  const f = setup(t);
+  const { turn, job } = startJob(f);
+  f.store.completeTurn(turn, ok);
+  f.store.finishComfyJob("alice", job.id, "completed", artifact);
+  f.store.resetSessionPiStateForWake(f.endpointId, "alice");
+  f.foundation.close();
+  const reopened = openFoundationDatabase(f.dataRoot);
+  t.after(() => reopened.close());
+  const store = new HitchStore(reopened);
+  store.configureComfyContinuation(["alice"]);
+  assert.equal(store.getComfyJob("alice", job.id)?.originPiSessionId, "pi");
+  assert.deepEqual(store.recoverAfterRestart(), []);
+  assert.equal(store.claimNextTurn("alice"), null);
+  assert.deepEqual(store.getComfyResult("alice", job.id), artifact);
+  assert.equal(store.pendingDiscordOutbox("test").length, 0);
+});
+
+test("Pi epoch rotation does not reinterpret a persisted direct job as an agent continuation", (t) => {
+  const f = setup(t);
+  t.after(() => f.foundation.close());
+  f.admit();
+  const turn = f.store.claimNextTurn("alice")!;
+  const job = f.store.createComfyJob(
+    "alice",
+    turn.turnId,
+    "fixture",
+    snapshot,
+    "direct",
+  );
+  f.store.markComfyJobSubmitting("alice", job.id);
+  f.store.markComfyJobSubmitted("alice", job.id, "backend");
+  f.store.completeTurn(turn, ok);
+  f.store.resetSessionPiStateForWake(f.endpointId, "alice");
+  assert.equal(
+    f.store.finishComfyJob("alice", job.id, "completed", artifact),
+    true,
+  );
+  assert.equal(f.store.getComfyJob("alice", job.id)?.originPiSessionId, "pi");
+  assert.equal(f.store.claimNextTurn("alice"), null);
+  assert.deepEqual(f.store.getComfyResult("alice", job.id), artifact);
+  assert.equal(count(f, "outbox"), 3);
 });

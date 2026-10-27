@@ -120,6 +120,7 @@ interface ComfyJobRow {
   workflow_id: string;
   delivery_mode: "direct" | "agent";
   root_turn_id: string | null;
+  origin_pi_session_id: string | null;
   continuation_blocked: number | bigint;
   snapshot_json: string;
   state: ComfyJobState;
@@ -147,6 +148,9 @@ function comfyJob(row: ComfyJobRow): ComfyJob {
     state: row.state,
     deliveryMode: row.delivery_mode,
     ...(row.root_turn_id === null ? {} : { rootTurnId: row.root_turn_id }),
+    ...(row.origin_pi_session_id === null
+      ? {}
+      : { originPiSessionId: row.origin_pi_session_id }),
     ...(row.backend_prompt_id === null
       ? {}
       : { backendPromptId: row.backend_prompt_id }),
@@ -302,6 +306,7 @@ export class HitchStore implements ComfyJobLedger {
     userId: string,
     sessionId: string,
     endpointId: string,
+    piSessionId?: string,
   ): boolean {
     return (
       this.#comfyEnabledUsers.has(userId) &&
@@ -312,9 +317,16 @@ export class HitchStore implements ComfyJobLedger {
       JOIN users u ON u.id = e.user_id AND u.enabled = 1
       JOIN sessions s ON s.id = e.selected_session_id AND s.user_id = e.user_id AND s.state = 'active'
       WHERE e.id = ? AND e.user_id = ? AND e.enabled = 1 AND s.id = ?
+        AND (? IS NULL OR s.pi_session_id = ?)
     `,
         )
-        .get(endpointId, userId, sessionId) !== undefined
+        .get(
+          endpointId,
+          userId,
+          sessionId,
+          piSessionId ?? null,
+          piSessionId ?? null,
+        ) !== undefined
     );
   }
 
@@ -331,6 +343,7 @@ export class HitchStore implements ComfyJobLedger {
           JOIN sessions s ON s.id = e.selected_session_id AND s.user_id = e.user_id AND s.state = 'active'
           WHERE e.id = comfy_jobs.endpoint_id AND e.user_id = comfy_jobs.user_id
             AND e.enabled = 1 AND s.id = comfy_jobs.session_id
+            AND s.pi_session_id = comfy_jobs.origin_pi_session_id
         ) OR EXISTS (
           SELECT 1 FROM turns t WHERE t.id = comfy_jobs.source_turn_id
             AND t.user_id = comfy_jobs.user_id AND t.outcome IS NOT NULL AND t.outcome != 'succeeded'
@@ -353,8 +366,10 @@ export class HitchStore implements ComfyJobLedger {
         SELECT t.id FROM turns t JOIN comfy_jobs j ON j.completion_turn_id = t.id AND j.user_id = t.user_id
         JOIN channel_endpoints e ON e.id = t.endpoint_id AND e.user_id = t.user_id
         JOIN users u ON u.id = t.user_id
+        JOIN sessions s ON s.id = t.session_id AND s.user_id = t.user_id
         WHERE j.delivery_mode = 'agent' AND j.continuation_blocked = 1
-          AND (t.outcome = 'succeeded' OR e.selected_session_id IS NOT t.session_id OR e.enabled = 0 OR u.enabled = 0)
+          AND (t.outcome = 'succeeded' OR e.selected_session_id IS NOT t.session_id OR e.enabled = 0 OR u.enabled = 0
+            OR s.pi_session_id IS NOT j.origin_pi_session_id)
       )`,
       )
       .run(this.clock.now());
@@ -383,16 +398,18 @@ export class HitchStore implements ComfyJobLedger {
     return transaction(this.#database, () => {
       const origin = this.#database
         .prepare(
-          `SELECT t.session_id, t.endpoint_id FROM turns t
+          `SELECT t.session_id, t.endpoint_id, s.pi_session_id FROM turns t
+         JOIN sessions s ON s.id = t.session_id AND s.user_id = t.user_id
          JOIN users u ON u.id = t.user_id AND u.enabled = 1
          JOIN channel_endpoints e ON e.id = t.endpoint_id AND e.user_id = t.user_id AND e.enabled = 1 AND e.kind = 'discord'
          WHERE t.id = ? AND t.user_id = ? AND t.state IN ('starting', 'running')`,
         )
         .get(turnId, userId) as
-        | { session_id: string; endpoint_id: string }
+        | { session_id: string; endpoint_id: string; pi_session_id: string }
         | undefined;
       if (origin === undefined)
         throw new AppError("rejected", "Comfy job origin is unavailable");
+      this.#invalidateComfyContinuations();
       const parent = this.#database
         .prepare(
           `SELECT root_turn_id, continuation_blocked FROM comfy_jobs
@@ -413,6 +430,7 @@ export class HitchStore implements ComfyJobLedger {
           userId,
           origin.session_id,
           origin.endpoint_id,
+          origin.pi_session_id,
         )
       )
         throw new AppError(
@@ -447,8 +465,8 @@ export class HitchStore implements ComfyJobLedger {
       this.#database
         .prepare(
           `INSERT INTO comfy_jobs(id, user_id, source_turn_id, endpoint_id, session_id, workflow_id,
-           snapshot_json, state, created_at, updated_at, last_polled_at, delivery_mode, root_turn_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'prepared', ?, ?, ?, ?, ?)`,
+           snapshot_json, state, created_at, updated_at, last_polled_at, delivery_mode, root_turn_id, origin_pi_session_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'prepared', ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           id,
@@ -463,6 +481,7 @@ export class HitchStore implements ComfyJobLedger {
           0,
           deliveryMode,
           deliveryMode === "agent" ? rootTurnId : null,
+          origin.pi_session_id,
         );
       this.#pruneComfyJobs(userId);
       return {
@@ -473,6 +492,7 @@ export class HitchStore implements ComfyJobLedger {
         snapshot: JSON.parse(snapshotJson) as RenderedComfyWorkflow,
         state: "prepared",
         deliveryMode,
+        originPiSessionId: origin.pi_session_id,
         ...(deliveryMode === "agent" ? { rootTurnId } : {}),
         createdAt: now,
         updatedAt: now,
@@ -711,7 +731,12 @@ export class HitchStore implements ComfyJobLedger {
         agent &&
         Number(blocked.continuation_blocked) === 0 &&
         sourceOutcome.outcome === "succeeded" &&
-        this.#comfyRouteAvailable(userId, row.session_id, row.endpoint_id);
+        this.#comfyRouteAvailable(
+          userId,
+          row.session_id,
+          row.endpoint_id,
+          row.origin_pi_session_id ?? undefined,
+        );
       const now = this.clock.now();
       const turnId = this.ids.next("turn");
       const rootPrompt = agent
@@ -1455,6 +1480,8 @@ export class HitchStore implements ComfyJobLedger {
     userId: string,
   ): { id: string } {
     return transaction(this.#database, () => {
+      // Observe prior epoch changes even when the active-Turn guard makes this a no-op.
+      this.#invalidateComfyContinuations();
       const selected = this.#selectedSession(endpointId, userId);
       if (selected === null || selected.state === "stopped")
         return this.#createSession(endpointId, userId);
@@ -1474,6 +1501,8 @@ export class HitchStore implements ComfyJobLedger {
           "UPDATE sessions SET pi_session_id = ?, transcript_path = NULL, context_usage = NULL, updated_at = ? WHERE id = ? AND user_id = ?",
         )
         .run(this.ids.next("pi"), this.clock.now(), selected.id, userId);
+      // Revoke in the rotation transaction; rotating back cannot revive old jobs.
+      this.#invalidateComfyContinuations();
       return { id: selected.id };
     });
   }
@@ -2832,12 +2861,21 @@ export class HitchStore implements ComfyJobLedger {
           turn.userId,
           turn.sessionId,
           turn.endpointId,
+          turn.piSessionId,
         ) ||
           this.#database
             .prepare(
               "SELECT 1 FROM comfy_jobs WHERE id = ? AND user_id = ? AND continuation_blocked = 1",
             )
             .get(turn.comfyContinuation.jobId, turn.userId) !== undefined);
+      const staleComfyEpoch =
+        turn.comfyContinuation !== undefined &&
+        this.#database
+          .prepare(
+            "SELECT 1 FROM sessions WHERE id = ? AND user_id = ? AND pi_session_id = ?",
+          )
+          .get(turn.sessionId, turn.userId, turn.piSessionId ?? null) ===
+          undefined;
       const now = this.clock.now();
       const text = outcomeText(result);
       const changed = this.#database
@@ -2859,14 +2897,17 @@ export class HitchStore implements ComfyJobLedger {
           "internal-error",
           "active Turn state changed unexpectedly",
         );
-      if (!result.sessionReusable || result.outcome === "unknown") {
+      if (
+        !staleComfyEpoch &&
+        (!result.sessionReusable || result.outcome === "unknown")
+      ) {
         this.#database
           .prepare(
             "UPDATE sessions SET state = 'quarantined', context_usage = NULL, updated_at = ? WHERE id = ? AND user_id = ?",
           )
           .run(now, turn.sessionId, turn.userId);
       }
-      if (result.sessionReusable) {
+      if (result.sessionReusable && !staleComfyEpoch) {
         this.#database
           .prepare(
             `UPDATE sessions

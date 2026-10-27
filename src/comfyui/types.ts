@@ -20,6 +20,7 @@ export interface ComfyJob {
   readonly state: ComfyJobState;
   readonly deliveryMode?: "direct" | "agent";
   readonly rootTurnId?: string;
+  readonly originPiSessionId?: string;
   readonly backendPromptId?: string;
   readonly createdAt: number;
   readonly updatedAt: number;

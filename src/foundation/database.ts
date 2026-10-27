@@ -380,6 +380,7 @@ ALTER TABLE channel_endpoints_new RENAME TO channel_endpoints;
 const MIGRATE_10_TO_11 = `
 ALTER TABLE comfy_jobs ADD COLUMN delivery_mode TEXT NOT NULL DEFAULT 'direct' CHECK (delivery_mode IN ('direct', 'agent'));
 ALTER TABLE comfy_jobs ADD COLUMN root_turn_id TEXT;
+ALTER TABLE comfy_jobs ADD COLUMN origin_pi_session_id TEXT;
 ALTER TABLE comfy_jobs ADD COLUMN continuation_blocked INTEGER NOT NULL DEFAULT 0 CHECK (continuation_blocked IN (0, 1));
 CREATE INDEX comfy_jobs_root ON comfy_jobs(user_id, root_turn_id);
 `;
