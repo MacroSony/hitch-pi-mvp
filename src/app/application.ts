@@ -192,6 +192,7 @@ export class HitchApplication {
     readonly wakeTickMs: number = WAKE_TICK_MS,
     readonly wakeGraceMs: number = WAKE_GRACE_MS,
     readonly discordUsers: readonly UserConfig[] = [],
+    readonly comfyAgentUsers: readonly string[] = [],
   ) {
     this.#wakeUsers = new Set(wakeUserIds);
   }
@@ -829,6 +830,11 @@ export class HitchApplication {
     return { accepted: true, duplicate: result.duplicate };
   }
 
+  /** Host-only notification after a durable background completion transaction. */
+  public dispatchQueuedUser(userId: string): void {
+    if (this.#started) this.#schedule(userId);
+  }
+
   #schedule(userId: string): void {
     if (this.#stopping || this.#pumps.has(userId)) return;
     const pump = Promise.resolve()
@@ -838,7 +844,9 @@ export class HitchApplication {
         if (this.store.hasDispatchableTurn(userId)) this.#schedule(userId);
       });
     this.#pumps.set(userId, pump);
-    void pump.catch(() => undefined);
+    void pump.catch(() => {
+      process.stderr.write("Owner queue pump failed.\n");
+    });
   }
 
   async #pumpUser(userId: string): Promise<void> {
@@ -852,7 +860,10 @@ export class HitchApplication {
       let result: RuntimeResult;
       try {
         result = await this.runtime.run(turn, controller.signal, (delta) =>
-          progress.push(delta),
+          this.comfyAgentUsers.includes(userId) ||
+          turn.comfyContinuation !== undefined
+            ? undefined
+            : progress.push(delta),
         );
       } catch {
         result = {

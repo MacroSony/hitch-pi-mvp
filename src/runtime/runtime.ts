@@ -1,6 +1,12 @@
 import type { ForgeCatalog, ForgeSelection } from "../forge/types.js";
 
 export interface RuntimeTurn {
+  readonly comfyContinuation?: {
+    readonly jobId: string;
+    readonly outcome: "completed" | "failed";
+    readonly rootTurnId: string;
+    readonly remainingJobs: number;
+  };
   readonly turnId: string;
   readonly userId: string;
   readonly sessionId: string;

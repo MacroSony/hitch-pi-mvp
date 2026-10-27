@@ -18,6 +18,8 @@ export interface ComfyJob {
   readonly workflowId: string;
   readonly snapshot: RenderedComfyWorkflow;
   readonly state: ComfyJobState;
+  readonly deliveryMode?: "direct" | "agent";
+  readonly rootTurnId?: string;
   readonly backendPromptId?: string;
   readonly createdAt: number;
   readonly updatedAt: number;
@@ -30,6 +32,7 @@ export interface ComfyJobLedger {
     turnId: string,
     workflowId: string,
     snapshot: RenderedComfyWorkflow,
+    deliveryMode?: "direct" | "agent",
   ): ComfyJob;
   getComfyJob(userId: string, jobId: string): ComfyJob | null;
   /** Host-only immutable output; absent on legacy test doubles. */
@@ -91,6 +94,7 @@ export interface ComfyToolContext {
   ) => Promise<ComfyResultAttachment>;
 }
 export interface ComfyToolHost {
+  readonly deliveryMode?: "direct" | "agent";
   readonly enabledUsers: readonly string[];
   execute(
     context: ComfyToolContext,

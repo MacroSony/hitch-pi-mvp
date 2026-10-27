@@ -9,8 +9,8 @@ import {
   type ValidatedTopology,
 } from "./filesystem.js";
 
-const SCHEMA_VERSION = 10;
-const SCHEMA_ID = "hitch-pi-mvp-schema-10";
+const SCHEMA_VERSION = 11;
+const SCHEMA_ID = "hitch-pi-mvp-schema-11";
 const EXPECTED_TABLES = [
   "app_meta",
   "artifacts",
@@ -377,6 +377,13 @@ DROP TABLE channel_endpoints;
 ALTER TABLE channel_endpoints_new RENAME TO channel_endpoints;
 `;
 
+const MIGRATE_10_TO_11 = `
+ALTER TABLE comfy_jobs ADD COLUMN delivery_mode TEXT NOT NULL DEFAULT 'direct' CHECK (delivery_mode IN ('direct', 'agent'));
+ALTER TABLE comfy_jobs ADD COLUMN root_turn_id TEXT;
+ALTER TABLE comfy_jobs ADD COLUMN continuation_blocked INTEGER NOT NULL DEFAULT 0 CHECK (continuation_blocked IN (0, 1));
+CREATE INDEX comfy_jobs_root ON comfy_jobs(user_id, root_turn_id);
+`;
+
 const MIGRATE_9_TO_10 = `
 CREATE TABLE comfy_jobs (
   id TEXT PRIMARY KEY,
@@ -547,6 +554,7 @@ function verifySchema(connection: DatabaseSync): void {
     connection.exec("BEGIN IMMEDIATE");
     try {
       connection.exec(SCHEMA);
+      connection.exec(MIGRATE_10_TO_11);
       connection
         .prepare("INSERT INTO app_meta(key, value) VALUES (?, ?)")
         .run("schema_id", SCHEMA_ID);
@@ -580,6 +588,7 @@ function verifySchema(connection: DatabaseSync): void {
       connection.exec(MIGRATE_7_TO_8);
       connection.exec(MIGRATE_8_TO_9);
       connection.exec(MIGRATE_9_TO_10);
+      connection.exec(MIGRATE_10_TO_11);
       connection
         .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
         .run(SCHEMA_ID, "schema_id");
@@ -609,6 +618,7 @@ function verifySchema(connection: DatabaseSync): void {
       connection.exec(MIGRATE_7_TO_8);
       connection.exec(MIGRATE_8_TO_9);
       connection.exec(MIGRATE_9_TO_10);
+      connection.exec(MIGRATE_10_TO_11);
       connection
         .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
         .run(SCHEMA_ID, "schema_id");
@@ -637,6 +647,7 @@ function verifySchema(connection: DatabaseSync): void {
       connection.exec(MIGRATE_7_TO_8);
       connection.exec(MIGRATE_8_TO_9);
       connection.exec(MIGRATE_9_TO_10);
+      connection.exec(MIGRATE_10_TO_11);
       connection
         .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
         .run(SCHEMA_ID, "schema_id");
@@ -663,6 +674,7 @@ function verifySchema(connection: DatabaseSync): void {
       connection.exec(MIGRATE_7_TO_8);
       connection.exec(MIGRATE_8_TO_9);
       connection.exec(MIGRATE_9_TO_10);
+      connection.exec(MIGRATE_10_TO_11);
       connection
         .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
         .run(SCHEMA_ID, "schema_id");
@@ -684,6 +696,7 @@ function verifySchema(connection: DatabaseSync): void {
       connection.exec(MIGRATE_7_TO_8);
       connection.exec(MIGRATE_8_TO_9);
       connection.exec(MIGRATE_9_TO_10);
+      connection.exec(MIGRATE_10_TO_11);
       connection
         .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
         .run(SCHEMA_ID, "schema_id");
@@ -709,6 +722,7 @@ function verifySchema(connection: DatabaseSync): void {
       connection.exec(MIGRATE_7_TO_8);
       connection.exec(MIGRATE_8_TO_9);
       connection.exec(MIGRATE_9_TO_10);
+      connection.exec(MIGRATE_10_TO_11);
       connection
         .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
         .run(SCHEMA_ID, "schema_id");
@@ -733,6 +747,7 @@ function verifySchema(connection: DatabaseSync): void {
       connection.exec(MIGRATE_7_TO_8);
       connection.exec(MIGRATE_8_TO_9);
       connection.exec(MIGRATE_9_TO_10);
+      connection.exec(MIGRATE_10_TO_11);
       connection
         .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
         .run(SCHEMA_ID, "schema_id");
@@ -756,6 +771,7 @@ function verifySchema(connection: DatabaseSync): void {
     try {
       connection.exec(MIGRATE_8_TO_9);
       connection.exec(MIGRATE_9_TO_10);
+      connection.exec(MIGRATE_10_TO_11);
       connection
         .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
         .run(SCHEMA_ID, "schema_id");
@@ -777,9 +793,29 @@ function verifySchema(connection: DatabaseSync): void {
     connection.exec("BEGIN IMMEDIATE");
     try {
       connection.exec(MIGRATE_9_TO_10);
+      connection.exec(MIGRATE_10_TO_11);
       connection
         .prepare("UPDATE app_meta SET value = ? WHERE key = ?")
         .run(SCHEMA_ID, "schema_id");
+      connection.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+      assertForeignKeyIntegrity(connection);
+      connection.exec("COMMIT");
+    } catch (error) {
+      connection.exec("ROLLBACK");
+      throw error;
+    }
+  } else if (version === 10) {
+    const schemaId = connection
+      .prepare("SELECT value FROM app_meta WHERE key = 'schema_id'")
+      .get() as { value: string } | undefined;
+    if (schemaId?.value !== "hitch-pi-mvp-schema-10")
+      throw new FoundationError("database schema 10 identity is unknown");
+    connection.exec("BEGIN IMMEDIATE");
+    try {
+      connection.exec(MIGRATE_10_TO_11);
+      connection
+        .prepare("UPDATE app_meta SET value = ? WHERE key = 'schema_id'")
+        .run(SCHEMA_ID);
       connection.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
       assertForeignKeyIntegrity(connection);
       connection.exec("COMMIT");

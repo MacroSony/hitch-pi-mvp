@@ -439,6 +439,7 @@ export function parseCommand(text: string): Command | null {
     case "sessions":
       return { kind: "sessions" };
     case "switch":
+    case "use":
       return {
         kind: "switch",
         selector: boundedArgument(argument, "session selector"),

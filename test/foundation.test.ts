@@ -620,7 +620,7 @@ test("schema 1 state migrates to current schema without losing Turns or outbox",
   const version = migrated.connection.prepare("PRAGMA user_version").get() as {
     user_version: bigint;
   };
-  assert.equal(version.user_version, 10n);
+  assert.equal(version.user_version, 11n);
   // The v7 turns CHECK must accept compact Turns after migration.
   const probeIds = migrated.connection
     .prepare(
@@ -701,7 +701,7 @@ test("schema 6 migrates context snapshot column without changing existing rows",
           user_version: bigint;
         }
       ).user_version,
-      10n,
+      11n,
     );
     assert.equal(rowCount(migrated.connection, "users"), userCount);
     assert.equal(
@@ -710,7 +710,7 @@ test("schema 6 migrates context snapshot column without changing existing rows",
           .prepare("SELECT value FROM app_meta WHERE key='schema_id'")
           .get() as { value: string }
       ).value,
-      "hitch-pi-mvp-schema-10",
+      "hitch-pi-mvp-schema-11",
     );
     assert.deepEqual(
       migrated.connection.prepare("PRAGMA foreign_key_check").all(),
@@ -756,7 +756,7 @@ test("schema 9 adds only Comfy jobs and preserves artifact, Turn and outbox rows
           user_version: bigint;
         }
       ).user_version,
-      10n,
+      11n,
     );
     assert.equal(rowCount(migrated.connection, "artifacts"), 1);
     assert.equal(rowCount(migrated.connection, "turns"), 1);
@@ -783,7 +783,7 @@ test("schema 9 adds only Comfy jobs and preserves artifact, Turn and outbox rows
   }
 });
 
-test("schema 8 migrates non-empty state to schema 10", () => {
+test("schema 8 migrates non-empty state to schema 11", () => {
   const setup = fixture();
   const initial = bootstrapFoundation(setup.config());
   seedDurableState(initial.database.connection);
@@ -800,7 +800,7 @@ test("schema 8 migrates non-empty state to schema 10", () => {
           user_version: bigint;
         }
       ).user_version,
-      10n,
+      11n,
     );
     assert.equal(rowCount(migrated.connection, "sessions"), 1);
     assert.equal(rowCount(migrated.connection, "turns"), 1);
@@ -881,7 +881,7 @@ test("actual-like schema 7 migrates non-empty state and repairs the FIFO index",
           user_version: bigint;
         }
       ).user_version,
-      10n,
+      11n,
     );
     assert.ok(
       migrated.connection

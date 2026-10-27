@@ -97,6 +97,7 @@ export interface WebSearchConfig {
 }
 
 export interface PaintConfig {
+  readonly deliveryMode?: "direct" | "agent";
   readonly origin: string;
   readonly allowPrivate: boolean;
   readonly workflowFile: string;
@@ -717,7 +718,7 @@ export function parseConfig(value: unknown): AppConfig {
     exactKeys(
       resource,
       ["origin", "allowPrivate", "workflowFile", "enabledUsers"],
-      [],
+      ["deliveryMode"],
       "config.paint",
     );
     const origin = stringValue(resource.origin, "config.paint.origin", 2048);
@@ -761,7 +762,14 @@ export function parseConfig(value: unknown): AppConfig {
         "config.paint.enabledUsers",
         "must reference configured Discord owners",
       );
+    if (
+      resource.deliveryMode !== undefined &&
+      resource.deliveryMode !== "direct" &&
+      resource.deliveryMode !== "agent"
+    )
+      fail("config.paint.deliveryMode", "expected direct or agent");
     paint = {
+      deliveryMode: resource.deliveryMode ?? "direct",
       origin: parsed.origin,
       allowPrivate: resource.allowPrivate,
       workflowFile: absolutePath(

@@ -57,6 +57,12 @@ const definition = {
 
 test("paint config is explicit, Discord-owner scoped, and never accepts arbitrary fields or credential URLs", () => {
   assert.equal(parseConfig(config()).paint?.origin, "http://127.0.0.1:8188");
+  assert.equal(parseConfig(config()).paint?.deliveryMode, "direct");
+  for (const deliveryMode of ["direct", "agent"]) {
+    const value = config();
+    Object.assign(value.paint as object, { deliveryMode });
+    assert.equal(parseConfig(value).paint?.deliveryMode, deliveryMode);
+  }
   for (const bad of [
     "http://user:secret@127.0.0.1:8188",
     "http://127.0.0.1:8188/prompt",
@@ -73,6 +79,9 @@ test("paint config is explicit, Discord-owner scoped, and never accepts arbitrar
     { workflowFile: "../workspace.json" },
     { allowPrivate: "true" },
     { arbitrary: true },
+    { deliveryMode: "automatic" },
+    { deliveryMode: null },
+    { deliveryMode: true },
   ]) {
     const value = config();
     Object.assign(value.paint as object, change);

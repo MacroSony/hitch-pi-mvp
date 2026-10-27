@@ -186,6 +186,7 @@ async function main(): Promise<void> {
           ]),
       ),
     );
+    store.configureComfyContinuation(config.paint?.enabledUsers ?? []);
     const paint =
       cli.mode === "channels" &&
       paintBackend !== undefined &&
@@ -197,6 +198,9 @@ async function main(): Promise<void> {
             backend: paintBackend,
             workflows: paintPolicies,
             enabledUsers: config.paint.enabledUsers,
+            deliveryMode: config.paint.deliveryMode ?? "direct",
+            onContinuationReady: (userId) =>
+              application.dispatchQueuedUser(userId),
           })
         : undefined;
     const runtime: AgentRuntime =
@@ -230,6 +234,7 @@ async function main(): Promise<void> {
       undefined,
       undefined,
       config.users,
+      config.paint?.deliveryMode === "agent" ? config.paint.enabledUsers : [],
     );
     const telegramWorkers = telegramClients.map(
       ({ account, client }) =>

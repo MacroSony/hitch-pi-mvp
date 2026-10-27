@@ -51,6 +51,8 @@ export interface ComfyServiceOptions {
   readonly backend: ComfyBackendClient;
   readonly workflows: readonly ComfyWorkflowPolicy[];
   readonly enabledUsers: readonly string[];
+  readonly deliveryMode?: "direct" | "agent";
+  readonly onContinuationReady?: (userId: string) => void;
   /** Trusted host injection for deterministic unit tests; never configuration-driven. */
   readonly inspectVideo?: typeof inspectGeneratedVideo;
 }
@@ -103,6 +105,8 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 export class ComfyService implements ComfyToolHost {
+  readonly deliveryMode: "direct" | "agent";
+  readonly #onContinuationReady: ((userId: string) => void) | undefined;
   readonly enabledUsers: readonly string[];
   readonly #ledger: ComfyJobLedger;
   readonly #media: MediaStore;
@@ -112,6 +116,8 @@ export class ComfyService implements ComfyToolHost {
   #ticking: Promise<void> | null = null;
 
   constructor(options: ComfyServiceOptions) {
+    this.deliveryMode = options.deliveryMode ?? "direct";
+    this.#onContinuationReady = options.onContinuationReady;
     this.#ledger = options.ledger;
     this.#media = options.media;
     this.#backend = options.backend;
@@ -294,6 +300,7 @@ export class ComfyService implements ComfyToolHost {
       context.turnId,
       policy.definition.id,
       snapshot,
+      this.deliveryMode,
     );
     try {
       for (const item of verified) {
@@ -551,6 +558,26 @@ export class ComfyService implements ComfyToolHost {
     }
   }
 
+  #finish(
+    userId: string,
+    jobId: string,
+    outcome: "completed" | "failed",
+    artifact?: RuntimeArtifact,
+  ): boolean {
+    const committed = this.#ledger.finishComfyJob(
+      userId,
+      jobId,
+      outcome,
+      artifact,
+    );
+    if (
+      committed &&
+      this.#ledger.getComfyJob(userId, jobId)?.deliveryMode === "agent"
+    )
+      this.#onContinuationReady?.(userId);
+    return committed;
+  }
+
   recover(): void {
     this.#ledger.recoverComfyJobs();
   }
@@ -571,7 +598,7 @@ export class ComfyService implements ComfyToolHost {
       if (!this.enabledUsers.includes(job.userId)) continue;
       if (job.state !== "submitted" || !job.backendPromptId) continue;
       if (Date.now() - job.createdAt >= JOB_TIMEOUT_MS) {
-        this.#ledger.finishComfyJob(job.userId, job.id, "failed");
+        this.#finish(job.userId, job.id, "failed");
         continue;
       }
       let artifact: RuntimeArtifact | undefined;
@@ -590,7 +617,7 @@ export class ComfyService implements ComfyToolHost {
           );
           if (history.state === "pending") continue;
           if (history.state === "failed" || history.outputs.length !== 1) {
-            this.#ledger.finishComfyJob(job.userId, job.id, "failed");
+            this.#finish(job.userId, job.id, "failed");
             continue;
           }
           bytes = await this.#backend.downloadMedia(
@@ -598,7 +625,7 @@ export class ComfyService implements ComfyToolHost {
             signal,
           );
           if (bytes.length < 1 || bytes.length > MAX_VIDEO_BYTES) {
-            this.#ledger.finishComfyJob(job.userId, job.id, "failed");
+            this.#finish(job.userId, job.id, "failed");
             continue;
           }
           await this.#inspectVideo(bytes, signal);
@@ -612,12 +639,12 @@ export class ComfyService implements ComfyToolHost {
           );
           if (history.state === "pending") continue;
           if (history.state === "failed" || history.images.length !== 1) {
-            this.#ledger.finishComfyJob(job.userId, job.id, "failed");
+            this.#finish(job.userId, job.id, "failed");
             continue;
           }
           bytes = await this.#backend.download(history.images[0]!, signal);
           if (bytes.length < 1 || bytes.length > MAX_IMAGE_BYTES) {
-            this.#ledger.finishComfyJob(job.userId, job.id, "failed");
+            this.#finish(job.userId, job.id, "failed");
             continue;
           }
           mime = imageMime(bytes);
@@ -657,11 +684,11 @@ export class ComfyService implements ComfyToolHost {
         ) {
           this.#media.discard(artifact);
           artifact = undefined;
-          this.#ledger.finishComfyJob(job.userId, job.id, "failed");
+          this.#finish(job.userId, job.id, "failed");
           continue;
         }
         finishing = true;
-        const committed = this.#ledger.finishComfyJob(
+        const committed = this.#finish(
           job.userId,
           job.id,
           "completed",
@@ -671,14 +698,15 @@ export class ComfyService implements ComfyToolHost {
         artifact = undefined;
       } catch (error) {
         if (artifact && !finishing) this.#media.discard(artifact);
-        if (finishing) continue;
+        if (finishing) throw error;
         if (signal?.aborted) return;
         if (
           error instanceof ComfyBackendError &&
           error.code === "history-unavailable"
         )
           continue;
-        this.#ledger.finishComfyJob(job.userId, job.id, "failed");
+        process.stderr.write("Comfy result validation or import failed.\n");
+        this.#finish(job.userId, job.id, "failed");
       }
     }
   }
@@ -688,7 +716,8 @@ export class ComfyService implements ComfyToolHost {
       try {
         await this.tick(signal);
       } catch {
-        /* A failed poll is retried on the next bounded interval. */
+        // Content-free, observable diagnostic. Never log backend bodies or prompts.
+        process.stderr.write("Comfy completion poll failed; retrying.\n");
       }
       await delay(POLL_MS, signal);
     }
