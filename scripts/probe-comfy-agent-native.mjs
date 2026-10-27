@@ -262,5 +262,6 @@ try {
   );
   process.exitCode = 1;
 } finally {
+  application?.stop();
   foundation.close();
 }

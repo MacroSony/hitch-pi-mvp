@@ -351,6 +351,9 @@ test("paint_result exposes only callback-mounted completed results and rejects u
       "/workspace/../secret",
       "/workspace/a/b.png",
       "/workspace/x\n.png",
+      "/workspace/generated.png\n",
+      "/workspace/generated.png\r",
+      "/workspace/generated.png\u2028",
     ]) {
       await assert.rejects(
         service.execute(

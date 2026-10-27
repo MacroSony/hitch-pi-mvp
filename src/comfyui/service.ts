@@ -403,11 +403,11 @@ export class ComfyService implements ComfyToolHost {
     if (signal?.aborted) throw new Error(SAFE);
     const attachment = await context.attachResult(artifact, preview);
     if (
-      !/^\/inbox\/results\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(
+      !/^\/inbox\/results\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}(?![\s\S])/u.test(
         attachment.path,
       ) ||
       (attachment.workspacePath !== undefined &&
-        !/^\/workspace\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(
+        !/^\/workspace\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}(?![\s\S])/u.test(
           attachment.workspacePath,
         )) ||
       attachment.bytes !== artifact.bytes ||
