@@ -716,7 +716,23 @@ export class ComfyService implements ComfyToolHost {
         artifact = undefined;
       } catch (error) {
         if (artifact && !finishing) this.#media.discard(artifact);
-        if (finishing) throw error;
+        if (finishing) {
+          // A rollback must not leak one full blob per poll. Conversely, a post-commit
+          // failure must never delete a retained original (even if its owner is disabled).
+          if (artifact && this.#ledger.retainsComfyArtifact) {
+            try {
+              if (!this.#ledger.retainsComfyArtifact(artifact))
+                this.#media.discard(artifact);
+            } catch {
+              // If the ownership query itself is unavailable, preserve bytes; startup
+              // reconciliation remains the conservative fallback.
+              process.stderr.write(
+                "Comfy artifact ownership check failed; retaining bytes.\n",
+              );
+            }
+          }
+          throw error;
+        }
         if (signal?.aborted) return;
         if (
           error instanceof ComfyBackendError &&

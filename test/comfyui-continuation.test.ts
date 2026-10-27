@@ -1,5 +1,11 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -901,7 +907,14 @@ test("completion commit failures are observable, rollback atomically, and retry 
   f.db.exec(
     "CREATE TRIGGER fail_comfy_finish BEFORE UPDATE OF completion_turn_id ON comfy_jobs BEGIN SELECT RAISE(ABORT, 'fixture commit failure'); END;",
   );
-  await assert.rejects(fake.service.tick(), /fixture commit failure/u);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await assert.rejects(fake.service.tick(), /fixture commit failure/u);
+    assert.deepEqual(
+      readdirSync(join(f.dataRoot, "media", "objects", "alice")),
+      [],
+      "rolled-back completions must not leak a blob per poll",
+    );
+  }
   assert.equal(f.store.getComfyJob("alice", job.id)?.state, "submitted");
   assert.equal(count(f, "turns"), 1);
   assert.equal(count(f, "artifacts"), 0);
@@ -911,6 +924,10 @@ test("completion commit failures are observable, rollback atomically, and retry 
   assert.equal(f.store.getComfyJob("alice", job.id)?.state, "completed");
   assert.equal(count(f, "turns"), 2);
   assert.equal(fake.submits(), 1);
+  assert.equal(
+    readdirSync(join(f.dataRoot, "media", "objects", "alice")).length,
+    1,
+  );
 });
 
 for (const phase of ["submitted", "queued", "running"] as const) {
@@ -1298,4 +1315,35 @@ test("Pi epoch rotation does not reinterpret a persisted direct job as an agent 
   assert.equal(f.store.claimNextTurn("alice"), null);
   assert.deepEqual(f.store.getComfyResult("alice", job.id), artifact);
   assert.equal(count(f, "outbox"), 3);
+});
+
+test("post-commit failure retains immutable bytes even when the owner was disabled", async (t) => {
+  const f = setup(t);
+  t.after(() => f.foundation.close());
+  const fake = fakeService(f);
+  f.admit();
+  const turn = f.store.claimNextTurn("alice")!;
+  const job = (await fake.service.execute(
+    { userId: "alice", turnId: turn.turnId },
+    "paint",
+    { prompt: "cat" },
+  )) as { id: string };
+  f.store.completeTurn(turn, ok);
+  const finish = f.store.finishComfyJob.bind(f.store);
+  f.store.finishComfyJob = (...args) => {
+    assert.equal(finish(...args), true);
+    f.db.prepare("UPDATE users SET enabled=0 WHERE id='alice'").run();
+    throw new Error("fixture post-commit failure");
+  };
+  await assert.rejects(fake.service.tick(), /fixture post-commit failure/u);
+  assert.equal(
+    readdirSync(join(f.dataRoot, "media", "objects", "alice")).length,
+    1,
+  );
+  f.db.prepare("UPDATE users SET enabled=1 WHERE id='alice'").run();
+  const retained = f.store.getComfyResult("alice", job.id)!;
+  assert.ok(retained);
+  assert.ok(fake.media.verifiedObjectPath(retained));
+  assert.equal(count(f, "artifacts"), 1);
+  assert.equal(count(f, "outbox"), 0);
 });

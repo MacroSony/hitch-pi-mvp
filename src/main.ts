@@ -186,7 +186,13 @@ async function main(): Promise<void> {
           ]),
       ),
     );
-    store.configureComfyContinuation(config.paint?.enabledUsers ?? []);
+    store.configureComfyContinuation(
+      cli.mode === "channels" &&
+        paintBackend !== undefined &&
+        paintPolicies !== undefined
+        ? (config.paint?.enabledUsers ?? [])
+        : [],
+    );
     const paint =
       cli.mode === "channels" &&
       paintBackend !== undefined &&

@@ -38,6 +38,8 @@ export interface ComfyJobLedger {
   getComfyJob(userId: string, jobId: string): ComfyJob | null;
   /** Host-only immutable output; absent on legacy test doubles. */
   getComfyResult?(userId: string, jobId: string): RuntimeArtifact | null;
+  /** Host-only post-error ownership check; must not depend on an enabled owner/route. */
+  retainsComfyArtifact?(artifact: RuntimeArtifact): boolean;
   listComfyJobs(userId: string, limit?: number): readonly ComfyJob[];
   pendingComfyJobs(limit?: number): readonly ComfyJob[];
   markComfyJobSubmitting(userId: string, jobId: string): boolean;

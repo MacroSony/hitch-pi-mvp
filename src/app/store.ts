@@ -1282,6 +1282,17 @@ export class HitchStore implements ComfyJobLedger {
     return value;
   }
 
+  public retainsComfyArtifact(artifact: RuntimeArtifact): boolean {
+    // Do not filter disabled owners/endpoints: revocation does not relinquish stored bytes.
+    return (
+      this.#database
+        .prepare(
+          "SELECT 1 FROM artifacts WHERE id = ? AND user_id = ? AND storage_key = ?",
+        )
+        .get(artifact.id, artifact.userId, artifact.storageKey) !== undefined
+    );
+  }
+
   public artifactStorageKeys(): ReadonlySet<string> {
     const rows = this.#database
       .prepare("SELECT storage_key FROM artifacts")
