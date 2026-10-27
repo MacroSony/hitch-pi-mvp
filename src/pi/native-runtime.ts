@@ -2100,7 +2100,7 @@ export class NativePiRuntime implements AgentRuntime {
     const promptSections: string[] = [];
     if (isPaintEnabled && paintInputs.length)
       promptSections.push(
-        `Painting input references, valid only for this Turn (use input_id, not host paths):\n${paintInputs.map((entry) => JSON.stringify({ id: entry.id, name: entry.artifact.displayName, mimeType: entry.artifact.mimeType })).join("\n")}`,
+        `Painting input HANDLE IDs are valid only during this Turn (use input_id, not host paths). Source labels distinguish new uploads from bounded recent same-session originals:\n${paintInputs.map((entry, index) => JSON.stringify({ id: entry.id, source: index < inputArtifacts.length ? "current-upload" : "recent-same-session-upload", name: entry.artifact.displayName, mimeType: entry.artifact.mimeType })).join("\n")}`,
       );
     if (isPaintEnabled)
       promptSections.push(
