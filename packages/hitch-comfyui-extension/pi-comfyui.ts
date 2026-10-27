@@ -234,9 +234,9 @@ export default function (pi: ExtensionAPI): void {
       label: name,
       description:
         name === "paint_result"
-          ? "Retrieve your own completed image/video original by job ID. Images can include a bounded native visual preview; video files do NOT provide video vision. The read-only /inbox/results original path can be copied into /workspace with sandbox tools. Completion alone does not mean you reviewed the output."
+          ? "Retrieve your own completed image/video original by job ID. Images can include a bounded native visual preview; video files do NOT provide video vision. The original path is read-only under /inbox/results. In agent-controlled delivery mode, workspace_path and publish_path also identify a verified persistent workspace copy; use hitch_publish only for selected final files. Otherwise copy originals into /workspace with sandbox tools. Completion alone does not mean you reviewed the output."
           : name === "paint"
-            ? "Generate an image or short video, or edit an image, with a configured workflow. First choose an ID with paint_list_workflows, then read paint_get_details for its graph NOTE instructions, allowed variables/defaults and reference slots. Input files use current input_id handles or your completed image job_id, never paths. Video/audio reference input is not enabled. Successful output is automatically delivered to this conversation; maximum output is 10MiB."
+            ? "Generate an image or short video, or edit an image, with a configured workflow. First choose an ID with paint_list_workflows, then read paint_get_details for its graph NOTE instructions, allowed variables/defaults and reference slots. Input files use current input_id handles or your completed image job_id, never paths. Video/audio reference input is not enabled. This submits a background job; yield rather than polling. Follow the host's delivery mode: agent mode internally resumes you with the result for review, editing/video chaining and explicit final hitch_publish; it does NOT send intermediate media automatically. Legacy direct mode sends the completed output automatically. Maximum output is 10MiB."
             : name === "paint_job_status"
               ? "Check your own ComfyUI Paint job status."
               : name === "paint_job_cancel"
