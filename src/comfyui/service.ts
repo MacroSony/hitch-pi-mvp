@@ -1,7 +1,12 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
+import { readFileSync } from "node:fs";
 import type { RuntimeArtifact } from "../runtime/runtime.js";
 import type { MediaStore } from "../media/media-store.js";
-import { ComfyBackendError, type ComfyBackendClient } from "./client.js";
+import {
+  ComfyBackendError,
+  comfyUploadPath,
+  type ComfyBackendClient,
+} from "./client.js";
 import { ComfyWorkflowPolicy } from "./workflow.js";
 import type {
   ComfyJob,
@@ -64,6 +69,7 @@ function exact(
       (key) =>
         typeof key !== "string" ||
         !Object.getOwnPropertyDescriptor(value, key)?.enumerable ||
+        !("value" in Object.getOwnPropertyDescriptor(value, key)!) ||
         !(required.includes(key as string) || optional.includes(key as string)),
     )
   )
@@ -141,7 +147,7 @@ export class ComfyService implements ComfyToolHost {
     const args = exact(
       input,
       ["prompt"],
-      ["workflow", "negative_prompt", "width", "height"],
+      ["workflow", "negative_prompt", "width", "height", "input_files"],
     );
     if (
       typeof args.prompt !== "string" ||
@@ -164,11 +170,8 @@ export class ComfyService implements ComfyToolHost {
         ? this.#workflows[0]
         : this.#workflows.find((w) => w.definition.id === args.workflow);
     if (!policy) throw new Error(SAFE);
-    if (
-      policy.definition.outputKind === "video" ||
-      Object.keys(policy.definition.files ?? {}).length > 0
-    )
-      throw new Error("Comfy media input/video execution is not yet enabled");
+    if (policy.definition.outputKind === "video")
+      throw new Error("Comfy video execution is not yet enabled");
     const vars = policy.definition.variables;
     if (
       !Object.hasOwn(vars, "prompt") ||
@@ -187,7 +190,72 @@ export class ComfyService implements ComfyToolHost {
       values.height = args.height;
     if (Object.hasOwn(vars, "seed"))
       values.seed = randomBytes(6).readUIntBE(0, 6);
-    const snapshot = policy.render(values);
+    const uploadedFiles: Record<string, string> = Object.create(null) as Record<
+      string,
+      string
+    >;
+    const refs =
+      args.input_files === undefined ? [] : this.#inputFiles(args.input_files);
+    const slots = policy.definition.files ?? {};
+    if (Object.values(slots).some((binding) => binding.media !== "image"))
+      throw new Error(SAFE);
+    const seen = new Set<string>();
+    const selected: { slot: string; artifact: RuntimeArtifact }[] = [];
+    let totalBytes = 0;
+    for (const ref of refs) {
+      if (!Object.hasOwn(slots, ref.slot) || seen.has(ref.slot))
+        throw new Error(SAFE);
+      seen.add(ref.slot);
+      const binding = slots[ref.slot]!;
+      if (binding.media !== "image") throw new Error(SAFE);
+      let artifact: RuntimeArtifact | undefined;
+      if ("input_id" in ref) {
+        artifact = context.inputs?.find(
+          (entry) => entry.id === ref.input_id,
+        )?.artifact;
+      } else {
+        artifact =
+          this.#ledger.getComfyResult?.(context.userId, ref.job_id) ??
+          undefined;
+      }
+      if (
+        !artifact ||
+        artifact.userId !== context.userId ||
+        artifact.mediaKind !== "image" ||
+        !["image/png", "image/jpeg", "image/webp"].includes(
+          artifact.mimeType,
+        ) ||
+        artifact.bytes < 1 ||
+        artifact.bytes > MAX_IMAGE_BYTES * 2 ||
+        !Number.isSafeInteger(artifact.bytes)
+      )
+        throw new Error(SAFE);
+      totalBytes += artifact.bytes;
+      if (totalBytes > 40 * 1024 * 1024) throw new Error(SAFE);
+      selected.push({ slot: ref.slot, artifact });
+    }
+    for (const slot of Object.keys(slots))
+      if (!seen.has(slot) && !slots[slot]!.optional) throw new Error(SAFE);
+    // Validate all ownership and metadata before reading any artifact bytes.
+    const verified = selected.map(({ slot, artifact }) => {
+      const path = this.#media.verifiedObjectPath(artifact);
+      const bytes = readFileSync(path);
+      if (
+        bytes.length !== artifact.bytes ||
+        createHash("sha256").update(bytes).digest("hex") !== artifact.sha256
+      )
+        throw new Error(SAFE);
+      const mime = imageMime(bytes);
+      if (mime !== artifact.mimeType) throw new Error(SAFE);
+      const planned = comfyUploadPath(
+        context.userId,
+        artifact.sha256,
+        artifact.mimeType,
+      );
+      uploadedFiles[slot] = planned;
+      return { slot, artifact, bytes, planned };
+    });
+    const snapshot = policy.render(values, uploadedFiles);
     if (signal?.aborted) throw new Error(SAFE);
     const job = this.#ledger.createComfyJob(
       context.userId,
@@ -195,6 +263,26 @@ export class ComfyService implements ComfyToolHost {
       policy.definition.id,
       snapshot,
     );
+    try {
+      for (const item of verified) {
+        if (signal?.aborted) throw new Error(SAFE);
+        const returned = await this.#backend.upload(
+          item.bytes,
+          item.artifact.mimeType,
+          context.userId,
+          signal,
+        );
+        if (returned !== item.planned)
+          throw new ComfyBackendError("upload-failed");
+      }
+    } catch {
+      this.#ledger.markComfyJobRejected(context.userId, job.id);
+      throw new Error(SAFE);
+    }
+    if (signal?.aborted) {
+      this.#ledger.markComfyJobRejected(context.userId, job.id);
+      throw new Error(SAFE);
+    }
     if (!this.#ledger.markComfyJobSubmitting(context.userId, job.id)) {
       return {
         id: job.id,
@@ -225,6 +313,33 @@ export class ComfyService implements ComfyToolHost {
         this.#ledger.getComfyJob(context.userId, job.id)?.state ??
         "submission_unknown",
     };
+  }
+
+  #inputFiles(
+    value: unknown,
+  ): ({ slot: string; input_id: string } | { slot: string; job_id: string })[] {
+    if (
+      !Array.isArray(value) ||
+      value.length > 8 ||
+      Reflect.ownKeys(value).length !== value.length + 1
+    )
+      throw new Error(SAFE);
+    return value.map((entry) => {
+      const hasInput = record(entry) && Object.hasOwn(entry, "input_id");
+      const fields = hasInput ? ["slot", "input_id"] : ["slot", "job_id"];
+      const parsed = exact(entry, fields);
+      const slot = parsed.slot;
+      const id = hasInput ? parsed.input_id : parsed.job_id;
+      if (
+        typeof slot !== "string" ||
+        !/^[A-Za-z][A-Za-z0-9_-]{0,63}$/u.test(slot) ||
+        typeof id !== "string" ||
+        id.length < 1 ||
+        id.length > 128
+      )
+        throw new Error(SAFE);
+      return hasInput ? { slot, input_id: id } : { slot, job_id: id };
+    });
   }
 
   async #paintResult(
@@ -300,10 +415,23 @@ export class ComfyService implements ComfyToolHost {
       .filter(
         (policy) =>
           policy.definition.outputKind !== "video" &&
-          Object.keys(policy.definition.files ?? {}).length === 0,
+          Object.values(policy.definition.files ?? {}).every(
+            (binding) => binding.media === "image",
+          ),
       )
       .map((policy) => ({
         id: policy.definition.id,
+        ...(Object.keys(policy.definition.files ?? {}).length === 0
+          ? {}
+          : {
+              files: Object.entries(policy.definition.files!).map(
+                ([slot, binding]) => ({
+                  slot,
+                  media: binding.media,
+                  optional: binding.optional === true,
+                }),
+              ),
+            }),
         variables: Object.entries(policy.definition.variables).map(
           ([name, binding]) => {
             const base = { name, type: binding.type };

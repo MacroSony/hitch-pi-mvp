@@ -482,7 +482,15 @@ export class HitchStore implements ComfyJobLedger {
     );
   }
   public markComfyJobRejected(userId: string, jobId: string): boolean {
-    return this.#jobTransition(userId, jobId, "submitting", "failed");
+    return transaction(
+      this.#database,
+      () =>
+        this.#database
+          .prepare(
+            "UPDATE comfy_jobs SET state = 'failed', updated_at = ? WHERE id = ? AND user_id = ? AND state IN ('prepared', 'submitting')",
+          )
+          .run(this.clock.now(), jobId, userId).changes === 1n,
+    );
   }
   public markComfyJobCancelled(userId: string, jobId: string): boolean {
     return this.#jobTransition(userId, jobId, "submitted", "cancelled");
