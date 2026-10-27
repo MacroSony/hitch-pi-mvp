@@ -8,6 +8,7 @@ import {
   type ComfyBackendClient,
 } from "./client.js";
 import { ComfyWorkflowPolicy } from "./workflow.js";
+import { inspectGeneratedVideo } from "./video.js";
 import type {
   ComfyJob,
   ComfyJobLedger,
@@ -17,6 +18,7 @@ import type {
 } from "./types.js";
 
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+const MAX_VIDEO_BYTES = 10 * 1024 * 1024;
 const JOB_TIMEOUT_MS = 30 * 60 * 1000;
 const POLL_MS = 2_000;
 const SAFE = "Invalid Comfy tool request";
@@ -49,6 +51,8 @@ export interface ComfyServiceOptions {
   readonly backend: ComfyBackendClient;
   readonly workflows: readonly ComfyWorkflowPolicy[];
   readonly enabledUsers: readonly string[];
+  /** Trusted host injection for deterministic unit tests; never configuration-driven. */
+  readonly inspectVideo?: typeof inspectGeneratedVideo;
 }
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -104,6 +108,7 @@ export class ComfyService implements ComfyToolHost {
   readonly #media: MediaStore;
   readonly #backend: ComfyBackendClient;
   readonly #workflows: readonly ComfyWorkflowPolicy[];
+  readonly #inspectVideo: typeof inspectGeneratedVideo;
   #ticking: Promise<void> | null = null;
 
   constructor(options: ComfyServiceOptions) {
@@ -111,6 +116,7 @@ export class ComfyService implements ComfyToolHost {
     this.#media = options.media;
     this.#backend = options.backend;
     this.#workflows = Object.freeze([...options.workflows]);
+    this.#inspectVideo = options.inspectVideo ?? inspectGeneratedVideo;
     this.enabledUsers = Object.freeze([...new Set(options.enabledUsers)]);
   }
 
@@ -147,7 +153,14 @@ export class ComfyService implements ComfyToolHost {
     const args = exact(
       input,
       ["prompt"],
-      ["workflow", "negative_prompt", "width", "height", "input_files"],
+      [
+        "workflow",
+        "negative_prompt",
+        "width",
+        "height",
+        "duration",
+        "input_files",
+      ],
     );
     if (
       typeof args.prompt !== "string" ||
@@ -162,7 +175,12 @@ export class ComfyService implements ComfyToolHost {
       (args.width !== undefined &&
         (!Number.isSafeInteger(args.width) || (args.width as number) < 1)) ||
       (args.height !== undefined &&
-        (!Number.isSafeInteger(args.height) || (args.height as number) < 1))
+        (!Number.isSafeInteger(args.height) || (args.height as number) < 1)) ||
+      (args.duration !== undefined &&
+        (typeof args.duration !== "number" ||
+          !Number.isFinite(args.duration) ||
+          args.duration < 0.5 ||
+          args.duration > 15))
     )
       throw new Error(SAFE);
     const policy =
@@ -170,15 +188,14 @@ export class ComfyService implements ComfyToolHost {
         ? this.#workflows[0]
         : this.#workflows.find((w) => w.definition.id === args.workflow);
     if (!policy) throw new Error(SAFE);
-    if (policy.definition.outputKind === "video")
-      throw new Error("Comfy video execution is not yet enabled");
     const vars = policy.definition.variables;
     if (
       !Object.hasOwn(vars, "prompt") ||
       (args.negative_prompt !== undefined &&
         !Object.hasOwn(vars, "negative")) ||
       (args.width !== undefined && !Object.hasOwn(vars, "width")) ||
-      (args.height !== undefined && !Object.hasOwn(vars, "height"))
+      (args.height !== undefined && !Object.hasOwn(vars, "height")) ||
+      (args.duration !== undefined && !Object.hasOwn(vars, "duration"))
     )
       throw new Error(SAFE);
     const values: Record<string, unknown> = { prompt: args.prompt };
@@ -188,6 +205,8 @@ export class ComfyService implements ComfyToolHost {
       values.width = args.width;
     if (Object.hasOwn(vars, "height") && args.height !== undefined)
       values.height = args.height;
+    if (Object.hasOwn(vars, "duration") && args.duration !== undefined)
+      values.duration = args.duration;
     if (Object.hasOwn(vars, "seed"))
       values.seed = randomBytes(6).readUIntBE(0, 6);
     const uploadedFiles: Record<string, string> = Object.create(null) as Record<
@@ -412,15 +431,16 @@ export class ComfyService implements ComfyToolHost {
 
   #workflowList(): unknown {
     return this.#workflows
-      .filter(
-        (policy) =>
-          policy.definition.outputKind !== "video" &&
-          Object.values(policy.definition.files ?? {}).every(
-            (binding) => binding.media === "image",
-          ),
+      .filter((policy) =>
+        Object.values(policy.definition.files ?? {}).every(
+          (binding) => binding.media === "image",
+        ),
       )
       .map((policy) => ({
         id: policy.definition.id,
+        ...(policy.definition.outputKind === "video"
+          ? { output_kind: "video" }
+          : {}),
         ...(Object.keys(policy.definition.files ?? {}).length === 0
           ? {}
           : {
@@ -529,30 +549,59 @@ export class ComfyService implements ComfyToolHost {
       let artifact: RuntimeArtifact | undefined;
       let finishing = false;
       try {
-        const history = await this.#backend.history(
-          job.backendPromptId,
-          job.snapshot.outputNodes,
-          signal,
-        );
-        if (history.state === "pending") continue;
-        if (history.state === "failed" || history.images.length !== 1) {
-          this.#ledger.finishComfyJob(job.userId, job.id, "failed");
-          continue;
+        const isVideo = job.snapshot.outputKind === "video";
+        let bytes: Buffer;
+        let mime: string;
+        let extension: string;
+        if (isVideo) {
+          const history = await this.#backend.historyMedia(
+            job.backendPromptId,
+            job.snapshot.outputNodes,
+            "video",
+            signal,
+          );
+          if (history.state === "pending") continue;
+          if (history.state === "failed" || history.outputs.length !== 1) {
+            this.#ledger.finishComfyJob(job.userId, job.id, "failed");
+            continue;
+          }
+          bytes = await this.#backend.downloadMedia(
+            history.outputs[0]!,
+            signal,
+          );
+          if (bytes.length < 1 || bytes.length > MAX_VIDEO_BYTES) {
+            this.#ledger.finishComfyJob(job.userId, job.id, "failed");
+            continue;
+          }
+          await this.#inspectVideo(bytes, signal);
+          mime = "video/mp4";
+          extension = "mp4";
+        } else {
+          const history = await this.#backend.history(
+            job.backendPromptId,
+            job.snapshot.outputNodes,
+            signal,
+          );
+          if (history.state === "pending") continue;
+          if (history.state === "failed" || history.images.length !== 1) {
+            this.#ledger.finishComfyJob(job.userId, job.id, "failed");
+            continue;
+          }
+          bytes = await this.#backend.download(history.images[0]!, signal);
+          if (bytes.length < 1 || bytes.length > MAX_IMAGE_BYTES) {
+            this.#ledger.finishComfyJob(job.userId, job.id, "failed");
+            continue;
+          }
+          mime = imageMime(bytes);
+          extension =
+            mime === "image/png"
+              ? "png"
+              : mime === "image/jpeg"
+                ? "jpg"
+                : mime === "image/webp"
+                  ? "webp"
+                  : "bin";
         }
-        const bytes = await this.#backend.download(history.images[0]!, signal);
-        if (bytes.length < 1 || bytes.length > MAX_IMAGE_BYTES) {
-          this.#ledger.finishComfyJob(job.userId, job.id, "failed");
-          continue;
-        }
-        const mime = imageMime(bytes);
-        const extension =
-          mime === "image/png"
-            ? "png"
-            : mime === "image/jpeg"
-              ? "jpg"
-              : mime === "image/webp"
-                ? "webp"
-                : "bin";
         artifact = await this.#media.ingest(
           job.userId,
           (async function* () {
@@ -560,17 +609,23 @@ export class ComfyService implements ComfyToolHost {
           })(),
           {
             advertisedBytes: bytes.length,
-            advertisedMime: "application/octet-stream",
-            displayName: `paint-${job.id}.${extension}`,
-            expectImage: true,
+            advertisedMime: isVideo ? "video/mp4" : "application/octet-stream",
+            displayName: isVideo
+              ? `paint-${job.id}.mp4`
+              : `paint-${job.id}.${extension}`,
+            expectImage: !isVideo,
           },
         );
         if (
-          artifact.mediaKind !== "image" ||
-          !["image/png", "image/jpeg", "image/webp"].includes(
-            artifact.mimeType,
-          ) ||
-          artifact.mimeType !== mime
+          (isVideo &&
+            (artifact.mediaKind !== "file" ||
+              artifact.mimeType !== "video/mp4")) ||
+          (!isVideo &&
+            (artifact.mediaKind !== "image" ||
+              !["image/png", "image/jpeg", "image/webp"].includes(
+                artifact.mimeType,
+              ) ||
+              artifact.mimeType !== mime))
         ) {
           this.#media.discard(artifact);
           artifact = undefined;

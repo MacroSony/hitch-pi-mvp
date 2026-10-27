@@ -380,7 +380,8 @@ export class HitchStore implements ComfyJobLedger {
         `
       SELECT a.id, a.user_id AS userId, a.storage_key AS storageKey,
              a.sha256, a.bytes, a.media_kind AS mediaKind,
-             a.mime_type AS mimeType, a.display_name AS displayName
+             a.mime_type AS mimeType, a.display_name AS displayName,
+             json_extract(j.snapshot_json, '$.outputKind') AS outputKind
       FROM comfy_jobs j
       JOIN users u ON u.id = j.user_id AND u.enabled = 1
       JOIN turns source ON source.id = j.source_turn_id AND source.user_id = j.user_id
@@ -403,15 +404,24 @@ export class HitchStore implements ComfyJobLedger {
     `,
       )
       .all(jobId, userId) as unknown as Array<
-      Omit<RuntimeArtifact, "bytes"> & { bytes: number | bigint }
+      Omit<RuntimeArtifact, "bytes"> & {
+        bytes: number | bigint;
+        outputKind: string | null;
+      }
     >;
     if (rows.length !== 1) return null;
-    const raw = rows[0]!;
+    const { outputKind, ...raw } = rows[0]!;
     const bytes = Number(raw.bytes);
     if (!Number.isSafeInteger(bytes)) return null;
     const artifact: RuntimeArtifact = { ...raw, bytes };
+    const kindValid =
+      outputKind === "video"
+        ? artifact.mediaKind === "file" && artifact.mimeType === "video/mp4"
+        : (outputKind === null || outputKind === "image") &&
+          artifact.mediaKind === "image" &&
+          ["image/png", "image/jpeg", "image/webp"].includes(artifact.mimeType);
     return artifact.userId === userId &&
-      artifact.mediaKind === "image" &&
+      kindValid &&
       artifact.bytes > 0 &&
       validArtifact(artifact, 10 * 1024 * 1024)
       ? Object.freeze(artifact)
@@ -520,21 +530,33 @@ export class HitchStore implements ComfyJobLedger {
     return transaction(this.#database, () => {
       const row = this.#database
         .prepare(
-          `SELECT j.*, t.discord_source, t.prompt_text FROM comfy_jobs j
+          `SELECT j.*, t.discord_source, t.prompt_text,
+            json_extract(j.snapshot_json, '$.outputKind') AS output_kind FROM comfy_jobs j
          JOIN turns t ON t.id = j.source_turn_id AND t.user_id = j.user_id AND t.endpoint_id = j.endpoint_id AND t.session_id = j.session_id AND t.state = 'terminal'
          JOIN users u ON u.id = j.user_id AND u.enabled = 1
          JOIN channel_endpoints e ON e.id = j.endpoint_id AND e.user_id = j.user_id AND e.enabled = 1 AND e.kind = 'discord'
          WHERE j.id = ? AND j.user_id = ? AND j.state = 'submitted'`,
         )
         .get(jobId, userId) as
-        | (ComfyJobRow & { discord_source: string | null; prompt_text: string })
+        | (ComfyJobRow & {
+            discord_source: string | null;
+            prompt_text: string;
+            output_kind: string | null;
+          })
         | undefined;
       if (
         row === undefined ||
         (outcome === "completed" &&
           (artifact === undefined ||
             artifact.userId !== userId ||
-            artifact.mediaKind !== "image" ||
+            (row.output_kind === "video"
+              ? artifact.mediaKind !== "file" ||
+                artifact.mimeType !== "video/mp4"
+              : (row.output_kind !== null && row.output_kind !== "image") ||
+                artifact.mediaKind !== "image" ||
+                !["image/png", "image/jpeg", "image/webp"].includes(
+                  artifact.mimeType,
+                )) ||
             artifact.bytes < 1 ||
             !validArtifact(artifact, 10 * 1024 * 1024))) ||
         (outcome === "failed" && artifact !== undefined)
@@ -542,8 +564,14 @@ export class HitchStore implements ComfyJobLedger {
         return false;
       const now = this.clock.now();
       const turnId = this.ids.next("turn");
-      const caption =
-        outcome === "completed" ? "你的图像已生成。" : "图像生成失败。";
+      const video = row.output_kind === "video";
+      const caption = video
+        ? outcome === "completed"
+          ? "你的视频已生成。"
+          : "视频任务失败或输出未通过校验。"
+        : outcome === "completed"
+          ? "你的图像已生成。"
+          : "图像生成失败。";
       this.#database
         .prepare(
           `INSERT INTO turns(id, user_id, session_id, endpoint_id, idempotency_key, content_digest,
