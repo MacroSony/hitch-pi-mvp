@@ -274,3 +274,41 @@ test("paint_result carries captured attachment callback and bounded image payloa
     await rm(parent, { recursive: true, force: true });
   }
 });
+
+test("bridge accepts opaque image references but refuses path/identity and dual-source fields", async () => {
+  const fixture = await setup(async () => ({ state: "submitted" }));
+  try {
+    for (const ref of [
+      { slot: "reference", input_id: "input_1" },
+      { slot: "reference", job_id: "paint_own" },
+    ]) {
+      assert.equal(
+        (
+          await call(fixture.bridge, {
+            tool: "paint",
+            input: { prompt: "edit", input_files: [ref] },
+          })
+        ).status,
+        200,
+      );
+    }
+    for (const ref of [
+      { slot: "reference", path: "/workspace/image.png" },
+      { slot: "reference", input_id: "input_1", job_id: "paint_other" },
+      { slot: "reference", job_id: "paint_own", user_id: "foreign" },
+    ]) {
+      assert.equal(
+        (
+          await call(fixture.bridge, {
+            tool: "paint",
+            input: { prompt: "edit", input_files: [ref] },
+          })
+        ).status,
+        400,
+      );
+    }
+  } finally {
+    await fixture.bridge.close();
+    await rm(fixture.parent, { recursive: true, force: true });
+  }
+});

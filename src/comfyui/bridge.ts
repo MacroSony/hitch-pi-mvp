@@ -51,7 +51,28 @@ export function validComfyRequest(
       return only();
     case "paint":
       return (
-        only("workflow", "prompt", "negative_prompt", "width", "height") &&
+        only(
+          "workflow",
+          "prompt",
+          "negative_prompt",
+          "width",
+          "height",
+          "input_files",
+        ) &&
+        (fields.input_files === undefined ||
+          (Array.isArray(fields.input_files) &&
+            fields.input_files.length <= 8 &&
+            fields.input_files.every((value) => {
+              if (!value || typeof value !== "object" || Array.isArray(value))
+                return false;
+              const ref = value as Record<string, unknown>;
+              const keys = Object.keys(ref).sort().join(",");
+              return (
+                short(ref.slot) &&
+                ((keys === "input_id,slot" && short(ref.input_id)) ||
+                  (keys === "job_id,slot" && short(ref.job_id)))
+              );
+            }))) &&
         typeof fields.prompt === "string" &&
         fields.prompt.length >= 1 &&
         fields.prompt.length <= 8192 &&

@@ -49,6 +49,31 @@ const schemas = {
       negative_prompt: Type.Optional(Type.String({ maxLength: 8192 })),
       width: Type.Optional(Type.Integer({ minimum: 256, maximum: 1536 })),
       height: Type.Optional(Type.Integer({ minimum: 256, maximum: 1536 })),
+      input_files: Type.Optional(
+        Type.Array(
+          Type.Union([
+            Type.Object(
+              {
+                slot: Type.String({ minLength: 1, maxLength: 64 }),
+                input_id: Type.String({ minLength: 1, maxLength: 128 }),
+              },
+              { additionalProperties: false },
+            ),
+            Type.Object(
+              {
+                slot: Type.String({ minLength: 1, maxLength: 64 }),
+                job_id: Type.String({ minLength: 1, maxLength: 128 }),
+              },
+              { additionalProperties: false },
+            ),
+          ]),
+          {
+            maxItems: 8,
+            description:
+              "References for configured file slots: use a current-Turn input_id or your completed image job_id; never a file path.",
+          },
+        ),
+      ),
     },
     { additionalProperties: false },
   ),
@@ -189,7 +214,7 @@ export default function (pi: ExtensionAPI): void {
         name === "paint_result"
           ? "Retrieve your completed image by job ID: a bounded visual preview when available and a read-only /inbox/results original path that sandbox tools can copy into /workspace. Job completion alone does not mean you have seen its pixels."
           : name === "paint"
-            ? "Create an image; successful output is automatically delivered to this conversation."
+            ? "Create or edit an image with a configured workflow. Editing requires input_files referring to configured slots using current input_id handles or your completed image job_id. Successful output is automatically delivered to this conversation."
             : name === "paint_job_status"
               ? "Check your own ComfyUI Paint job status."
               : name === "paint_job_cancel"
