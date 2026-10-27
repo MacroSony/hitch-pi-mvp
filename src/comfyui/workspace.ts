@@ -212,7 +212,11 @@ export function materializeComfyWorkspaceResult({
     checkSignature(bytes, artifact.mimeType);
     checkDirectory();
     const suffix = SUFFIX[artifact.mimeType as keyof typeof SUFFIX];
-    const relativePath = `comfy-${match[1]}.${suffix}`;
+    const shortId = createHash("sha256")
+      .update(artifact.id)
+      .digest("base64url")
+      .slice(0, 16);
+    const relativePath = `paint-${shortId}.${suffix}`;
     const targetPath = `${anchored}/${relativePath}`;
     let target: number;
     let created = false;

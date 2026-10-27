@@ -11,8 +11,9 @@ materializeComfyWorkspaceResult({
   artifact, // 当前 owner 已完成、已验证的 RuntimeArtifact
   media, // MediaStore
 });
-// { path: "/workspace/comfy-<artifact UUID>.<suffix>",
-//   relativePath: "comfy-<artifact UUID>.<suffix>" }
+// { path: "/workspace/paint-<16-char short ID>.<suffix>",
+//   relativePath: "paint-<16-char short ID>.<suffix>" }
+// 集成时将 UUID 文件名改为稳定 96-bit 短 ID；冲突仍按精确字节校验、绝不覆盖。
 ```
 
 - 仅接受现有 MediaStore 的 `artifact_<UUID>` / `<owner>/<UUID>.blob` 格式；图片 PNG/JPEG/WebP，视频 MP4，大小 `1..10*1024*1024` 字节。

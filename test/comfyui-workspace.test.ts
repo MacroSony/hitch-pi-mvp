@@ -66,7 +66,11 @@ async function fixture(t: TestContext, bytes = png, mimeType = "image/png") {
     ),
   );
   const args = { userId: "alice", workspace, artifact, media };
-  const name = `comfy-${artifact.id.slice("artifact_".length)}.${
+  const shortId = createHash("sha256")
+    .update(artifact.id)
+    .digest("base64url")
+    .slice(0, 16);
+  const name = `paint-${shortId}.${
     mimeType === "image/jpeg" ? "jpg" : mimeType.split("/")[1]
   }`;
   return {
