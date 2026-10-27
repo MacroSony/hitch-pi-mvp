@@ -9,7 +9,7 @@ import { pathToFileURL } from "node:url";
 
 if (process.env.HITCH_RUN_NATIVE_PAINT_PROBE !== "1")
   throw new Error("Explicit opt-in required");
-const [profile, fixtureImage, policyFile] = process.argv.slice(2);
+const [profile, fixtureImage, policyFile, fixtureVideo] = process.argv.slice(2);
 if (!profile || !fixtureImage || !policyFile)
   throw new Error(
     "Usage: probe <provider-profile-dir> <fixture-png> <operator-policy-file>",
@@ -22,6 +22,7 @@ const { HitchStore } = await import(base + "/app/store.js");
 const { HitchApplication } = await import(base + "/app/application.js");
 const { MediaStore } = await import(base + "/media/media-store.js");
 const { ComfyService } = await import(base + "/comfyui/service.js");
+const { comfyUploadPath } = await import(base + "/comfyui/client.js");
 const { loadComfyPolicies } = await import(base + "/comfyui/config.js");
 const { NativePiRuntime } = await import(base + "/pi/native-runtime.js");
 const root = mkdtempSync(join(tmpdir(), "hitch-native-agent-flow-"));
@@ -59,14 +60,44 @@ const db = foundation.database.connection;
 const calls = [];
 const submissions = [];
 const bytes = readFileSync(fixtureImage);
+const videoBytes = fixtureVideo ? readFileSync(fixtureVideo) : null;
 const backend = {
+  async upload(input, mime, userId) {
+    assert.equal(
+      createHash("sha256").update(input).digest("hex"),
+      createHash("sha256").update(bytes).digest("hex"),
+    );
+    return comfyUploadPath(
+      userId,
+      createHash("sha256").update(input).digest("hex"),
+      mime,
+    );
+  },
+  async historyMedia() {
+    assert.ok(videoBytes);
+    return {
+      state: "complete",
+      outputs: [
+        {
+          filename: "fixture.mp4",
+          subfolder: "",
+          type: "output",
+          kind: "video",
+        },
+      ],
+    };
+  },
+  async downloadMedia() {
+    assert.ok(videoBytes);
+    return videoBytes;
+  },
   async submit(graph) {
     submissions.push(graph);
     return `fixture-${submissions.length}`;
   },
   async history() {
     return {
-      state: "completed",
+      state: "complete",
       images: [{ filename: "fixture.png", subfolder: "", type: "output" }],
     };
   },
@@ -80,9 +111,10 @@ const backend = {
 let application;
 store.configureComfyContinuation([owner]);
 const workflows = loadComfyPolicies(resolve(policyFile)).filter(
-  (p) => p.definition.id === "anima",
+  (p) =>
+    p.definition.id === "anima" || (videoBytes && p.definition.id === "h3-fl"),
 );
-assert.equal(workflows.length, 1);
+assert.equal(workflows.length, videoBytes ? 2 : 1);
 const paint = new ComfyService({
   ledger: store,
   media,
@@ -124,7 +156,9 @@ try {
       idempotencyKey: id,
       contentDigest: createHash("sha256").update(id).digest("hex"),
     },
-    "请用 Anima 画一张猫耳女仆坐在电脑前的插画。出图后你自己看一下画面，用一两句说清楚实际画到了什么，再把原图作为文件发给我。只要一张，不要额外变体，不需要视频。",
+    videoBytes
+      ? "先用 Anima 画一张猫耳女仆坐在电脑前的插画，你看过首帧后，用它作为 h3-fl 的首帧做一小段眨眼动画，请求时长0.75秒。只发最终视频，中间图片不要发。不需要额外变体，也不要改变人物设计。"
+      : "请用 Anima 画一张猫耳女仆坐在电脑前的插画。出图后你自己看一下画面，用一两句说清楚实际画到了什么，再把原图作为文件发给我。只要一张，不要额外变体，不需要视频。",
   );
   db.prepare(
     "UPDATE sessions SET model_provider='openai-codex', model_id='gpt-6-luna', thinking_level='medium' WHERE user_id=?",
@@ -176,14 +210,39 @@ try {
   stage = "continuation";
   await paint.tick();
   await application.drain();
+  if (videoBytes) {
+    assert.equal(
+      submissions.length,
+      2,
+      "first completion must submit one image-conditioned video",
+    );
+    assert.equal(
+      db.prepare("SELECT count(*) AS n FROM outbox").get().n,
+      0n,
+      "intermediate image and continuation chatter must stay private",
+    );
+    const videoCall = calls.filter((c) => c.name === "paint").at(-1);
+    assert.equal(videoCall.input.workflow, "h3-fl");
+    assert.ok(
+      videoCall.input.input_files?.some(
+        (ref) => ref.slot === "first" && ref.job_id,
+      ),
+    );
+    await paint.tick();
+    await application.drain();
+  }
   const jobs = db
     .prepare("SELECT id,state,completion_turn_id FROM comfy_jobs")
     .all();
   const outbox = db.prepare("SELECT kind,payload_text,state FROM outbox").all();
-  assert.equal(submissions.length, 1, "retrieval/review must not regenerate");
+  assert.equal(
+    submissions.length,
+    videoBytes ? 2 : 1,
+    "retrieval/review must not regenerate",
+  );
   assert.equal(
     turnReceipts.length,
-    2,
+    videoBytes ? 3 : 2,
     "one request plus exactly one internal continuation",
   );
   assert.ok(turnReceipts.every((t) => t.outcome === "succeeded"));
@@ -195,7 +254,9 @@ try {
   );
   assert.equal(
     final.artifacts[0].sha256,
-    createHash("sha256").update(bytes).digest("hex"),
+    createHash("sha256")
+      .update(videoBytes ?? bytes)
+      .digest("hex"),
   );
   assert.ok(
     calls.some((c) => c.name === "paint_get_details"),
