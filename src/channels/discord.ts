@@ -885,18 +885,29 @@ export class DiscordWorker {
             "media-invalid",
             "Discord attachments exceed MVP limits (8 files, 20 MiB each, 40 MiB total)",
           );
+        // Discord's attachment `size`/`content_type` describe the uploaded
+        // original, but the CDN may serve a processed object (EXIF stripped,
+        // WebP pasted as .png re-encoded to PNG). Advertised sizes are only a
+        // pre-download hint; limits are enforced on the bytes actually stored
+        // (per object inside MediaStore, per message below), and the MIME type
+        // is sniffed from those bytes.
+        let receivedBytes = 0;
         for (const file of files) {
           const source = await this.#client.downloadAttachment(file, signal);
-          artifacts.push(
-            await this.#media.ingest(endpoint.userId, source, {
-              advertisedBytes: file.size,
-              ...(file.contentType === undefined
-                ? {}
-                : { advertisedMime: file.contentType }),
-              displayName: file.name,
-              expectImage: file.contentType?.startsWith("image/") ?? false,
-            }),
-          );
+          const artifact = await this.#media.ingest(endpoint.userId, source, {
+            ...(file.contentType === undefined
+              ? {}
+              : { advertisedMime: file.contentType }),
+            displayName: file.name,
+            expectImage: file.contentType?.startsWith("image/") ?? false,
+          });
+          artifacts.push(artifact);
+          receivedBytes += artifact.bytes;
+          if (receivedBytes > MAX_INPUT_TOTAL_BYTES)
+            throw new AppError(
+              "media-invalid",
+              "Discord attachments exceed MVP limits (8 files, 20 MiB each, 40 MiB total)",
+            );
         }
       }
       abortCheck(signal);

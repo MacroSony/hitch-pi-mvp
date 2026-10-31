@@ -1438,16 +1438,81 @@ test("captured Discord REST fetch preserves HTTP status, body, and abort behavio
   }
 });
 
-test("Discord stream size mismatch rejects and leaves no referenced media", async () => {
-  const f = fixture();
+test("Discord CDN-processed attachment with a different size is accepted with sniffed type", async () => {
+  // Real Discord case: a pasted WebP advertised as image/webp/204692B named
+  // image.png is served by the CDN as a larger PNG; EXIF-stripped JPEGs are
+  // served smaller than advertised.
+  const f = fixture("always-trigger");
   try {
+    const served = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aG1sAAAAASUVORK5CYII=",
+      "base64",
+    );
     f.client.downloadAttachment = async () =>
       (async function* () {
-        yield Buffer.from("too many bytes");
+        yield served;
       })();
-    await receive(f, [dm("mismatch")]);
+    const message = dm("processed");
+    await receive(f, [
+      {
+        ...message,
+        attachments: [
+          {
+            url: "https://cdn.discordapp.com/attachments/test",
+            name: "image.png",
+            size: served.length - 7,
+            contentType: "image/webp",
+          },
+        ],
+      },
+    ]);
+    assert.equal(f.client.texts.length, 0);
+    const artifact = f.turns[0]!.artifacts![0]!;
+    assert.equal(artifact.bytes, served.length);
+    assert.equal(artifact.mimeType, "image/png");
+    assert.equal(artifact.mediaKind, "image");
+    assert.equal(
+      readFileSync(f.media.verifiedObjectPath(artifact)).equals(served),
+      true,
+    );
+  } finally {
+    f.foundation.close();
+  }
+});
+
+test("Discord actual received total over 40 MiB rejects and leaves no media", async () => {
+  const f = fixture("always-trigger");
+  try {
+    const chunk = Buffer.alloc(1024 * 1024, 0x61);
+    // Each object is advertised small but served at the 20 MiB per-object cap,
+    // so only the third pushes the actual total past 40 MiB.
+    f.client.downloadAttachment = async () =>
+      (async function* () {
+        for (let index = 0; index < 20; index += 1) yield chunk;
+      })();
+    const message = dm("total");
+    const small = { ...message.attachments![0]!, size: 1 };
+    await receive(f, [{ ...message, attachments: [small, small, small] }]);
+    assert.equal(f.turns.length, 0);
     assert.equal(f.store.count("artifacts"), 0);
-    assert.match(f.client.texts.join("\n"), /media-invalid.*size changed/);
+    assert.match(f.client.texts.join("\n"), /media-invalid.*40 MiB total/);
+  } finally {
+    f.foundation.close();
+  }
+});
+
+test("Discord actual object over 20 MiB still rejects despite small advertised size", async () => {
+  const f = fixture("always-trigger");
+  try {
+    const chunk = Buffer.alloc(1024 * 1024, 0x61);
+    f.client.downloadAttachment = async () =>
+      (async function* () {
+        for (let index = 0; index < 21; index += 1) yield chunk;
+      })();
+    await receive(f, [dm("huge")]);
+    assert.equal(f.turns.length, 0);
+    assert.equal(f.store.count("artifacts"), 0);
+    assert.match(f.client.texts.join("\n"), /media-invalid.*20 MiB limit/);
   } finally {
     f.foundation.close();
   }
